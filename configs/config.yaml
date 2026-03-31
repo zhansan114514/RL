@@ -22,8 +22,8 @@ step01:
   reward_threshold: 0.0
   max_tokens: 256
   temperature: 0.7
-  actor_device: 13
-  critic_device: 13
+  actor_device: 0
+  critic_device: 0
   dtype: "float32"
   gpu_memory_utilization: 0.45
 
@@ -65,8 +65,8 @@ step05:
   num_rounds: 5
   max_tokens: 256
   temperature: 0.7
-  actor_device: 13
-  critic_device: 13
+  actor_device: 0
+  critic_device: 0
   dtype: "float32"
   gpu_memory_utilization: 0.45
 

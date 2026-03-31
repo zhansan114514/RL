@@ -58,6 +58,8 @@ def estimate_final_accuracy(
         Estimated accuracy (float in [0, 1]) - the proportion of simulations
         that led to the correct answer.
     """
+    from src.prompts.templates import PromptType
+    from src.prompts.formatter import format_prompt
     from src.reward.accuracy import extract_answer, normalize_answer
 
     correct_answer = normalize_answer(sample.get("answer", ""))
@@ -67,17 +69,10 @@ def estimate_final_accuracy(
     correct_count = 0
 
     for _ in range(num_simulations):
-        # For one-step roll-out from current state, we include:
-        # - previous responses (rounds 0 to t-1)
-        # - current actor response (round t)
-        # The current critic response is implicitly part of the state context
         sim_responses = list(previous_responses) + [current_actor_response]
         sim_actor_resp = current_actor_response
 
         for r in range(remaining_rounds):
-            # Actor generates next response
-            from src.prompts.templates import PromptType
-            from src.prompts.formatter import format_prompt
 
             actor_prompt = format_prompt(
                 dataset_name, PromptType.DELIBERATION_ACTOR, sample,

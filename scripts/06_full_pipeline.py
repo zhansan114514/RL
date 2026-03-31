@@ -8,24 +8,16 @@ Usage:
 
 from __future__ import annotations
 
-import argparse
-import importlib
+import json
 import logging
 import os
-import sys
 
-# Add project root to path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from _utils import resolve_config, setup_logging
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+setup_logging()
 logger = logging.getLogger(__name__)
 
-
 ALLOWED_DATASETS = ("boolq", "mmlu", "bbh", "sciq", "arc")
-
 COMMON_KEYS = ("model_name", "dataset", "max_samples", "seed", "use_wandb")
 
 STEP_DEFAULTS = {
@@ -45,63 +37,27 @@ STEP_DEFAULTS = {
     "max_samples": None,
     "skip_training": False,
     "use_wandb": False,
+    "actor_device": 0,
+    "critic_device": 0,
+    "dtype": "float32",
+    "gpu_memory_utilization": 0.8,
 }
 
 
-def _load_yaml_config(config_path: str) -> dict:
-    """Load YAML config for pipeline runtime arguments."""
-    omegaconf_module = importlib.import_module("omegaconf")
-    OmegaConf = omegaconf_module.OmegaConf
-
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-
-    loaded = OmegaConf.load(config_path)
-    cfg = OmegaConf.to_container(loaded, resolve=True)
-    if cfg is None:
-        return {}
-    if not isinstance(cfg, dict):
-        raise ValueError("Config file must contain a top-level key-value mapping.")
-    return cfg
-
-
-def _resolve_config(config_path: str) -> argparse.Namespace:
-    cfg = _load_yaml_config(config_path)
-    common_cfg = cfg.get("common", {})
-    step_cfg = cfg.get("step06", {})
-
-    if not isinstance(common_cfg, dict):
-        raise ValueError("Config key 'common' must be a mapping.")
-    if not isinstance(step_cfg, dict):
-        raise ValueError("Config key 'step06' must be a mapping.")
-
-    merged = dict(STEP_DEFAULTS)
-
-    for key in COMMON_KEYS:
-        if key in common_cfg and common_cfg[key] is not None:
-            merged[key] = common_cfg[key]
-
-    for key in STEP_DEFAULTS:
-        if key in step_cfg and step_cfg[key] is not None:
-            merged[key] = step_cfg[key]
-
-    if merged["dataset"] not in ALLOWED_DATASETS:
-        raise ValueError(
-            f"Invalid dataset '{merged['dataset']}'. "
-            f"Expected one of: {', '.join(ALLOWED_DATASETS)}"
-        )
-
-    return argparse.Namespace(config=config_path, **merged)
-
-
 def parse_args():
-    parser = argparse.ArgumentParser(description="ACC-Collab Pipeline")
+    parser = __import__("argparse").ArgumentParser(
+        description="ACC-Collab Pipeline",
+    )
     parser.add_argument(
         "--config", type=str, default="configs/config.yaml",
         help="YAML config path.",
     )
     cli_args = parser.parse_args()
-    return _resolve_config(cli_args.config)
+    return resolve_config(
+        cli_args.config, "step06", STEP_DEFAULTS,
+        common_keys=COMMON_KEYS,
+        allowed_datasets=ALLOWED_DATASETS,
+    )
 
 
 def main():
@@ -144,7 +100,6 @@ def main():
         from src.training.alternating import alternating_train
         from src.utils.model_utils import detect_model_type
 
-        # Detect model type from name
         model_type = detect_model_type(args.model_name)
 
         result = alternating_train(
@@ -166,8 +121,10 @@ def main():
             seed=args.seed,
             val_dataset=val_data if val_data else None,
             early_stopping_patience=getattr(args, "early_stopping_patience", None),
-            actor_device=getattr(args, "actor_device", 0),
-            critic_device=getattr(args, "critic_device", 0),
+            actor_device=args.actor_device,
+            critic_device=args.critic_device,
+            dtype=args.dtype,
+            gpu_memory_utilization=args.gpu_memory_utilization,
         )
         actor_path = result["actor_path"]
         critic_path = result["critic_path"]
@@ -182,9 +139,18 @@ def main():
     from src.inference.vllm_server import VLLMInference
     from src.evaluation.benchmarks import evaluate_benchmark
 
-    # Use multi-GPU for evaluation: actor on GPU 0, critic on GPU 1
-    actor_model = VLLMInference(actor_path, gpu_memory_utilization=0.8, cuda_device=0)
-    critic_model = VLLMInference(critic_path, gpu_memory_utilization=0.8, cuda_device=1)
+    actor_model = VLLMInference(
+        actor_path,
+        cuda_device=args.actor_device,
+        dtype=args.dtype,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+    )
+    critic_model = VLLMInference(
+        critic_path,
+        cuda_device=args.critic_device,
+        dtype=args.dtype,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+    )
 
     results = evaluate_benchmark(
         actor_model, critic_model, test_data, args.dataset,
@@ -195,8 +161,6 @@ def main():
     for k, v in results.items():
         logger.info(f"  {k}: {v}")
 
-    # Save results
-    import json
     results_path = os.path.join(args.output_dir, "results.json")
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)

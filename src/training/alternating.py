@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
+import traceback
 from typing import Optional
 
 import torch
@@ -20,6 +22,93 @@ from src.trajectory.preference import build_preference_dataset, to_hf_dataset
 from src.training.dpo_trainer import train_dpo
 
 logger = logging.getLogger(__name__)
+
+
+def _cleanup_gpu() -> None:
+    """Release GPU memory."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _generate_pairs_and_train(
+    agent: str,
+    actor_model,
+    critic_model,
+    dataset: list[dict],
+    dataset_name: str,
+    current_model_path: str,
+    output_base_dir: str,
+    iteration: int,
+    model_type: str,
+    *,
+    num_rounds: int = 5,
+    reward_threshold: float = 0.0,
+    num_simulations: int = 5,
+    max_tokens: int = 256,
+    temperature: float = 0.7,
+    seed: int = 42,
+    lora_r: int = 256,
+    learning_rate: float = 5e-5,
+    batch_size: int = 4,
+    num_epochs: int = 1,
+    beta: float = 0.1,
+) -> str:
+    """Run trajectory generation + DPO training for one agent.
+
+    Returns the output path of the trained model.
+    """
+    pairs = []
+    for i, sample in enumerate(dataset):
+        logger.info(f"  Generating trajectories: {i+1}/{len(dataset)}")
+        try:
+            batch = generate_trajectories(
+                actor_model, critic_model, sample, dataset_name,
+                num_rounds=num_rounds,
+                reward_threshold=reward_threshold,
+                num_simulations=num_simulations,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                seed=seed,
+            )
+            pairs.extend(batch)
+        except Exception as e:
+            logger.warning(f"  Sample {i} failed: {e}")
+            logger.debug(f"  Traceback:\n{traceback.format_exc()}")
+            continue
+
+    if not pairs:
+        logger.error(f"No {agent} pairs generated from dataset!")
+        logger.error("This may indicate a problem with:")
+        logger.error("  - Data loading (check if dataset is not empty)")
+        logger.error("  - Model inference (check if models are working correctly)")
+        logger.error("  - Reward estimation (check if MC roll-out is functioning)")
+        raise ValueError(
+            f"No {agent} preference pairs generated in iteration {iteration}. "
+            "Cannot continue training without data."
+        )
+
+    prefs = build_preference_dataset(pairs, agent=agent)
+    hf_dataset = to_hf_dataset(prefs)
+
+    logger.info(f"Cleaning up GPU memory before {agent} training...")
+    _cleanup_gpu()
+
+    output_dir = os.path.join(output_base_dir, f"{agent}_iter{iteration}")
+    result_path = train_dpo(
+        model_name_or_path=current_model_path,
+        preference_dataset=hf_dataset,
+        output_dir=output_dir,
+        model_type=model_type,
+        lora_r=lora_r,
+        learning_rate=learning_rate,
+        batch_size=batch_size,
+        num_epochs=num_epochs,
+        beta=beta,
+        seed=seed,
+    )
+    logger.info(f"{agent.capitalize()} saved: {result_path}")
+    return result_path
 
 
 def alternating_train(
@@ -46,6 +135,8 @@ def alternating_train(
     min_improvement: float = 0.0,
     actor_device: int = 0,
     critic_device: int = 1,
+    dtype: str = "auto",
+    gpu_memory_utilization: float = 0.45,
 ) -> dict[str, str]:
     """
     Run alternating Actor-Critic training.
@@ -70,14 +161,16 @@ def alternating_train(
         temperature: Sampling temperature.
         seed: Random seed.
         val_dataset: Optional validation dataset for performance monitoring.
-        early_stopping_patience: Optional patience for early stopping (if val_dataset provided).
+        early_stopping_patience: Optional patience for early stopping.
         min_improvement: Minimum improvement threshold to reset patience.
+        actor_device: CUDA device index for actor.
+        critic_device: CUDA device index for critic.
+        dtype: Model dtype for inference.
+        gpu_memory_utilization: GPU memory fraction for vLLM.
 
     Returns:
-        Dict with final actor_path, critic_path, and validation_metrics (if val_dataset provided).
+        Dict with final actor_path, critic_path, and validation_metrics.
     """
-    import os
-
     from src.inference.vllm_server import VLLMInference
 
     current_actor_path = actor_path
@@ -93,66 +186,36 @@ def alternating_train(
 
         # Step 1: Train critic (fix actor)
         logger.info("Step 1: Training Critic (actor fixed)")
-        actor_model = VLLMInference(current_actor_path, gpu_memory_utilization=0.45,
-                                     cuda_device=actor_device)
-        critic_model = VLLMInference(current_critic_path, gpu_memory_utilization=0.45,
-                                      cuda_device=critic_device)
+        actor_model = VLLMInference(
+            current_actor_path,
+            gpu_memory_utilization=gpu_memory_utilization,
+            cuda_device=actor_device,
+            dtype=dtype,
+        )
+        critic_model = VLLMInference(
+            current_critic_path,
+            gpu_memory_utilization=gpu_memory_utilization,
+            cuda_device=critic_device,
+            dtype=dtype,
+        )
 
-        critic_pairs = []
-        for i, sample in enumerate(dataset):
-            logger.info(f"  Generating trajectories: {i+1}/{len(dataset)}")
-            try:
-                pairs = generate_trajectories(
-                    actor_model, critic_model, sample, dataset_name,
-                    num_rounds=num_rounds,
-                    reward_threshold=reward_threshold,
-                    num_simulations=num_simulations,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    seed=seed,
-                )
-                critic_pairs.extend(pairs)
-            except Exception as e:
-                import traceback
-                logger.warning(f"  Sample {i} failed: {e}")
-                logger.debug(f"  Traceback:\n{traceback.format_exc()}")
-                continue
-
-        if critic_pairs:
-            critic_prefs = build_preference_dataset(critic_pairs, agent="critic")
-            critic_hf = to_hf_dataset(critic_prefs)
-
-            # Clean up GPU memory before training
-            logger.info("Cleaning up GPU memory before critic training...")
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            critic_output = os.path.join(
-                output_base_dir, f"critic_iter{iteration}")
-            current_critic_path = train_dpo(
-                model_name_or_path=current_critic_path,
-                preference_dataset=critic_hf,
-                output_dir=critic_output,
-                model_type=model_type,
-                lora_r=lora_r,
-                learning_rate=learning_rate,
-                batch_size=batch_size,
-                num_epochs=num_epochs,
-                beta=beta,
-                seed=seed,
-            )
-            logger.info(f"Critic saved: {current_critic_path}")
-        else:
-            logger.error("No critic pairs generated from dataset!")
-            logger.error("This may indicate a problem with:")
-            logger.error("  - Data loading (check if dataset is not empty)")
-            logger.error("  - Model inference (check if models are working correctly)")
-            logger.error("  - Reward estimation (check if MC roll-out is functioning)")
-            raise ValueError(
-                f"No critic preference pairs generated in iteration {iteration}. "
-                "Cannot continue training without data."
-            )
+        current_critic_path = _generate_pairs_and_train(
+            "critic",
+            actor_model, critic_model, dataset, dataset_name,
+            current_critic_path, output_base_dir, iteration,
+            model_type,
+            num_rounds=num_rounds,
+            reward_threshold=reward_threshold,
+            num_simulations=num_simulations,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            seed=seed,
+            lora_r=lora_r,
+            learning_rate=learning_rate,
+            batch_size=batch_size,
+            num_epochs=num_epochs,
+            beta=beta,
+        )
 
         # Clean up models to free GPU memory before next phase
         logger.info("Cleaning up models after critic training phase...")
@@ -162,66 +225,36 @@ def alternating_train(
 
         # Step 2: Train actor (fix critic)
         logger.info("Step 2: Training Actor (critic fixed)")
-        actor_model = VLLMInference(current_actor_path, gpu_memory_utilization=0.8,
-                                     cuda_device=actor_device)
-        critic_model = VLLMInference(current_critic_path, gpu_memory_utilization=0.8,
-                                      cuda_device=critic_device)
+        actor_model = VLLMInference(
+            current_actor_path,
+            gpu_memory_utilization=gpu_memory_utilization,
+            cuda_device=actor_device,
+            dtype=dtype,
+        )
+        critic_model = VLLMInference(
+            current_critic_path,
+            gpu_memory_utilization=gpu_memory_utilization,
+            cuda_device=critic_device,
+            dtype=dtype,
+        )
 
-        actor_pairs = []
-        for i, sample in enumerate(dataset):
-            logger.info(f"  Generating trajectories: {i+1}/{len(dataset)}")
-            try:
-                pairs = generate_trajectories(
-                    actor_model, critic_model, sample, dataset_name,
-                    num_rounds=num_rounds,
-                    reward_threshold=reward_threshold,
-                    num_simulations=num_simulations,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    seed=seed,
-                )
-                actor_pairs.extend(pairs)
-            except Exception as e:
-                import traceback
-                logger.warning(f"  Sample {i} failed: {e}")
-                logger.debug(f"  Traceback:\n{traceback.format_exc()}")
-                continue
-
-        if actor_pairs:
-            actor_prefs = build_preference_dataset(actor_pairs, agent="actor")
-            actor_hf = to_hf_dataset(actor_prefs)
-
-            # Clean up GPU memory before training
-            logger.info("Cleaning up GPU memory before actor training...")
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-            actor_output = os.path.join(
-                output_base_dir, f"actor_iter{iteration}")
-            current_actor_path = train_dpo(
-                model_name_or_path=current_actor_path,
-                preference_dataset=actor_hf,
-                output_dir=actor_output,
-                model_type=model_type,
-                lora_r=lora_r,
-                learning_rate=learning_rate,
-                batch_size=batch_size,
-                num_epochs=num_epochs,
-                beta=beta,
-                seed=seed,
-            )
-            logger.info(f"Actor saved: {current_actor_path}")
-        else:
-            logger.error("No actor pairs generated from dataset!")
-            logger.error("This may indicate a problem with:")
-            logger.error("  - Data loading (check if dataset is not empty)")
-            logger.error("  - Model inference (check if models are working correctly)")
-            logger.error("  - Reward estimation (check if MC roll-out is functioning)")
-            raise ValueError(
-                f"No actor preference pairs generated in iteration {iteration}. "
-                "Cannot continue training without data."
-            )
+        current_actor_path = _generate_pairs_and_train(
+            "actor",
+            actor_model, critic_model, dataset, dataset_name,
+            current_actor_path, output_base_dir, iteration,
+            model_type,
+            num_rounds=num_rounds,
+            reward_threshold=reward_threshold,
+            num_simulations=num_simulations,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            seed=seed,
+            lora_r=lora_r,
+            learning_rate=learning_rate,
+            batch_size=batch_size,
+            num_epochs=num_epochs,
+            beta=beta,
+        )
 
         # Clean up models before validation
         logger.info("Cleaning up models after actor training phase...")
@@ -232,12 +265,21 @@ def alternating_train(
         # Validation set evaluation (if provided)
         if val_dataset is not None:
             logger.info(f"Evaluating on validation set ({len(val_dataset)} samples)...")
-            actor_model = VLLMInference(current_actor_path, gpu_memory_utilization=0.8,
-                                         cuda_device=actor_device)
-            critic_model = VLLMInference(current_critic_path, gpu_memory_utilization=0.8,
-                                          cuda_device=critic_device)
-
             from src.evaluation.benchmarks import evaluate_benchmark
+
+            actor_model = VLLMInference(
+                current_actor_path,
+                gpu_memory_utilization=gpu_memory_utilization,
+                cuda_device=actor_device,
+                dtype=dtype,
+            )
+            critic_model = VLLMInference(
+                current_critic_path,
+                gpu_memory_utilization=gpu_memory_utilization,
+                cuda_device=critic_device,
+                dtype=dtype,
+            )
+
             val_results = evaluate_benchmark(
                 actor_model, critic_model, val_dataset, dataset_name,
                 num_rounds=num_rounds, max_tokens=max_tokens,
