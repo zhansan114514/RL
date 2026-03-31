@@ -249,7 +249,7 @@ class TestAlternatingTrainModelPathsFixVerification:
 
         mock_model = MagicMock()
         vllm_calls = []
-        def track_vllm(path):
+        def track_vllm(path, **kwargs):
             vllm_calls.append(path)
             return mock_model
         mock_vllm.side_effect = track_vllm

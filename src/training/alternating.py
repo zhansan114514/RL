@@ -9,8 +9,11 @@ Implements the iterative best-response optimization:
 
 from __future__ import annotations
 
+import gc
 import logging
 from typing import Optional
+
+import torch
 
 from src.trajectory.generator import generate_trajectories
 from src.trajectory.preference import build_preference_dataset, to_hf_dataset
@@ -41,6 +44,8 @@ def alternating_train(
     val_dataset: Optional[list[dict]] = None,
     early_stopping_patience: Optional[int] = None,
     min_improvement: float = 0.0,
+    actor_device: int = 0,
+    critic_device: int = 1,
 ) -> dict[str, str]:
     """
     Run alternating Actor-Critic training.
@@ -88,8 +93,10 @@ def alternating_train(
 
         # Step 1: Train critic (fix actor)
         logger.info("Step 1: Training Critic (actor fixed)")
-        actor_model = VLLMInference(current_actor_path)
-        critic_model = VLLMInference(current_critic_path)
+        actor_model = VLLMInference(current_actor_path, gpu_memory_utilization=0.45,
+                                     cuda_device=actor_device)
+        critic_model = VLLMInference(current_critic_path, gpu_memory_utilization=0.45,
+                                      cuda_device=critic_device)
 
         critic_pairs = []
         for i, sample in enumerate(dataset):
@@ -111,6 +118,12 @@ def alternating_train(
         if critic_pairs:
             critic_prefs = build_preference_dataset(critic_pairs, agent="critic")
             critic_hf = to_hf_dataset(critic_prefs)
+
+            # Clean up GPU memory before training
+            logger.info("Cleaning up GPU memory before critic training...")
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             critic_output = os.path.join(
                 output_base_dir, f"critic_iter{iteration}")
@@ -138,8 +151,10 @@ def alternating_train(
 
         # Step 2: Train actor (fix critic)
         logger.info("Step 2: Training Actor (critic fixed)")
-        actor_model = VLLMInference(current_actor_path)
-        critic_model = VLLMInference(current_critic_path)
+        actor_model = VLLMInference(current_actor_path, gpu_memory_utilization=0.8,
+                                     cuda_device=actor_device)
+        critic_model = VLLMInference(current_critic_path, gpu_memory_utilization=0.8,
+                                      cuda_device=critic_device)
 
         actor_pairs = []
         for i, sample in enumerate(dataset):
@@ -161,6 +176,12 @@ def alternating_train(
         if actor_pairs:
             actor_prefs = build_preference_dataset(actor_pairs, agent="actor")
             actor_hf = to_hf_dataset(actor_prefs)
+
+            # Clean up GPU memory before training
+            logger.info("Cleaning up GPU memory before actor training...")
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             actor_output = os.path.join(
                 output_base_dir, f"actor_iter{iteration}")
@@ -189,8 +210,10 @@ def alternating_train(
         # Validation set evaluation (if provided)
         if val_dataset is not None:
             logger.info(f"Evaluating on validation set ({len(val_dataset)} samples)...")
-            actor_model = VLLMInference(current_actor_path)
-            critic_model = VLLMInference(current_critic_path)
+            actor_model = VLLMInference(current_actor_path, gpu_memory_utilization=0.8,
+                                         cuda_device=actor_device)
+            critic_model = VLLMInference(current_critic_path, gpu_memory_utilization=0.8,
+                                          cuda_device=critic_device)
 
             from src.evaluation.benchmarks import evaluate_benchmark
             val_results = evaluate_benchmark(

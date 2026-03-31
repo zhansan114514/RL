@@ -17,3 +17,5 @@ step06:
   num_simulations: 2
   reward_threshold: 0.0
   skip_training: false
+  actor_device: 0
+  critic_device: 0

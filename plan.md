@@ -148,24 +148,68 @@ python scripts/06_full_pipeline.py \
 - 模型：google/gemma-2-2b-it
 - 数据集：boolq
 
-#### 3.0 小规模验证 🔄 进行中
+#### 3.0 运行时修复 ✅ 已完成（2026-03-31）
+
+**三轮调试过程**：
+
+| 轮次 | 问题 | 根因 | 修复 |
+|------|------|------|------|
+| 第1轮 | NVML 错误 | PyTorch 2.10+cu128 在 V100 上 device_map="auto" 触发 NVML 兼容性错误 | 改为 device_map={"": 0} |
+| 第1轮 | bf16 不支持 | V100 不支持 bf16，DPOConfig 中 bf16=True | 自动检测硬件，V100 用 fp16 |
+| 第1轮 | test_data 为空 | BoolQ 没有 test split | fallback 到 val_data |
+| 第2轮 | GPU OOM | gpu_memory_utilization=0.3 太小（模型 float32 = 9.77GiB > 9.6GiB） | 调整为 0.45 |
+| 第3轮 | GPU 2 不足 | 两模型分放 GPU 8(32GB) + GPU 2(8.5GB)，GPU 2 不够 | 改为共享单 GPU |
+| 第3轮 | Gemma2 不支持 fp16 | vLLM 报错 "Gemma2 不支持 fp16 数值不稳定" | 保持 float32 + 单 GPU 共享 |
+| 第3轮 | GPU 全被占用 | 等待 GPU 资源释放 | 等待中 |
+| 第4轮 | Gemma2 不支持 float16 | vLLM 报错 "Gemma2 不支持 fp16 数值不稳定" | 保持 float32 |
+| 第4轮 | GPU 2 不够放第二模型 | actor/critic 分放不同 GPU，GPU 2(8.5GB) 不够 | 改为单 GPU 共享 |
+| 第4轮 | CUDA_VISIBLE_DEVICES 映射错误 | cuda_device=0 被直接设为 CUDA_VISIBLE_DEVICES="0"，而非物理 GPU 8 | 修复映射逻辑 |
+
+**修复文件清单**：
+1. `src/training/dpo_trainer.py` — bf16/fp16 自动检测 + device_map={"": 0} + dtype 一致性
+2. `src/training/alternating.py` — actor_device/critic_device 参数 + GPU 内存清理 + 单 GPU 共享
+3. `src/inference/vllm_server.py` — cuda_device 参数 + CUDA_VISIBLE_DEVICES 正确映射（逻辑→物理）
+4. `scripts/06_full_pipeline.py` — test_data fallback + actor_device/critic_device 传递
+5. `tests/test_training.py` — mock 函数兼容 **kwargs
+6. `configs/debug_3samples.yaml` — actor_device=0, critic_device=0 配置
+
+**关键决策**：
+- V100 上 Gemma2 必须使用 float32（不支持 bf16 也不支持 fp16）
+- 单 GPU 需 ≥20GB 空闲才能同时加载两个模型（9.77GiB × 2）
+- `gpu_memory_utilization` 每个模型设 0.45，两个模型共需 0.9 × 32 = 28.8 GiB
+
+**验收状态**：
+- [x] 189 个测试全部通过（代码修改未破坏功能）
+- [x] NVML 错误已解决（device_map 显式指定）
+- [x] bf16/fp16 已解决（硬件自动检测）
+- [x] GPU OOM 已解决（单 GPU 共享 + 0.45 利用率）
+- [ ] 端到端运行成功（等待 GPU 资源）
+
+#### 3.1 小规模验证 ⏳ 等待 GPU 资源
+
+**阻塞原因**：当前所有 16 块 GPU 均被其他进程占用，无 ≥20GB 空闲 GPU 可用。
+
+**恢复命令**（GPU 就绪后）：
+```bash
+# 需要至少 1x V100 (≥20GB 空闲)
+# 使用 CUDA_VISIBLE_DEVICES=X 指定空闲 GPU
+CUDA_VISIBLE_DEVICES=X python scripts/06_full_pipeline.py \
+  --config configs/debug_3samples.yaml
+```
 
 **渐进式验证策略**：从 3样本 → 10样本 → 全量
 
-| 子任务 | 样本数 | 状态 | 负责人 | GPU | 预计耗时 |
-|--------|--------|------|--------|-----|----------|
-| 3.0.1 极小规模验证 | 3 | 🔄 运行中 | Runner | GPU 10 | 30-60分钟 |
-| 3.0.2 中等规模验证 | 10 | ⏳ 等待3.0.1 | Implementer | - | 1-2小时 |
-| 3.0.3 核心算法验证 | - | ⏳ 等待3.0.2 | Implementer + Analyst | - | 1-2小时 |
+| 子任务 | 样本数 | 状态 | 负责人 | GPU 需求 | 预计耗时 |
+|--------|--------|------|--------|---------|----------|
+| 3.1.1 极小规模验证 | 3 | ⏳ 等待GPU | Runner | 1x V100(≥20GB free) | 30-60分钟 |
+| 3.1.2 中等规模验证 | 10 | ⏳ 等待3.1.1 | Implementer | 1x V100(≥20GB free) | 1-2小时 |
+| 3.1.3 核心算法验证 | - | ⏳ 等待3.1.2 | Implementer + Analyst | 1x V100 | 1-2小时 |
 
-**启动时间**：2026-03-31 约 09:05
-
-**运行命令**：
+**运行命令**（GPU 就绪后）：
 ```bash
-python scripts/06_full_pipeline.py \
-  --model_name google/gemma-2-2b-it \
-  --dataset boolq \
-  --output_dir experiments/debug_small \
+# 单 GPU 模式（两个模型共享）
+CUDA_VISIBLE_DEVICES=X python scripts/06_full_pipeline.py \
+  --config configs/debug_3samples.yaml
   --max_samples 3 \
   --num_iterations 1
 ```

@@ -131,6 +131,11 @@ def main():
         val_data = val_data[:args.max_samples]
         test_data = test_data[:args.max_samples]
 
+    # Fallback: if no test split, use validation set
+    if not test_data and val_data:
+        logger.warning("No test split found, using validation set for evaluation.")
+        test_data = val_data
+
     logger.info(f"  Train: {len(train_data)}, Val: {len(val_data)}, Test: {len(test_data)}")
 
     if not args.skip_training:
@@ -161,6 +166,8 @@ def main():
             seed=args.seed,
             val_dataset=val_data if val_data else None,
             early_stopping_patience=getattr(args, "early_stopping_patience", None),
+            actor_device=getattr(args, "actor_device", 0),
+            critic_device=getattr(args, "critic_device", 0),
         )
         actor_path = result["actor_path"]
         critic_path = result["critic_path"]
@@ -175,8 +182,9 @@ def main():
     from src.inference.vllm_server import VLLMInference
     from src.evaluation.benchmarks import evaluate_benchmark
 
-    actor_model = VLLMInference(actor_path)
-    critic_model = VLLMInference(critic_path)
+    # Use multi-GPU for evaluation: actor on GPU 0, critic on GPU 1
+    actor_model = VLLMInference(actor_path, gpu_memory_utilization=0.8, cuda_device=0)
+    critic_model = VLLMInference(critic_path, gpu_memory_utilization=0.8, cuda_device=1)
 
     results = evaluate_benchmark(
         actor_model, critic_model, test_data, args.dataset,

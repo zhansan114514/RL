@@ -7,8 +7,11 @@ with NLL regularization as in Pang et al. (2024a) IRPO.
 
 from __future__ import annotations
 
+import gc
 import logging
 from typing import Optional
+
+import torch
 
 from src.training.lora_config import get_lora_config
 
@@ -64,11 +67,22 @@ def train_dpo(
 
     lora_config = get_lora_config(model_type, r=lora_r, lora_alpha=lora_alpha)
 
+    # Detect hardware capabilities for dtype selection
+    # Use including_emulation=False: V100 (cc 7.0) doesn't truly support bf16
+    # and emulation mode has no speed benefit over fp32.
+    use_bf16 = (
+        torch.cuda.is_available()
+        and torch.cuda.is_bf16_supported(including_emulation=False)
+    )
+    torch_dtype = torch.bfloat16 if use_bf16 else torch.float16
+    logger.info(f"Using dtype: {torch_dtype} (bf16 supported: {use_bf16})")
+
     logger.info(f"Loading model: {model_name_or_path}")
     model = AutoModelForCausalLM.from_pretrained(
         model_name_or_path,
-        torch_dtype="auto",
-        device_map="auto",
+        torch_dtype=torch_dtype,
+        device_map={"": 0},
+        low_cpu_mem_usage=True,
     )
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
     if tokenizer.pad_token is None:
@@ -87,7 +101,8 @@ def train_dpo(
         seed=seed,
         logging_steps=10,
         save_strategy="epoch",
-        bf16=True,
+        bf16=use_bf16,
+        fp16=not use_bf16,
         remove_unused_columns=False,
         report_to="wandb" if use_wandb else "none",
         run_name=wandb_project if use_wandb else None,
@@ -113,8 +128,6 @@ def train_dpo(
 
     # Merge LoRA weights into base model
     import os
-    import gc
-    import torch
 
     if os.path.exists(os.path.join(adapter_dir, "adapter_config.json")):
         logger.info("Merging LoRA weights into base model...")
@@ -122,7 +135,7 @@ def train_dpo(
 
         base_model = AutoModelForCausalLM.from_pretrained(
             model_name_or_path,
-            torch_dtype="auto",
+            torch_dtype=torch_dtype,
             device_map="cpu",
         )
         merged_model = PeftModel.from_pretrained(base_model, adapter_dir)

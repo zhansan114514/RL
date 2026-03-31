@@ -5,13 +5,19 @@ vLLM-based inference service for actor and critic models.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 
 class VLLMInference:
-    """Inference engine using vLLM for efficient LLM serving."""
+    """Inference engine using vLLM for efficient LLM serving.
+
+    Supports multi-GPU placement via the ``cuda_device`` parameter.
+    When set, vLLM's engine child process will be restricted to that
+    physical GPU by temporarily overriding ``CUDA_VISIBLE_DEVICES``.
+    """
 
     def __init__(
         self,
@@ -21,18 +27,21 @@ class VLLMInference:
         max_model_len: int = 1024,
         dtype: str = "auto",
         trust_remote_code: bool = True,
+        cuda_device: Optional[int] = None,
     ):
         self.model_name = model_name
         self._llm = None
         self._tokenizer = None
+        self._cuda_device = cuda_device
+
         self._init_kwargs = {
             "tensor_parallel_size": tensor_parallel_size,
             "gpu_memory_utilization": gpu_memory_utilization,
             "max_model_len": max_model_len,
             "dtype": dtype,
             "trust_remote_code": trust_remote_code,
-            "enforce_eager": True,  # Disable CUDA graphs to reduce memory
-            "disable_log_stats": True,  # Reduce logging overhead
+            "enforce_eager": True,
+            "disable_log_stats": True,
         }
 
     def _ensure_loaded(self) -> None:
@@ -43,9 +52,41 @@ class VLLMInference:
             from vllm import LLM
         except ImportError:
             raise ImportError("vLLM required. pip install vllm")
-        logger.info(f"Loading model: {self.model_name}")
+
+        # Map logical device index to the corresponding physical GPU ID.
+        # e.g. if CUDA_VISIBLE_DEVICES="2,3" and cuda_device=1,
+        # we want physical GPU 3, so set CUDA_VISIBLE_DEVICES="3".
+        _prev_cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES")
+        if self._cuda_device is not None:
+            if _prev_cuda_vis:
+                visible = [d.strip() for d in _prev_cuda_vis.split(",")]
+            else:
+                import torch
+                visible = [str(i) for i in range(torch.cuda.device_count())]
+
+            if self._cuda_device >= len(visible):
+                raise ValueError(
+                    f"cuda_device={self._cuda_device} but only {len(visible)} "
+                    f"GPUs visible (CUDA_VISIBLE_DEVICES={_prev_cuda_vis})"
+                )
+            target_physical = visible[self._cuda_device]
+            os.environ["CUDA_VISIBLE_DEVICES"] = target_physical
+            logger.info(
+                f"Loading model on physical GPU {target_physical} "
+                f"(logical device {self._cuda_device}): {self.model_name}"
+            )
+        else:
+            logger.info(f"Loading model: {self.model_name}")
+
         self._llm = LLM(self.model_name, **self._init_kwargs)
         self._tokenizer = self._llm.get_tokenizer()
+
+        # Restore original CUDA_VISIBLE_DEVICES (child process already started).
+        if self._cuda_device is not None:
+            if _prev_cuda_vis is not None:
+                os.environ["CUDA_VISIBLE_DEVICES"] = _prev_cuda_vis
+            else:
+                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
 
     def generate(
         self,
