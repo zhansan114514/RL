@@ -1,0 +1,5 @@
+data:
+  name: "sciq"
+  hf_id: "sciq"
+  task_type: "multiple_choice"
+  answer_key: "correct_answer"

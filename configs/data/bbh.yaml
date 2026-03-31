@@ -1,0 +1,6 @@
+data:
+  name: "bbh"
+  hf_id: "lukaemon/bbh"
+  task_type: "mixed"
+  test_ratio: 0.25   # ~1260 题
+  val_ratio: 0.10    # ~500 题

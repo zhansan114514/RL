@@ -1,0 +1,5 @@
+data:
+  name: "boolq"
+  hf_id: "google/boolq"  # or "boolq"
+  task_type: "yes_no"
+  answer_key: "answer"

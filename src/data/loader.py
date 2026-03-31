@@ -1,0 +1,156 @@
+"""Dataset loading for BoolQ, MMLU, BBH, SCIQ, ARC benchmarks."""
+
+from __future__ import annotations
+
+import logging
+from typing import Optional
+
+from datasets import load_dataset as hf_load_dataset, DatasetDict
+
+from src.data.preprocessor import standardize_sample
+
+logger = logging.getLogger(__name__)
+
+# Supported datasets with their HuggingFace IDs and task types
+DATASET_REGISTRY = {
+    "boolq": {
+        "hf_id": "google/boolq",
+        "task_type": "yes_no",
+        "splits": ["train", "validation"],
+    },
+    "mmlu": {
+        "hf_id": "cais/mmlu",
+        "task_type": "multiple_choice",
+        "splits": ["test", "validation", "dev"],
+        "config_name": "all",
+    },
+    "bbh": {
+        "hf_id": "lukaemon/bbh",
+        "task_type": "mixed",
+        "splits": None,  # BBH needs custom splitting
+    },
+    "sciq": {
+        "hf_id": "sciq",
+        "task_type": "multiple_choice",
+        "splits": ["train", "validation", "test"],
+    },
+    "arc": {
+        "hf_id": "allenai/ai2_arc",
+        "task_type": "multiple_choice",
+        "splits": ["train", "validation", "test"],
+        "config_name": "ARC-Challenge",
+    },
+}
+
+
+def load_dataset(
+    name: str,
+    split_ratios: Optional[dict[str, float]] = None,
+    seed: int = 42,
+    cache_dir: Optional[str] = None,
+) -> dict[str, list[dict]]:
+    """
+    Load and standardize a benchmark dataset.
+
+    Args:
+        name: Dataset name (boolq, mmlu, bbh, sciq, arc).
+        split_ratios: Custom split ratios (only for BBH).
+        seed: Random seed for reproducibility.
+        cache_dir: HuggingFace cache directory.
+
+    Returns:
+        Dictionary with 'train', 'validation', 'test' keys,
+        each containing a list of standardized samples.
+
+    Raises:
+        ValueError: If dataset name is not recognized.
+    """
+    if name not in DATASET_REGISTRY:
+        raise ValueError(
+            f"Unknown dataset: {name}. "
+            f"Supported: {list(DATASET_REGISTRY.keys())}"
+        )
+
+    config = DATASET_REGISTRY[name]
+    task_type = config["task_type"]
+
+    logger.info(f"Loading dataset: {name} (task_type={task_type})")
+
+    # Load from HuggingFace
+    kwargs = {"path": config["hf_id"]}
+    if config.get("config_name"):
+        kwargs["name"] = config["config_name"]
+    if cache_dir:
+        kwargs["cache_dir"] = cache_dir
+
+    raw: DatasetDict = hf_load_dataset(**kwargs)
+
+    # Handle BBH special splitting
+    if name == "bbh":
+        return _load_bbh(raw, task_type, split_ratios, seed)
+
+    # Standard datasets with existing splits
+    result = {}
+    for split_name in ["train", "validation", "test"]:
+        if split_name in raw:
+            result[split_name] = [
+                standardize_sample(sample, task_type)
+                for sample in raw[split_name]
+            ]
+            logger.info(
+                f"  {split_name}: {len(result[split_name])} samples"
+            )
+
+    return result
+
+
+def _load_bbh(
+    raw: DatasetDict,
+    task_type: str,
+    split_ratios: Optional[dict[str, float]] = None,
+    seed: int = 42,
+) -> dict[str, list[dict]]:
+    """
+    Load BBH with custom train/val/test splits.
+
+    Paper specifies: ~25% test (~1260 questions), ~10% validation (~500 questions).
+    """
+    import random
+
+    ratios = split_ratios or {"test": 0.25, "validation": 0.10}
+    rng = random.Random(seed)
+
+    # BBH in HuggingFace comes as separate configs per task
+    # Combine all tasks into one dataset
+    all_samples = []
+    if isinstance(raw, DatasetDict):
+        for task_name, task_data in raw.items():
+            for sample in task_data:
+                sample["bbh_task"] = task_name
+                all_samples.append(sample)
+    else:
+        all_samples = list(raw)
+
+    # Stratified split: sample proportionally from each task
+    rng.shuffle(all_samples)
+
+    n_total = len(all_samples)
+    n_test = int(n_total * ratios["test"])
+    n_val = int(n_total * ratios["validation"])
+
+    test_samples = all_samples[:n_test]
+    val_samples = all_samples[n_test : n_test + n_val]
+    train_samples = all_samples[n_test + n_val :]
+
+    result = {
+        "test": [standardize_sample(s, task_type) for s in test_samples],
+        "validation": [standardize_sample(s, task_type) for s in val_samples],
+        "train": [standardize_sample(s, task_type) for s in train_samples],
+    }
+
+    logger.info(
+        f"  BBH split: train={len(result['train'])}, "
+        f"val={len(result['validation'])}, test={len(result['test'])}"
+    )
+
+    return result

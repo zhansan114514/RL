@@ -1,0 +1,6 @@
+data:
+  name: "mmlu"
+  hf_id: "cais/mmlu"
+  task_type: "multiple_choice"
+  answer_key: "answer"
+  all_subsets: true
