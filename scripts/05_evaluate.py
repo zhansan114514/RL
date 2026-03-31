@@ -40,6 +40,10 @@ STEP_DEFAULTS = {
     "temperature": 0.7,
     "max_samples": None,
     "seed": 42,
+    "actor_device": 13,
+    "critic_device": 13,
+    "dtype": "float32",
+    "gpu_memory_utilization": 0.45,
 }
 
 
@@ -102,6 +106,18 @@ def main():
     args = parse_args()
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # Check if trained models exist
+    actor_path = args.actor_path
+    critic_path = args.critic_path
+    if not os.path.exists(actor_path):
+        logger.error(f"Actor model not found: {actor_path}")
+        logger.error("Please run scripts/04_train_actor.py first")
+        raise FileNotFoundError(f"Actor model not found: {actor_path}")
+    if not os.path.exists(critic_path):
+        logger.error(f"Critic model not found: {critic_path}")
+        logger.error("Please run scripts/03_train_critic.py first")
+        raise FileNotFoundError(f"Critic model not found: {critic_path}")
+
     logger.info(f"Loading dataset: {args.dataset}")
     from src.data.loader import load_dataset
 
@@ -113,10 +129,21 @@ def main():
 
     logger.info(f"Loading actor: {args.actor_path}")
     logger.info(f"Loading critic: {args.critic_path}")
+    logger.info(f"  Actor on GPU {args.actor_device}, Critic on GPU {args.critic_device}")
     from src.inference.vllm_server import VLLMInference
 
-    actor = VLLMInference(args.actor_path)
-    critic = VLLMInference(args.critic_path)
+    actor = VLLMInference(
+        args.actor_path,
+        cuda_device=args.actor_device,
+        dtype=args.dtype,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+    )
+    critic = VLLMInference(
+        args.critic_path,
+        cuda_device=args.critic_device,
+        dtype=args.dtype,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+    )
 
     logger.info("Evaluating...")
     from src.evaluation.benchmarks import evaluate_benchmark

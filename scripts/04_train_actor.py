@@ -100,6 +100,11 @@ def main():
     from datasets import load_from_disk
 
     pref_path = os.path.join(args.preference_dir, "actor_preferences")
+    if not os.path.exists(pref_path):
+        logger.error(f"Preference dataset not found: {pref_path}")
+        logger.error("Please run scripts/02_build_preferences.py first")
+        raise FileNotFoundError(f"Preference dataset not found: {pref_path}")
+
     logger.info(f"Loading preferences: {pref_path}")
     dataset = load_from_disk(pref_path)
     logger.info(f"  Pairs: {len(dataset)}")
@@ -123,4 +128,6 @@ def main():
 
 
 if __name__ == "__main__":
+    # Restrict to single GPU BEFORE any CUDA initialization to avoid NVML errors on V100
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
     main()

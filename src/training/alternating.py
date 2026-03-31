@@ -109,10 +109,13 @@ def alternating_train(
                     num_simulations=num_simulations,
                     max_tokens=max_tokens,
                     temperature=temperature,
+                    seed=seed,
                 )
                 critic_pairs.extend(pairs)
             except Exception as e:
+                import traceback
                 logger.warning(f"  Sample {i} failed: {e}")
+                logger.debug(f"  Traceback:\n{traceback.format_exc()}")
                 continue
 
         if critic_pairs:
@@ -141,7 +144,15 @@ def alternating_train(
             )
             logger.info(f"Critic saved: {current_critic_path}")
         else:
-            logger.warning("No critic pairs generated, skipping critic training.")
+            logger.error("No critic pairs generated from dataset!")
+            logger.error("This may indicate a problem with:")
+            logger.error("  - Data loading (check if dataset is not empty)")
+            logger.error("  - Model inference (check if models are working correctly)")
+            logger.error("  - Reward estimation (check if MC roll-out is functioning)")
+            raise ValueError(
+                f"No critic preference pairs generated in iteration {iteration}. "
+                "Cannot continue training without data."
+            )
 
         # Clean up models to free GPU memory before next phase
         logger.info("Cleaning up models after critic training phase...")
@@ -167,10 +178,13 @@ def alternating_train(
                     num_simulations=num_simulations,
                     max_tokens=max_tokens,
                     temperature=temperature,
+                    seed=seed,
                 )
                 actor_pairs.extend(pairs)
             except Exception as e:
+                import traceback
                 logger.warning(f"  Sample {i} failed: {e}")
+                logger.debug(f"  Traceback:\n{traceback.format_exc()}")
                 continue
 
         if actor_pairs:
@@ -199,7 +213,15 @@ def alternating_train(
             )
             logger.info(f"Actor saved: {current_actor_path}")
         else:
-            logger.warning("No actor pairs generated, skipping actor training.")
+            logger.error("No actor pairs generated from dataset!")
+            logger.error("This may indicate a problem with:")
+            logger.error("  - Data loading (check if dataset is not empty)")
+            logger.error("  - Model inference (check if models are working correctly)")
+            logger.error("  - Reward estimation (check if MC roll-out is functioning)")
+            raise ValueError(
+                f"No actor preference pairs generated in iteration {iteration}. "
+                "Cannot continue training without data."
+            )
 
         # Clean up models before validation
         logger.info("Cleaning up models after actor training phase...")

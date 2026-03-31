@@ -41,6 +41,10 @@ STEP_DEFAULTS = {
     "temperature": 0.7,
     "max_samples": None,
     "seed": 42,
+    "actor_device": 13,
+    "critic_device": 13,
+    "dtype": "float32",
+    "gpu_memory_utilization": 0.45,
 }
 
 
@@ -113,10 +117,21 @@ def main():
     logger.info(f"  Samples: {len(train_data)}")
 
     logger.info(f"Loading models: {args.model_name}")
+    logger.info(f"  Actor on GPU {args.actor_device}, Critic on GPU {args.critic_device}")
     from src.inference.vllm_server import VLLMInference
 
-    actor = VLLMInference(args.model_name)
-    critic = VLLMInference(args.model_name)
+    actor = VLLMInference(
+        args.model_name,
+        cuda_device=args.actor_device,
+        dtype=args.dtype,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+    )
+    critic = VLLMInference(
+        args.model_name,
+        cuda_device=args.critic_device,
+        dtype=args.dtype,
+        gpu_memory_utilization=args.gpu_memory_utilization,
+    )
 
     logger.info("Generating trajectories...")
     from src.trajectory.generator import generate_trajectories
@@ -135,7 +150,9 @@ def main():
             )
             all_pairs.extend(pairs)
         except Exception as e:
+            import traceback
             logger.warning(f"  Sample {i} failed: {e}")
+            logger.debug(f"  Traceback:\n{traceback.format_exc()}")
 
     output_path = os.path.join(args.output_dir, "trajectory_pairs.json")
     with open(output_path, "w") as f:

@@ -3,75 +3,83 @@
 
 # 通用参数：可被多个步骤复用
 common:
-	# 基座模型名称或本地路径
-	model_name: "google/gemma-2-2b-it"
-	# 数据集：boolq / mmlu / bbh / sciq / arc
-	dataset: "boolq"
-	# 随机种子
-	seed: 42
-	# 调试时限制样本数，null 表示不限制
-	max_samples: null
-	# 是否启用 WandB
-	use_wandb: false
+  # 基座模型名称或本地路径
+  model_name: "google/gemma-2-2b-it"
+  # 数据集：boolq / mmlu / bbh / sciq / arc
+  dataset: "boolq"
+  # 随机种子
+  seed: 42
+  # 调试时限制样本数，null 表示不限制
+  max_samples: 3
+  # 是否启用 WandB
+  use_wandb: false
 
 # Step 1: 生成轨迹
 step01:
-	output_dir: "experiments/gemma2_boolq/trajectories"
-	num_rounds: 5
-	num_simulations: 5
-	reward_threshold: 0.0
-	max_tokens: 256
-	temperature: 0.7
+  output_dir: "experiments/gemma2_boolq/trajectories"
+  num_rounds: 5
+  num_simulations: 5
+  reward_threshold: 0.0
+  max_tokens: 256
+  temperature: 0.7
+  actor_device: 13
+  critic_device: 13
+  dtype: "float32"
+  gpu_memory_utilization: 0.45
 
 # Step 2: 构建偏好数据
 step02:
-	input_dir: "experiments/gemma2_boolq/trajectories"
-	output_dir: "experiments/gemma2_boolq/preferences"
-	min_delta: 0.0
+  input_dir: "experiments/gemma2_boolq/trajectories"
+  output_dir: "experiments/gemma2_boolq/preferences"
+  min_delta: 0.0
 
 # Step 3: 训练 Critic
 step03:
-	preference_dir: "experiments/gemma2_boolq/preferences"
-	output_dir: "experiments/gemma2_boolq/critic"
-	# 可选：llama3 / mistral / gemma2；为 null 时自动识别
-	model_type: null
-	lora_r: 256
-	learning_rate: 5.0e-5
-	batch_size: 4
-	num_epochs: 1
-	max_length: 2048
+  preference_dir: "experiments/gemma2_boolq/preferences"
+  output_dir: "experiments/gemma2_boolq/critic"
+  # 可选：llama3 / mistral / gemma2；为 null 时自动识别
+  model_type: null
+  lora_r: 256
+  learning_rate: 5.0e-5
+  batch_size: 4
+  num_epochs: 1
+  max_length: 2048
 
 # Step 4: 训练 Actor
 step04:
-	preference_dir: "experiments/gemma2_boolq/preferences"
-	output_dir: "experiments/gemma2_boolq/actor"
-	# 可选：llama3 / mistral / gemma2；为 null 时自动识别
-	model_type: null
-	lora_r: 256
-	learning_rate: 5.0e-5
-	batch_size: 4
-	num_epochs: 1
-	max_length: 2048
+  preference_dir: "experiments/gemma2_boolq/preferences"
+  output_dir: "experiments/gemma2_boolq/actor"
+  # 可选：llama3 / mistral / gemma2；为 null 时自动识别
+  model_type: null
+  lora_r: 256
+  learning_rate: 5.0e-5
+  batch_size: 4
+  num_epochs: 1
+  max_length: 2048
 
 # Step 5: 评估
 step05:
-	actor_path: "experiments/gemma2_boolq/actor"
-	critic_path: "experiments/gemma2_boolq/critic"
-	output_dir: "experiments/gemma2_boolq/eval"
-	num_rounds: 5
-	max_tokens: 256
-	temperature: 0.7
+  actor_path: "experiments/gemma2_boolq/actor"
+  critic_path: "experiments/gemma2_boolq/critic"
+  output_dir: "experiments/gemma2_boolq/eval"
+  num_rounds: 5
+  max_tokens: 256
+  temperature: 0.7
+  actor_device: 13
+  critic_device: 13
+  dtype: "float32"
+  gpu_memory_utilization: 0.45
 
 # Step 6: 一键全流程
 step06:
-	output_dir: "experiments/gemma2_boolq"
-	# 1=ACC-Collab, 2=ACC-Collab+
-	num_iterations: 1
-	num_rounds: 5
-	lora_r: 256
-	learning_rate: 5.0e-5
-	batch_size: 4
-	num_epochs: 1
-	num_simulations: 5
-	reward_threshold: 0.0
-	skip_training: false
+  output_dir: "experiments/gemma2_boolq"
+  # 1=ACC-Collab, 2=ACC-Collab+
+  num_iterations: 1
+  num_rounds: 5
+  lora_r: 256
+  learning_rate: 5.0e-5
+  batch_size: 4
+  num_epochs: 1
+  num_simulations: 5
+  reward_threshold: 0.0
+  skip_training: false

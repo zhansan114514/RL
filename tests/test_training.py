@@ -144,32 +144,29 @@ class TestAlternatingTrainModelPaths:
     @patch("src.training.alternating.train_dpo")
     @patch("src.training.alternating.generate_trajectories")
     def test_empty_dataset_handling(self, mock_gen_traj, mock_train_dpo, mock_vllm):
-        """Empty dataset should handle gracefully."""
+        """Empty dataset should raise ValueError."""
         from src.training.alternating import alternating_train
 
         mock_model = MagicMock()
         mock_vllm.return_value = mock_model
 
-        result = alternating_train(
-            actor_path="/base/actor",
-            critic_path="/base/critic",
-            dataset=[],
-            dataset_name="boolq",
-            output_base_dir="/output",
-            num_iterations=1,
-        )
-
-        # Should return original paths when no training occurs
-        assert result["actor_path"] == "/base/actor"
-        assert result["critic_path"] == "/base/critic"
+        with pytest.raises(ValueError, match="No critic preference pairs generated"):
+            alternating_train(
+                actor_path="/base/actor",
+                critic_path="/base/critic",
+                dataset=[],
+                dataset_name="boolq",
+                output_base_dir="/output",
+                num_iterations=1,
+            )
 
     @patch("src.inference.vllm_server.VLLMInference")
     @patch("src.training.alternating.train_dpo")
     @patch("src.training.alternating.generate_trajectories")
-    def test_no_preference_pairs_skips_training(
+    def test_no_preference_pairs_raises_error(
         self, mock_gen_traj, mock_train_dpo, mock_vllm
     ):
-        """When no preference pairs generated, training should be skipped."""
+        """When no preference pairs generated, should raise ValueError."""
         from src.training.alternating import alternating_train
 
         mock_model = MagicMock()
@@ -180,14 +177,15 @@ class TestAlternatingTrainModelPaths:
             {"question": "Q?", "passage": "P.", "answer": "yes", "task_type": "yes_no"}
         ]
 
-        result = alternating_train(
-            actor_path="/base/actor",
-            critic_path="/base/critic",
-            dataset=dataset,
-            dataset_name="boolq",
-            output_base_dir="/output",
-            num_iterations=1,
-        )
+        with pytest.raises(ValueError, match="No critic preference pairs generated"):
+            alternating_train(
+                actor_path="/base/actor",
+                critic_path="/base/critic",
+                dataset=dataset,
+                dataset_name="boolq",
+                output_base_dir="/output",
+                num_iterations=1,
+            )
 
         # train_dpo should not be called when no pairs
         assert mock_train_dpo.call_count == 0

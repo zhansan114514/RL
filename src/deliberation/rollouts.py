@@ -67,6 +67,10 @@ def estimate_final_accuracy(
     correct_count = 0
 
     for _ in range(num_simulations):
+        # For one-step roll-out from current state, we include:
+        # - previous responses (rounds 0 to t-1)
+        # - current actor response (round t)
+        # The current critic response is implicitly part of the state context
         sim_responses = list(previous_responses) + [current_actor_response]
         sim_actor_resp = current_actor_response
 

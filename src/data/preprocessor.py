@@ -160,7 +160,11 @@ def standardize_sample(
     return result
 
 
-def generate_wrong_answer(correct_answer: str, choices: list[str] | None = None) -> str:
+def generate_wrong_answer(
+    correct_answer: str,
+    choices: list[str] | None = None,
+    rng: "random.Random | None" = None,
+) -> str:
     """
     Generate a wrong answer for guided trajectory (!y).
 
@@ -170,10 +174,16 @@ def generate_wrong_answer(correct_answer: str, choices: list[str] | None = None)
     Args:
         correct_answer: The correct answer.
         choices: Available choices for multiple choice tasks.
+        rng: Optional random.Random instance for reproducibility.
 
     Returns:
         A wrong answer string.
     """
+    import random
+
+    if rng is None:
+        rng = random.Random()
+
     correct = correct_answer.lower().strip()
 
     if correct in ("yes", "no"):
@@ -182,14 +192,12 @@ def generate_wrong_answer(correct_answer: str, choices: list[str] | None = None)
     if choices:
         wrong_options = [c for c in choices if c.upper() != correct.upper()]
         if wrong_options:
-            import random
-            return random.choice(wrong_options).upper()
+            return rng.choice(wrong_options).upper()
 
     # Fallback
     options = ["A", "B", "C", "D"]
     wrong = [o for o in options if o != correct.upper()]
     if wrong:
-        import random
-        return random.choice(wrong)
+        return rng.choice(wrong)
 
     return "A" if correct.upper() != "A" else "B"

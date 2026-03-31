@@ -78,6 +78,11 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     input_path = os.path.join(args.input_dir, "trajectory_pairs.json")
+    if not os.path.exists(input_path):
+        logger.error(f"Input file not found: {input_path}")
+        logger.error("Please run scripts/01_generate_trajectories.py first")
+        raise FileNotFoundError(f"Input file not found: {input_path}")
+
     logger.info(f"Loading: {input_path}")
     with open(input_path) as f:
         all_pairs = json.load(f)

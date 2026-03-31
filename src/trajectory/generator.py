@@ -27,6 +27,7 @@ def generate_trajectories(
     num_simulations: int = 5,
     max_tokens: int = 256,
     temperature: float = 0.7,
+    seed: int = 42,
 ) -> list[dict]:
     """
     Implement Algorithm 1: generate and select deliberation trajectories.
@@ -48,19 +49,24 @@ def generate_trajectories(
         num_simulations: MC roll-out simulations.
         max_tokens: Max generation tokens.
         temperature: Sampling temperature.
+        seed: Random seed for reproducibility.
 
     Returns:
         List of preference pair dicts with keys:
             positive, negative, round, delta, sample_idx
     """
+    import random
+
     from src.data.preprocessor import generate_wrong_answer
     from src.reward.accuracy import extract_answer
     from src.prompts.templates import PromptType
     from src.prompts.formatter import format_prompt
 
+    rng = random.Random(seed)
+
     correct_answer = sample.get("answer", "")
     task_type = sample.get("task_type", "yes_no")
-    wrong_answer = generate_wrong_answer(correct_answer, sample.get("choices"))
+    wrong_answer = generate_wrong_answer(correct_answer, sample.get("choices"), rng=rng)
 
     preference_pairs = []
 
@@ -73,6 +79,8 @@ def generate_trajectories(
     for t, round_data in enumerate(natural_trajectory):
         actor_response = round_data["actor_response"]
         critic_response = round_data["critic_response"]
+        actor_prompt = round_data["actor_prompt"]
+        critic_prompt = round_data["critic_prompt"]
         previous_responses = [
             r["actor_response"] for r in natural_trajectory[:t]
         ]
@@ -150,6 +158,8 @@ def generate_trajectories(
         # Build preference pairs
         if delta_y >= reward_threshold:
             preference_pairs.append({
+                "actor_prompt": actor_prompt,
+                "critic_prompt": critic_prompt,
                 "positive": z_y_actor,
                 "negative": actor_response,
                 "positive_critic": z_y_critic,
@@ -162,6 +172,8 @@ def generate_trajectories(
 
         if delta_not_y >= reward_threshold:
             preference_pairs.append({
+                "actor_prompt": actor_prompt,
+                "critic_prompt": critic_prompt,
                 "positive": actor_response,
                 "negative": z_not_y_actor,
                 "positive_critic": critic_response,
