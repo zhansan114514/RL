@@ -26,3 +26,4 @@ training:
   num_epochs: 1
   max_length: 2048
   warmup_ratio: 0.1
+  beta: 0.1  # DPO beta参数，控制从参考策略偏离的程度

@@ -29,6 +29,7 @@ def train_dpo(
     num_epochs: int = 1,
     max_length: int = 2048,
     warmup_ratio: float = 0.1,
+    beta: float = 0.1,
     seed: int = 42,
     use_wandb: bool = False,
     wandb_project: str = "acc-collab",
@@ -50,6 +51,7 @@ def train_dpo(
         num_epochs: Number of training epochs.
         max_length: Max sequence length.
         warmup_ratio: Warmup ratio.
+        beta: DPO beta parameter controlling deviation from reference policy.
         seed: Random seed.
         use_wandb: Whether to log to wandb.
         wandb_project: Wandb project name.
@@ -81,6 +83,7 @@ def train_dpo(
         learning_rate=learning_rate,
         warmup_ratio=warmup_ratio,
         max_length=max_length,
+        beta=beta,
         seed=seed,
         logging_steps=10,
         save_strategy="epoch",
@@ -103,9 +106,42 @@ def train_dpo(
     trainer.train()
     logger.info("Training complete.")
 
-    # Save
-    trainer.save_model(output_dir)
-    tokenizer.save_pretrained(output_dir)
-    logger.info(f"Model saved to: {output_dir}")
+    # Save LoRA adapter first, then merge into base model for vLLM compatibility
+    adapter_dir = output_dir + "_adapter"
+    trainer.save_model(adapter_dir)
+    logger.info(f"LoRA adapter saved to: {adapter_dir}")
+
+    # Merge LoRA weights into base model
+    import os
+    import gc
+    import torch
+
+    if os.path.exists(os.path.join(adapter_dir, "adapter_config.json")):
+        logger.info("Merging LoRA weights into base model...")
+        from peft import PeftModel
+
+        base_model = AutoModelForCausalLM.from_pretrained(
+            model_name_or_path,
+            torch_dtype="auto",
+            device_map="cpu",
+        )
+        merged_model = PeftModel.from_pretrained(base_model, adapter_dir)
+        merged_model = merged_model.merge_and_unload()
+        merged_model.save_pretrained(output_dir)
+        tokenizer.save_pretrained(output_dir)
+        logger.info(f"Merged model saved to: {output_dir}")
+
+        del base_model, merged_model
+    else:
+        # Fallback: no adapter found (e.g. in mock/test environments)
+        logger.warning("No adapter_config.json found, saving model as-is.")
+        trainer.save_model(output_dir)
+        tokenizer.save_pretrained(output_dir)
+
+    gc.collect()
+    try:
+        torch.cuda.empty_cache()
+    except RuntimeError:
+        pass
 
     return output_dir

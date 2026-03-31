@@ -1,0 +1,19 @@
+# 3样本调试配置
+common:
+  model_name: "google/gemma-2-2b-it"
+  dataset: "boolq"
+  seed: 42
+  max_samples: 3
+  use_wandb: false
+
+step06:
+  output_dir: "experiments/debug_3samples"
+  num_iterations: 1
+  num_rounds: 2
+  lora_r: 256
+  learning_rate: 5.0e-5
+  batch_size: 2
+  num_epochs: 1
+  num_simulations: 2
+  reward_threshold: 0.0
+  skip_training: false

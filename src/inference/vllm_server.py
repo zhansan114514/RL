@@ -17,8 +17,8 @@ class VLLMInference:
         self,
         model_name: str,
         tensor_parallel_size: int = 1,
-        gpu_memory_utilization: float = 0.9,
-        max_model_len: int = 2048,
+        gpu_memory_utilization: float = 0.5,
+        max_model_len: int = 1024,
         dtype: str = "auto",
         trust_remote_code: bool = True,
     ):
@@ -31,6 +31,8 @@ class VLLMInference:
             "max_model_len": max_model_len,
             "dtype": dtype,
             "trust_remote_code": trust_remote_code,
+            "enforce_eager": True,  # Disable CUDA graphs to reduce memory
+            "disable_log_stats": True,  # Reduce logging overhead
         }
 
     def _ensure_loaded(self) -> None:
@@ -92,6 +94,36 @@ class VLLMInference:
         if add_generation_prompt:
             parts.append("Assistant:")
         return "\n".join(parts)
+
+    def cleanup(self) -> None:
+        """Explicitly release GPU memory."""
+        if self._llm is not None:
+            try:
+                import gc
+                import torch
+                del self._llm
+                del self._tokenizer
+                self._llm = None
+                self._tokenizer = None
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                logger.info(f"Cleaned up model: {self.model_name}")
+            except Exception as e:
+                logger.warning(f"Cleanup failed for {self.model_name}: {e}")
+
+    def __del__(self) -> None:
+        """Destructor to ensure GPU memory is released."""
+        self.cleanup()
+
+    def __enter__(self):
+        """Context manager entry."""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Context manager exit with cleanup."""
+        self.cleanup()
+        return False
 
     def __repr__(self) -> str:
         return f"VLLMInference(model={self.model_name})"

@@ -117,3 +117,148 @@ class TestGuidedDeliberate:
         )
         assert isinstance(result, str)
         assert len(result) > 0
+
+
+class TestDeliberationEdgeCases:
+    """Test edge cases and malformed inputs for deliberation engine."""
+
+    def test_deliberate_with_zero_rounds(self):
+        """Should handle num_rounds=0 gracefully."""
+        from src.deliberation.engine import deliberate
+
+        actor = MockInference(responses=["Yes."])
+        critic = MockInference(responses=["Feedback."])
+        sample = {
+            "question": "Test?",
+            "passage": "Passage.",
+            "answer": "yes",
+            "task_type": "yes_no",
+        }
+        traj = deliberate(actor, critic, sample, "boolq", num_rounds=0)
+        assert len(traj) == 0
+
+    def test_deliberate_with_empty_actor_response(self):
+        """Should handle empty actor response."""
+        from src.deliberation.engine import deliberate
+
+        actor = MockInference(responses=[""])
+        critic = MockInference(responses=["Feedback."])
+        sample = {
+            "question": "Test?",
+            "passage": "Passage.",
+            "answer": "yes",
+            "task_type": "yes_no",
+        }
+        traj = deliberate(actor, critic, sample, "boolq", num_rounds=1)
+        assert len(traj) == 1
+        assert traj[0]["actor_response"] == ""
+        # Empty response should result in None answer
+        assert traj[0]["actor_answer"] is None
+
+    def test_deliberate_with_whitespace_only_response(self):
+        """Should handle whitespace-only response."""
+        from src.deliberation.engine import deliberate
+
+        actor = MockInference(responses=["   \n\t  "])
+        critic = MockInference(responses=["Feedback."])
+        sample = {
+            "question": "Test?",
+            "passage": "Passage.",
+            "answer": "yes",
+            "task_type": "yes_no",
+        }
+        traj = deliberate(actor, critic, sample, "boolq", num_rounds=1)
+        assert len(traj) == 1
+        assert traj[0]["actor_answer"] is None
+
+    def test_deliberate_with_very_long_response(self):
+        """Should handle very long responses."""
+        from src.deliberation.engine import deliberate
+
+        long_response = " ".join(["word"] * 10000) + " Yes."
+        actor = MockInference(responses=[long_response])
+        critic = MockInference(responses=["Feedback."])
+        sample = {
+            "question": "Test?",
+            "passage": "Passage.",
+            "answer": "yes",
+            "task_type": "yes_no",
+        }
+        traj = deliberate(actor, critic, sample, "boolq", num_rounds=1)
+        assert len(traj) == 1
+        assert len(traj[0]["actor_response"]) > 10000
+
+    def test_deliberate_with_missing_task_type(self):
+        """Should handle missing task_type in sample."""
+        from src.deliberation.engine import deliberate
+
+        actor = MockInference(responses=["Yes."])
+        critic = MockInference(responses=["Feedback."])
+        sample = {
+            "question": "Test?",
+            "passage": "Passage.",
+            "answer": "yes",
+            # Missing task_type
+        }
+        traj = deliberate(actor, critic, sample, "boolq", num_rounds=1)
+        assert len(traj) == 1
+        # Should default to yes_no task type
+        assert traj[0]["actor_answer"] in ("YES", "NO", None)
+
+    def test_guided_deliberate_with_invalid_agent(self):
+        """Should raise ValueError for invalid agent type."""
+        from src.deliberation.engine import guided_deliberate_round
+
+        model = MockInference(responses=["Response"])
+        sample = {
+            "question": "Test?",
+            "passage": "Passage.",
+            "answer": "yes",
+            "task_type": "yes_no",
+        }
+        with pytest.raises(ValueError, match="Unknown agent"):
+            guided_deliberate_round(
+                model, sample, "boolq",
+                target_answer="Yes",
+                previous_responses=[],
+                agent="invalid_agent",
+            )
+
+    def test_guided_deliberate_with_empty_target_answer(self):
+        """Should handle empty target_answer."""
+        from src.deliberation.engine import guided_deliberate_round
+
+        model = MockInference(responses=["Response"])
+        sample = {
+            "question": "Test?",
+            "passage": "Passage.",
+            "answer": "yes",
+            "task_type": "yes_no",
+        }
+        result = guided_deliberate_round(
+            model, sample, "boolq",
+            target_answer="",
+            previous_responses=[],
+            agent="actor",
+        )
+        assert isinstance(result, str)
+
+    def test_guided_deliberate_critic_with_none_actor_response(self):
+        """Should handle None previous_actor_response."""
+        from src.deliberation.engine import guided_deliberate_round
+
+        model = MockInference(responses=["Feedback"])
+        sample = {
+            "question": "Test?",
+            "passage": "Passage.",
+            "answer": "yes",
+            "task_type": "yes_no",
+        }
+        result = guided_deliberate_round(
+            model, sample, "boolq",
+            target_answer="Yes",
+            previous_responses=[],
+            agent="critic",
+            previous_actor_response=None,
+        )
+        assert isinstance(result, str)

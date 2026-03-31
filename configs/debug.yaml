@@ -1,0 +1,61 @@
+# Debug config: 3 samples, 1 iteration
+
+common:
+  model_name: "google/gemma-2-2b-it"
+  dataset: "boolq"
+  seed: 42
+  max_samples: 3
+  use_wandb: false
+
+step01:
+  output_dir: "experiments/debug/trajectories"
+  num_rounds: 5
+  num_simulations: 5
+  reward_threshold: 0.0
+  max_tokens: 256
+  temperature: 0.7
+
+step02:
+  input_dir: "experiments/debug/trajectories"
+  output_dir: "experiments/debug/preferences"
+  min_delta: 0.0
+
+step03:
+  preference_dir: "experiments/debug/preferences"
+  output_dir: "experiments/debug/critic"
+  model_type: null
+  lora_r: 256
+  learning_rate: 5.0e-5
+  batch_size: 4
+  num_epochs: 1
+  max_length: 2048
+
+step04:
+  preference_dir: "experiments/debug/preferences"
+  output_dir: "experiments/debug/actor"
+  model_type: null
+  lora_r: 256
+  learning_rate: 5.0e-5
+  batch_size: 4
+  num_epochs: 1
+  max_length: 2048
+
+step05:
+  actor_path: "experiments/debug/actor"
+  critic_path: "experiments/debug/critic"
+  output_dir: "experiments/debug/eval"
+  num_rounds: 5
+  max_tokens: 256
+  temperature: 0.7
+
+step06:
+  output_dir: "experiments/debug"
+  num_iterations: 1
+  num_rounds: 5
+  lora_r: 256
+  learning_rate: 5.0e-5
+  batch_size: 4
+  num_epochs: 1
+  num_simulations: 5
+  reward_threshold: 0.0
+  skip_training: false

@@ -77,14 +77,14 @@ def generate_trajectories(
             r["actor_response"] for r in natural_trajectory[:t]
         ]
 
-        # Estimate natural reward
+        # Estimate natural reward using one-step roll-out (simulate 1 additional round)
         v_natural = estimate_final_accuracy(
             actor_model, critic_model, sample, dataset_name,
             current_actor_response=actor_response,
             current_critic_response=critic_response,
             previous_responses=previous_responses,
             num_simulations=num_simulations,
-            remaining_rounds=num_rounds - t - 1,
+            remaining_rounds=1,  # One-step roll-out: simulate only 1 additional round
             max_tokens=max_tokens, temperature=temperature,
         )
 
@@ -112,7 +112,7 @@ def generate_trajectories(
             current_critic_response=z_y_critic,
             previous_responses=previous_responses,
             num_simulations=num_simulations,
-            remaining_rounds=num_rounds - t - 1,
+            remaining_rounds=1,  # One-step roll-out: simulate only 1 additional round
             max_tokens=max_tokens, temperature=temperature,
         )
 
@@ -139,7 +139,7 @@ def generate_trajectories(
             current_critic_response=z_not_y_critic,
             previous_responses=previous_responses,
             num_simulations=num_simulations,
-            remaining_rounds=num_rounds - t - 1,
+            remaining_rounds=1,  # One-step roll-out: simulate only 1 additional round
             max_tokens=max_tokens, temperature=temperature,
         )
 

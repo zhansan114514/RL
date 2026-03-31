@@ -113,7 +113,8 @@ def _load_bbh(
     """
     Load BBH with custom train/val/test splits.
 
-    Paper specifies: ~25% test (~1260 questions), ~10% validation (~500 questions).
+    Paper specifies: "roughly 25% and 10% of the questions from each category".
+    This means we need to split each BBH task category separately.
     """
     import random
 
@@ -121,26 +122,60 @@ def _load_bbh(
     rng = random.Random(seed)
 
     # BBH in HuggingFace comes as separate configs per task
-    # Combine all tasks into one dataset
-    all_samples = []
+    # We need to split each task category separately
+    train_samples = []
+    val_samples = []
+    test_samples = []
+
     if isinstance(raw, DatasetDict):
         for task_name, task_data in raw.items():
-            for sample in task_data:
+            task_samples = list(task_data)
+            # Add task category to each sample
+            for sample in task_samples:
                 sample["bbh_task"] = task_name
-                all_samples.append(sample)
+
+            # Shuffle within this task
+            rng.shuffle(task_samples)
+
+            # Split this task's samples
+            n_task = len(task_samples)
+            n_test = int(n_task * ratios["test"])
+            n_val = int(n_task * ratios["validation"])
+
+            task_test = task_samples[:n_test]
+            task_val = task_samples[n_test : n_test + n_val]
+            task_train = task_samples[n_test + n_val :]
+
+            test_samples.extend(task_test)
+            val_samples.extend(task_val)
+            train_samples.extend(task_train)
+
+            logger.info(
+                f"  Task {task_name}: train={len(task_train)}, "
+                f"val={len(task_val)}, test={len(task_test)}"
+            )
     else:
-        all_samples = list(raw)
+        # Fallback for non-DatasetDict format
+        # Convert to list and ensure each sample is a mutable dict
+        all_samples = []
+        for item in raw:
+            # If item is already a dict, use it; otherwise create one
+            if isinstance(item, dict):
+                sample = item
+            else:
+                # For unexpected formats, wrap in a dict
+                sample = {"data": item}
+            sample["bbh_task"] = "unknown"
+            all_samples.append(sample)
+        rng.shuffle(all_samples)
 
-    # Stratified split: sample proportionally from each task
-    rng.shuffle(all_samples)
+        n_total = len(all_samples)
+        n_test = int(n_total * ratios["test"])
+        n_val = int(n_total * ratios["validation"])
 
-    n_total = len(all_samples)
-    n_test = int(n_total * ratios["test"])
-    n_val = int(n_total * ratios["validation"])
-
-    test_samples = all_samples[:n_test]
-    val_samples = all_samples[n_test : n_test + n_val]
-    train_samples = all_samples[n_test + n_val :]
+        test_samples = all_samples[:n_test]
+        val_samples = all_samples[n_test : n_test + n_val]
+        train_samples = all_samples[n_test + n_val :]
 
     result = {
         "test": [standardize_sample(s, task_type) for s in test_samples],
@@ -149,7 +184,7 @@ def _load_bbh(
     }
 
     logger.info(
-        f"  BBH split: train={len(result['train'])}, "
+        f"  BBH total split: train={len(result['train'])}, "
         f"val={len(result['validation'])}, test={len(result['test'])}"
     )
 

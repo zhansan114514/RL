@@ -90,21 +90,11 @@ def parse_args():
     return _resolve_config(cli_args.config)
 
 
-def _detect_model_type(model_name: str) -> str:
-    name = model_name.lower()
-    if "llama" in name:
-        return "llama3"
-    elif "mistral" in name:
-        return "mistral"
-    elif "gemma" in name:
-        return "gemma2"
-    return "llama3"
-
-
 def main():
     args = parse_args()
 
-    model_type = args.model_type or _detect_model_type(args.model_name)
+    from src.utils.model_utils import detect_model_type
+    model_type = args.model_type or detect_model_type(args.model_name)
     logger.info(f"Model: {args.model_name} (type={model_type})")
 
     from datasets import load_from_disk

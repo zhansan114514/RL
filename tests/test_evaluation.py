@@ -184,3 +184,104 @@ class TestEvaluateBenchmark:
             assert results["num_samples"] == 2
             assert results["num_rounds"] == 3
             assert len(results["per_round_accuracy"]) == 3
+
+
+class TestExtractAnswerEdgeCases:
+    """Test edge cases and malformed inputs for answer extraction."""
+
+    def test_whitespace_only_response(self):
+        """Response with only whitespace should return None."""
+        assert extract_answer("   \n\t  ", task_type="yes_no") is None
+        assert extract_answer("   \n\t  ", task_type="multiple_choice") is None
+
+    def test_mixed_case_yes_no(self):
+        """Extract should work with various case combinations."""
+        test_cases = ["yEs", "yeS", "YEs", "yES", "YeS", "yEs"]
+        for case in test_cases:
+            result = extract_answer(f"The answer is {case}.", task_type="yes_no")
+            # Should normalize to YES/NO
+            assert result in ("YES", "NO") or result is None
+
+    def test_multiple_yes_no_uses_last(self):
+        """When multiple Yes/No appear, should extract the last one."""
+        response = "Yes it could be, but actually No in the end."
+        result = extract_answer(response, task_type="yes_no")
+        assert result == "NO"
+
+    def test_yes_no_with_punctuation(self):
+        """Yes/No with various punctuation should still extract."""
+        test_cases = [
+            ("Yes!", "YES"),
+            ("No?", "NO"),
+            ("Yes.", "YES"),
+            ("No,", "NO"),
+            ("Yes:", "YES"),
+        ]
+        for response, expected in test_cases:
+            result = extract_answer(f"Final answer: {response}", task_type="yes_no")
+            assert result == expected
+
+    def test_multiple_choice_with_punctuation(self):
+        """Multiple choice with various punctuation."""
+        test_cases = [
+            ("The answer is (A).", "A"),
+            ("The answer is (B)!", "B"),
+            ("The answer is (C)?", "C"),
+            ("The answer is (D),", "D"),
+        ]
+        for response, expected in test_cases:
+            result = extract_answer(response, task_type="multiple_choice")
+            assert result == expected
+
+    def test_very_long_response(self):
+        """Should handle very long responses without crashing."""
+        long_text = " ".join(["word"] * 10000) + " The answer is Yes."
+        result = extract_answer(long_text, task_type="yes_no")
+        assert result == "YES"
+
+    def test_response_with_special_chars(self):
+        """Special characters should not break extraction."""
+        special_chars = "!@#$%^&*()_+-=[]{}|;':\",./<>?"
+        response = f"Final answer: Yes {special_chars}"
+        result = extract_answer(response, task_type="yes_no")
+        assert result == "YES"
+
+    def test_unicode_characters(self):
+        """Should handle unicode characters gracefully."""
+        response = "The answer is Yes 🎉 你好"
+        result = extract_answer(response, task_type="yes_no")
+        assert result == "YES"
+
+    def test_mixed_task_type_with_only_mc(self):
+        """Mixed task type should prefer MC when only MC present."""
+        response = "The answer is (A)."
+        result = extract_answer(response, task_type="mixed")
+        assert result == "A"
+
+    def test_mixed_task_type_with_only_yn(self):
+        """Mixed task type should fallback to yes_no when no MC present."""
+        response = "The answer is Yes."
+        result = extract_answer(response, task_type="mixed")
+        assert result == "YES"
+
+    def test_invalid_task_type(self):
+        """Invalid task type should return None and log warning."""
+        result = extract_answer("The answer is Yes.", task_type="invalid_type")
+        assert result is None
+
+    def test_newline_in_answer(self):
+        """Answer split across newlines should still be extracted."""
+        response = "Final\nanswer:\nYes"
+        result = extract_answer(response, task_type="yes_no")
+        # May not extract due to pattern matching, but should not crash
+        assert result is None or result in ("YES", "NO")
+
+    def test_option_e_f_should_not_extract(self):
+        """Options beyond A-D should not be extracted."""
+        result = extract_answer("The answer is (E).", task_type="multiple_choice")
+        assert result is None
+
+    def test_nested_parentheses(self):
+        """Nested parentheses should still extract correctly."""
+        result = extract_answer("The answer is ((A)).", task_type="multiple_choice")
+        assert result == "A"

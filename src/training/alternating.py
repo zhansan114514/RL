@@ -34,9 +34,13 @@ def alternating_train(
     learning_rate: float = 5e-5,
     batch_size: int = 4,
     num_epochs: int = 1,
+    beta: float = 0.1,
     max_tokens: int = 256,
     temperature: float = 0.7,
     seed: int = 42,
+    val_dataset: Optional[list[dict]] = None,
+    early_stopping_patience: Optional[int] = None,
+    min_improvement: float = 0.0,
 ) -> dict[str, str]:
     """
     Run alternating Actor-Critic training.
@@ -44,7 +48,7 @@ def alternating_train(
     Args:
         actor_path: Path to actor base model.
         critic_path: Path to critic base model.
-        dataset: List of standardized samples.
+        dataset: List of standardized samples (training set).
         dataset_name: Dataset name for prompts.
         output_base_dir: Base directory for outputs.
         model_type: Model architecture type.
@@ -56,12 +60,16 @@ def alternating_train(
         learning_rate: Learning rate.
         batch_size: Training batch size.
         num_epochs: Epochs per training step.
+        beta: DPO beta parameter.
         max_tokens: Max generation tokens.
         temperature: Sampling temperature.
         seed: Random seed.
+        val_dataset: Optional validation dataset for performance monitoring.
+        early_stopping_patience: Optional patience for early stopping (if val_dataset provided).
+        min_improvement: Minimum improvement threshold to reset patience.
 
     Returns:
-        Dict with final actor_path and critic_path.
+        Dict with final actor_path, critic_path, and validation_metrics (if val_dataset provided).
     """
     import os
 
@@ -69,6 +77,11 @@ def alternating_train(
 
     current_actor_path = actor_path
     current_critic_path = critic_path
+
+    # Track validation metrics for early stopping
+    best_val_acc = 0.0
+    patience_counter = 0
+    val_metrics_history = []
 
     for iteration in range(num_iterations):
         logger.info(f"=== Iteration {iteration + 1}/{num_iterations} ===")
@@ -102,7 +115,7 @@ def alternating_train(
             critic_output = os.path.join(
                 output_base_dir, f"critic_iter{iteration}")
             current_critic_path = train_dpo(
-                model_name_or_path=critic_path,
+                model_name_or_path=current_critic_path,
                 preference_dataset=critic_hf,
                 output_dir=critic_output,
                 model_type=model_type,
@@ -110,11 +123,18 @@ def alternating_train(
                 learning_rate=learning_rate,
                 batch_size=batch_size,
                 num_epochs=num_epochs,
+                beta=beta,
                 seed=seed,
             )
             logger.info(f"Critic saved: {current_critic_path}")
         else:
             logger.warning("No critic pairs generated, skipping critic training.")
+
+        # Clean up models to free GPU memory before next phase
+        logger.info("Cleaning up models after critic training phase...")
+        actor_model.cleanup()
+        critic_model.cleanup()
+        del actor_model, critic_model
 
         # Step 2: Train actor (fix critic)
         logger.info("Step 2: Training Actor (critic fixed)")
@@ -145,7 +165,7 @@ def alternating_train(
             actor_output = os.path.join(
                 output_base_dir, f"actor_iter{iteration}")
             current_actor_path = train_dpo(
-                model_name_or_path=actor_path,
+                model_name_or_path=current_actor_path,
                 preference_dataset=actor_hf,
                 output_dir=actor_output,
                 model_type=model_type,
@@ -153,13 +173,73 @@ def alternating_train(
                 learning_rate=learning_rate,
                 batch_size=batch_size,
                 num_epochs=num_epochs,
+                beta=beta,
                 seed=seed,
             )
             logger.info(f"Actor saved: {current_actor_path}")
         else:
             logger.warning("No actor pairs generated, skipping actor training.")
 
-    return {
+        # Clean up models before validation
+        logger.info("Cleaning up models after actor training phase...")
+        actor_model.cleanup()
+        critic_model.cleanup()
+        del actor_model, critic_model
+
+        # Validation set evaluation (if provided)
+        if val_dataset is not None:
+            logger.info(f"Evaluating on validation set ({len(val_dataset)} samples)...")
+            actor_model = VLLMInference(current_actor_path)
+            critic_model = VLLMInference(current_critic_path)
+
+            from src.evaluation.benchmarks import evaluate_benchmark
+            val_results = evaluate_benchmark(
+                actor_model, critic_model, val_dataset, dataset_name,
+                num_rounds=num_rounds, max_tokens=max_tokens,
+                temperature=temperature,
+            )
+
+            val_acc = val_results["final_accuracy"]
+            val_metrics_history.append({
+                "iteration": iteration,
+                "val_accuracy": val_acc,
+                "val_ci_margin": val_results["ci_margin"],
+                "improvement_rate": val_results["improvement_rate"],
+            })
+
+            logger.info(
+                f"  Iteration {iteration} Val Accuracy: {val_acc:.3f} +/- {val_results['ci_margin']:.3f}"
+            )
+
+            # Early stopping check
+            if early_stopping_patience is not None:
+                if val_acc > best_val_acc + min_improvement:
+                    best_val_acc = val_acc
+                    patience_counter = 0
+                    logger.info(f"  New best validation accuracy: {best_val_acc:.3f}")
+                else:
+                    patience_counter += 1
+                    logger.info(
+                        f"  No improvement for {patience_counter}/{early_stopping_patience} iterations"
+                    )
+                    if patience_counter >= early_stopping_patience:
+                        logger.info("Early stopping triggered!")
+                        break
+
+            # Clean up validation models
+            logger.info("Cleaning up validation models...")
+            actor_model.cleanup()
+            critic_model.cleanup()
+            del actor_model, critic_model
+
+    # Prepare return value
+    result = {
         "actor_path": current_actor_path,
         "critic_path": current_critic_path,
     }
+
+    if val_metrics_history:
+        result["validation_metrics"] = val_metrics_history
+        result["best_val_accuracy"] = best_val_acc
+
+    return result

@@ -1,8 +1,13 @@
 """
 One-step roll-out Monte Carlo for reward estimation.
 
-Estimates r(z^(t), x, y) by simulating remaining deliberation rounds
-and computing the average accuracy.
+Following the ACC-Collab paper (Section 4.2), this estimates the partial reward
+r(z^(t), x, y) by simulating ONE additional deliberation round from the current
+response (not all remaining rounds), repeated multiple times for Monte Carlo
+estimation.
+
+Paper quote: "we use one-step roll-out heuristics, i.e. simulating an additional
+deliberation round multiple times from response z(t)."
 """
 
 from __future__ import annotations
@@ -27,10 +32,14 @@ def estimate_final_accuracy(
     temperature: float = 0.7,
 ) -> float:
     """
-    Estimate reward r(z^(t), x, y) via Monte Carlo roll-out.
+    Estimate reward r(z^(t), x, y) via one-step Monte Carlo roll-out.
 
-    From the current response, simulate the remaining deliberation rounds
-    multiple times and return the average accuracy.
+    Per the ACC-Collab paper, this simulates ONE additional deliberation round
+    (actor + critic exchange) from the current state, repeated num_simulations
+    times, and returns the average accuracy of the final answers.
+
+    The key insight is that we only need to look ONE step ahead to estimate
+    the quality of the current response, not simulate all remaining rounds.
 
     Args:
         actor_model: Actor VLLMInference.
@@ -39,14 +48,15 @@ def estimate_final_accuracy(
         dataset_name: Dataset name.
         current_actor_response: Actor's response at round t.
         current_critic_response: Critic's response at round t.
-        previous_responses: Responses from prior rounds.
-        num_simulations: Number of MC simulations.
-        remaining_rounds: How many more rounds to simulate.
+        previous_responses: Responses from prior rounds (for context).
+        num_simulations: Number of MC simulations (default: 5).
+        remaining_rounds: Rounds to simulate (should be 1 for one-step roll-out).
         max_tokens: Max tokens per generation.
         temperature: Sampling temperature.
 
     Returns:
-        Estimated accuracy (float in [0, 1]).
+        Estimated accuracy (float in [0, 1]) - the proportion of simulations
+        that led to the correct answer.
     """
     from src.reward.accuracy import extract_answer, normalize_answer
 

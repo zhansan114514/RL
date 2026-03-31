@@ -38,6 +38,7 @@ STEP_DEFAULTS = {
     "learning_rate": 5e-5,
     "batch_size": 4,
     "num_epochs": 1,
+    "beta": 0.1,
     "num_simulations": 5,
     "reward_threshold": 0.0,
     "seed": 42,
@@ -122,21 +123,24 @@ def main():
 
     data = load_dataset(args.dataset, seed=args.seed)
     train_data = data.get("train", [])
+    val_data = data.get("validation", [])
     test_data = data.get("test", [])
 
     if args.max_samples:
         train_data = train_data[:args.max_samples]
+        val_data = val_data[:args.max_samples]
         test_data = test_data[:args.max_samples]
 
-    logger.info(f"  Train: {len(train_data)}, Test: {len(test_data)}")
+    logger.info(f"  Train: {len(train_data)}, Val: {len(val_data)}, Test: {len(test_data)}")
 
     if not args.skip_training:
         # --- Step 2: Alternating training ---
         logger.info("[Step 2] Running alternating Actor-Critic training...")
         from src.training.alternating import alternating_train
+        from src.utils.model_utils import detect_model_type
 
         # Detect model type from name
-        model_type = _detect_model_type(args.model_name)
+        model_type = detect_model_type(args.model_name)
 
         result = alternating_train(
             actor_path=args.model_name,
@@ -153,7 +157,10 @@ def main():
             learning_rate=args.learning_rate,
             batch_size=args.batch_size,
             num_epochs=args.num_epochs,
+            beta=args.beta,
             seed=args.seed,
+            val_dataset=val_data if val_data else None,
+            early_stopping_patience=getattr(args, "early_stopping_patience", None),
         )
         actor_path = result["actor_path"]
         critic_path = result["critic_path"]
@@ -186,19 +193,6 @@ def main():
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
     logger.info(f"Results saved to: {results_path}")
-
-
-def _detect_model_type(model_name: str) -> str:
-    """Detect model architecture type from model name."""
-    name = model_name.lower()
-    if "llama" in name:
-        return "llama3"
-    elif "mistral" in name:
-        return "mistral"
-    elif "gemma" in name:
-        return "gemma2"
-    else:
-        return "llama3"  # default
 
 
 if __name__ == "__main__":
