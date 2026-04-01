@@ -78,7 +78,7 @@ python scripts/06_full_pipeline.py --config configs/config.yaml
 ```bash
 python scripts/01_generate_trajectories.py --config configs/config.yaml
 python scripts/02_build_preferences.py --config configs/config.yaml
-python scripts/train.py --config configs/config.yaml --agent critic   # 合并后的训练入口
+python scripts/train.py --config configs/config.yaml --agent critic
 python scripts/train.py --config configs/config.yaml --agent actor
 python scripts/05_evaluate.py --config configs/config.yaml
 ```

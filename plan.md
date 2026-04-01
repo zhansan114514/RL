@@ -75,4 +75,30 @@ CUDA_VISIBLE_DEVICES=5 LD_LIBRARY_PATH=/tmp/nvml_fix:$LD_LIBRARY_PATH \
 
 ---
 
-*189 tests passing | 最后更新 2026-04-01*
+---
+
+## 代码修复记录 (2026-04-01)
+
+**总览**: 4 个文件，18 行改动，202 测试通过，0 回归
+
+| # | 文件 | 行号 | 修改内容 | 对应论文章节 |
+|---|------|------|----------|--------------|
+| 1 | `src/algorithms/deliberation.py` | 84-86 | `previous_responses` 交错添加 actor+critic 回复（先 actor 后 critic） | Section 3 - Actor sees both z_a(t-1) and z_c(t-1) |
+| 2 | `src/algorithms/trajectory.py` | 76 | 循环从 `range(1, len(...))` 开始（跳过 t=0） | Algorithm 1 - for t in [1, T] |
+| 3 | `src/algorithms/trajectory.py` | 154-167 | 用 `if/elif` 替代两个独立的 `if`，确保偏好对互斥 | Algorithm 1 - else if 互斥逻辑 |
+| 4 | `src/training/dpo_trainer.py` | 123-124 | 添加 `loss_type=[loss_type, "sft"]` + `loss_weights=[1.0, 1.0]` | Appendix A - NLL regularization with weight 1 |
+| 5 | `src/algorithms/rollout.py` | 67, 87-89 | `sim_responses` 交错添加 actor+critic 回复 | Section 4.2 - one-step MC roll-out |
+
+### 测试覆盖
+
+新增 13 个测试：
+- `test_deliberation.py`: 3 个（previous_responses 交错逻辑）
+- `test_trajectory.py`: 5 个（循环起点、互斥逻辑）
+- `test_dpo_trainer.py`: 3 个（SFT 混合 loss）
+- `test_rollout.py`: 2 个（sim_responses 交错逻辑）
+
+总计 **202 个测试全部通过**，无回归。
+
+---
+
+*202 tests passing | 最后更新 2026-04-01*

@@ -63,7 +63,8 @@ def estimate_final_accuracy(
     correct_count = 0
 
     for _ in range(num_simulations):
-        sim_responses = list(previous_responses) + [current_actor_response]
+        # Include both current actor and critic responses for the next round's context
+        sim_responses = list(previous_responses) + [current_actor_response, current_critic_response]
         sim_actor_resp = current_actor_response
 
         for r in range(remaining_rounds):
@@ -83,7 +84,9 @@ def estimate_final_accuracy(
                 critic_prompt, max_tokens=max_tokens, temperature=temperature,
             )
 
+            # Append both actor and critic responses (interleaved as in natural deliberation)
             sim_responses.append(sim_actor_resp)
+            sim_responses.append(sim_critic_resp)
 
         task_type = sample.get("task_type", "yes_no")
         final_answer = extract_answer(sim_actor_resp, task_type)

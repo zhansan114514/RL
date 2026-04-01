@@ -72,7 +72,9 @@ def generate_trajectories(
         num_rounds=num_rounds, max_tokens=max_tokens, temperature=temperature,
     )
 
-    for t, round_data in enumerate(natural_trajectory):
+    # Algorithm 1: guided trajectories start from t=1 (z(0) only runs natural deliberation)
+    for t in range(1, len(natural_trajectory)):
+        round_data = natural_trajectory[t]
         actor_response = round_data["actor_response"]
         critic_response = round_data["critic_response"]
         actor_prompt = round_data["actor_prompt"]
@@ -148,7 +150,7 @@ def generate_trajectories(
         delta_y = compute_reward_delta(v_guided_correct, v_natural)
         delta_not_y = compute_reward_delta(v_natural, v_guided_wrong)
 
-        # Build preference pairs
+        # Build preference pairs (Algorithm 1: only one pair per round via elif)
         if delta_y >= reward_threshold:
             preference_pairs.append({
                 "actor_prompt": actor_prompt,
@@ -162,8 +164,7 @@ def generate_trajectories(
                 "direction": "towards",
                 "agent": "actor",
             })
-
-        if delta_not_y >= reward_threshold:
+        elif delta_not_y >= reward_threshold:
             preference_pairs.append({
                 "actor_prompt": actor_prompt,
                 "critic_prompt": critic_prompt,

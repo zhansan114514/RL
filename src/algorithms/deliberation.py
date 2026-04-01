@@ -81,8 +81,9 @@ def deliberate(
             "critic_response": critic_response,
         })
 
-        # Update response history for next round
+        # Update response history for next round (interleaved actor and critic responses)
         previous_responses.append(actor_response)
+        previous_responses.append(critic_response)
 
     return trajectory
 

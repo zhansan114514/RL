@@ -107,6 +107,10 @@ def train_dpo(
         tokenizer.pad_token = tokenizer.eos_token
 
     # DPO training arguments
+    # Per ACC-Collab paper Appendix A: "we use a negative log-likelihood (NLL)
+    # regularization term (with weight 1)"
+    # In trl >=0.14, NLL regularization is achieved by adding "sft" to loss_types
+    # with corresponding weight in loss_weights.
     training_args = DPOConfig(
         output_dir=output_dir,
         num_train_epochs=num_epochs,
@@ -116,7 +120,8 @@ def train_dpo(
         warmup_ratio=warmup_ratio,
         max_length=max_length,
         beta=beta,
-        loss_type=loss_type,
+        loss_type=[loss_type, "sft"],  # DPO loss + NLL (SFT) loss
+        loss_weights=[1.0, 1.0],  # weight=1 for both DPO and NLL as per paper
         max_grad_norm=max_grad_norm,
         optim=optim,
         weight_decay=weight_decay,
