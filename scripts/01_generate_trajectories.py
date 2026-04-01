@@ -89,7 +89,7 @@ def main():
     )
 
     logger.info("Generating trajectories...")
-    from src.trajectory.generator import generate_trajectories
+    from src.algorithms.trajectory import generate_trajectories
 
     all_pairs = []
     for i, sample in enumerate(train_data):

@@ -20,7 +20,7 @@ class TestDeliberateEngine:
     """Test the natural deliberation loop."""
 
     def test_returns_correct_round_count(self):
-        from src.deliberation.engine import deliberate
+        from src.algorithms.deliberation import deliberate
 
         actor = MockInference(responses=[
             "Final answer: Yes.", "Final answer: Yes.",
@@ -47,7 +47,7 @@ class TestDeliberateEngine:
             assert "actor_answer" in t
 
     def test_single_round(self):
-        from src.deliberation.engine import deliberate
+        from src.algorithms.deliberation import deliberate
 
         actor = MockInference(responses=["Final answer: No."])
         critic = MockInference(responses=["Feedback."])
@@ -62,7 +62,7 @@ class TestDeliberateEngine:
         assert traj[0]["actor_answer"] == "NO"
 
     def test_round0_uses_single_shot_prompt(self):
-        from src.deliberation.engine import deliberate
+        from src.algorithms.deliberation import deliberate
 
         actor = MockInference(responses=["Final answer: Yes."])
         critic = MockInference(responses=["Feedback."])
@@ -81,7 +81,7 @@ class TestGuidedDeliberate:
     """Test guided deliberation round."""
 
     def test_guided_actor_includes_target(self):
-        from src.deliberation.engine import guided_deliberate_round
+        from src.algorithms.deliberation import guided_deliberate_round
 
         model = MockInference(responses=["I believe the answer is Yes."])
         sample = {
@@ -99,7 +99,7 @@ class TestGuidedDeliberate:
         assert "Yes" in result
 
     def test_guided_critic_uses_actor_response(self):
-        from src.deliberation.engine import guided_deliberate_round
+        from src.algorithms.deliberation import guided_deliberate_round
 
         model = MockInference(responses=["Here's why the answer is No."])
         sample = {
@@ -124,7 +124,7 @@ class TestDeliberationEdgeCases:
 
     def test_deliberate_with_zero_rounds(self):
         """Should handle num_rounds=0 gracefully."""
-        from src.deliberation.engine import deliberate
+        from src.algorithms.deliberation import deliberate
 
         actor = MockInference(responses=["Yes."])
         critic = MockInference(responses=["Feedback."])
@@ -139,7 +139,7 @@ class TestDeliberationEdgeCases:
 
     def test_deliberate_with_empty_actor_response(self):
         """Should handle empty actor response."""
-        from src.deliberation.engine import deliberate
+        from src.algorithms.deliberation import deliberate
 
         actor = MockInference(responses=[""])
         critic = MockInference(responses=["Feedback."])
@@ -157,7 +157,7 @@ class TestDeliberationEdgeCases:
 
     def test_deliberate_with_whitespace_only_response(self):
         """Should handle whitespace-only response."""
-        from src.deliberation.engine import deliberate
+        from src.algorithms.deliberation import deliberate
 
         actor = MockInference(responses=["   \n\t  "])
         critic = MockInference(responses=["Feedback."])
@@ -173,7 +173,7 @@ class TestDeliberationEdgeCases:
 
     def test_deliberate_with_very_long_response(self):
         """Should handle very long responses."""
-        from src.deliberation.engine import deliberate
+        from src.algorithms.deliberation import deliberate
 
         long_response = " ".join(["word"] * 10000) + " Yes."
         actor = MockInference(responses=[long_response])
@@ -190,7 +190,7 @@ class TestDeliberationEdgeCases:
 
     def test_deliberate_with_missing_task_type(self):
         """Should handle missing task_type in sample."""
-        from src.deliberation.engine import deliberate
+        from src.algorithms.deliberation import deliberate
 
         actor = MockInference(responses=["Yes."])
         critic = MockInference(responses=["Feedback."])
@@ -207,7 +207,7 @@ class TestDeliberationEdgeCases:
 
     def test_guided_deliberate_with_invalid_agent(self):
         """Should raise ValueError for invalid agent type."""
-        from src.deliberation.engine import guided_deliberate_round
+        from src.algorithms.deliberation import guided_deliberate_round
 
         model = MockInference(responses=["Response"])
         sample = {
@@ -226,7 +226,7 @@ class TestDeliberationEdgeCases:
 
     def test_guided_deliberate_with_empty_target_answer(self):
         """Should handle empty target_answer."""
-        from src.deliberation.engine import guided_deliberate_round
+        from src.algorithms.deliberation import guided_deliberate_round
 
         model = MockInference(responses=["Response"])
         sample = {
@@ -245,7 +245,7 @@ class TestDeliberationEdgeCases:
 
     def test_guided_deliberate_critic_with_none_actor_response(self):
         """Should handle None previous_actor_response."""
-        from src.deliberation.engine import guided_deliberate_round
+        from src.algorithms.deliberation import guided_deliberate_round
 
         model = MockInference(responses=["Feedback"])
         sample = {

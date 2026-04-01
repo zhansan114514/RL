@@ -9,7 +9,7 @@ class TestMCRolloutEdgeCases:
 
     def test_zero_remaining_rounds(self):
         """Zero remaining rounds should still return a value."""
-        from src.deliberation.rollouts import estimate_final_accuracy
+        from src.algorithms.rollout import estimate_final_accuracy
 
         actor = MagicMock()
         critic = MagicMock()
@@ -38,7 +38,7 @@ class TestMCRolloutEdgeCases:
 
     def test_zero_simulations(self):
         """Zero simulations should safely return 0.0 (handled gracefully)."""
-        from src.deliberation.rollouts import estimate_final_accuracy
+        from src.algorithms.rollout import estimate_final_accuracy
 
         actor = MagicMock()
         critic = MagicMock()
@@ -63,7 +63,7 @@ class TestMCRolloutEdgeCases:
 
     def test_all_simulations_correct(self):
         """When all simulations give correct answer, should return 1.0."""
-        from src.deliberation.rollouts import estimate_final_accuracy
+        from src.algorithms.rollout import estimate_final_accuracy
 
         actor = MagicMock()
         critic = MagicMock()
@@ -92,7 +92,7 @@ class TestMCRolloutEdgeCases:
 
     def test_all_simulations_incorrect(self):
         """When all simulations give wrong answer, should return 0.0."""
-        from src.deliberation.rollouts import estimate_final_accuracy
+        from src.algorithms.rollout import estimate_final_accuracy
 
         actor = MagicMock()
         critic = MagicMock()
@@ -121,7 +121,7 @@ class TestMCRolloutEdgeCases:
 
     def test_mixed_correct_incorrect(self):
         """Mixed correct/incorrect should return proportional accuracy."""
-        from src.deliberation.rollouts import estimate_final_accuracy
+        from src.algorithms.rollout import estimate_final_accuracy
         from unittest.mock import call
 
         actor = MagicMock()
@@ -153,7 +153,7 @@ class TestMCRolloutEdgeCases:
 
     def test_missing_answer_in_sample(self):
         """Missing answer in sample should return 0.0."""
-        from src.deliberation.rollouts import estimate_final_accuracy
+        from src.algorithms.rollout import estimate_final_accuracy
 
         actor = MagicMock()
         critic = MagicMock()
@@ -179,7 +179,7 @@ class TestMCRolloutEdgeCases:
 
     def test_empty_previous_responses(self):
         """Empty previous_responses should be handled."""
-        from src.deliberation.rollouts import estimate_final_accuracy
+        from src.algorithms.rollout import estimate_final_accuracy
 
         actor = MagicMock()
         critic = MagicMock()
@@ -207,7 +207,7 @@ class TestMCRolloutEdgeCases:
 
     def test_long_previous_responses_list(self):
         """Should handle long list of previous responses."""
-        from src.deliberation.rollouts import estimate_final_accuracy
+        from src.algorithms.rollout import estimate_final_accuracy
 
         actor = MagicMock()
         critic = MagicMock()
@@ -237,7 +237,7 @@ class TestMCRolloutEdgeCases:
 
     def test_multiple_choice_task(self):
         """Should handle multiple choice tasks."""
-        from src.deliberation.rollouts import estimate_final_accuracy
+        from src.algorithms.rollout import estimate_final_accuracy
 
         actor = MagicMock()
         critic = MagicMock()
@@ -264,7 +264,7 @@ class TestMCRolloutEdgeCases:
 
     def test_current_response_already_correct(self):
         """When current response is already correct, should still simulate."""
-        from src.deliberation.rollouts import estimate_final_accuracy
+        from src.algorithms.rollout import estimate_final_accuracy
 
         actor = MagicMock()
         critic = MagicMock()
@@ -293,7 +293,7 @@ class TestMCRolloutEdgeCases:
 
     def test_empty_actor_response_in_simulation(self):
         """Should handle empty actor responses during simulation."""
-        from src.deliberation.rollouts import estimate_final_accuracy
+        from src.algorithms.rollout import estimate_final_accuracy
 
         actor = MagicMock()
         critic = MagicMock()
@@ -321,7 +321,7 @@ class TestMCRolloutEdgeCases:
 
     def test_large_num_simulations(self):
         """Should handle large number of simulations."""
-        from src.deliberation.rollouts import estimate_final_accuracy
+        from src.algorithms.rollout import estimate_final_accuracy
 
         actor = MagicMock()
         critic = MagicMock()
@@ -353,7 +353,7 @@ class TestMCRolloutOneStepBehavior:
 
     def test_one_step_not_all_remaining(self):
         """One-step roll-out should simulate exactly 1 round, not all remaining."""
-        from src.deliberation.rollouts import estimate_final_accuracy
+        from src.algorithms.rollout import estimate_final_accuracy
         from unittest.mock import call
 
         actor = MagicMock()
@@ -384,7 +384,7 @@ class TestMCRolloutOneStepBehavior:
 
     def test_multiple_remaining_rounds_accumulation(self):
         """With remaining_rounds > 1, should accumulate responses correctly."""
-        from src.deliberation.rollouts import estimate_final_accuracy
+        from src.algorithms.rollout import estimate_final_accuracy
 
         actor = MagicMock()
         critic = MagicMock()
@@ -425,7 +425,7 @@ class TestMCRolloutOneStepFixVerification:
 
     def test_default_remaining_rounds_is_one(self):
         """The default remaining_rounds parameter should be 1 for one-step roll-out."""
-        from src.deliberation.rollouts import estimate_final_accuracy
+        from src.algorithms.rollout import estimate_final_accuracy
         import inspect
 
         # Check function signature
@@ -437,7 +437,7 @@ class TestMCRolloutOneStepFixVerification:
 
     def test_one_step_simulates_single_actor_critic_exchange(self):
         """One-step roll-out simulates exactly ONE actor-critic exchange."""
-        from src.deliberation.rollouts import estimate_final_accuracy
+        from src.algorithms.rollout import estimate_final_accuracy
 
         actor = MagicMock()
         critic = MagicMock()
@@ -467,7 +467,7 @@ class TestMCRolloutOneStepFixVerification:
 
     def test_one_step_includes_current_in_history(self):
         """One-step roll-out should include current response in simulation history."""
-        from src.deliberation.rollouts import estimate_final_accuracy
+        from src.algorithms.rollout import estimate_final_accuracy
         from src.prompts.formatter import format_prompt
 
         actor = MagicMock()
@@ -517,7 +517,7 @@ class TestMCRolloutOneStepFixVerification:
 
     def test_one_step_uses_final_simulated_response(self):
         """One-step roll-out uses the FINAL simulated response for evaluation."""
-        from src.deliberation.rollouts import estimate_final_accuracy
+        from src.algorithms.rollout import estimate_final_accuracy
 
         actor = MagicMock()
         critic = MagicMock()

@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.reward.accuracy import (
+from src.algorithms.reward import (
     extract_answer,
     normalize_answer,
     compute_accuracy,

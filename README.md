@@ -41,8 +41,6 @@ src/
     └── model_utils.py   # detect_model_type
 ```
 
-兼容层（旧 import 路径仍可用）：`src/deliberation/`, `src/reward/`, `src/trajectory/generator.py`
-
 ---
 
 ## 环境搭建

@@ -12,16 +12,16 @@ ACC-Collab 复现项目 -- 实现 ICLR 2025 论文《ACC-Collab: An Actor-Critic
 
 ```
 数据集加载 (src.data)
-  -> 自然审议 + 引导审议 (src.deliberation)
-  -> MC Roll-out 奖励估计 (src.deliberation.rollouts)
+  -> 自然审议 + 引导审议 (src.algorithms.deliberation)
+  -> MC Roll-out 奖励估计 (src.algorithms.rollout)
   -> 偏好对构建 (src.trajectory)
   -> DPO 训练 (src.training)
   -> 评估 (src.evaluation)
 ```
 
 关键概念映射：
-- **zeta 函数** = `src.reward.accuracy.extract_answer`，从 LLM 文本中抽取结构化答案
-- **Algorithm 1** = `src.trajectory.generator.generate_trajectories`，对每个样本生成自然轨迹、引导向正确答案的轨迹、引导向错误答案的轨迹，然后计算奖励差值筛选偏好对
+- **zeta 函数** = `src.algorithms.reward.extract_answer`，从 LLM 文本中抽取结构化答案
+- **Algorithm 1** = `src.algorithms.trajectory.generate_trajectories`，对每个样本生成自然轨迹、引导向正确答案的轨迹、引导向错误答案的轨迹，然后计算奖励差值筛选偏好对
 - **交替训练** = `src.training.alternating.alternating_train`，先固定 Actor 训练 Critic，再固定 Critic 训练 Actor（1 轮 = ACC-Collab，2 轮 = ACC-Collab+）
 
 ## 模块职责与依赖关系
@@ -30,15 +30,14 @@ ACC-Collab 复现项目 -- 实现 ICLR 2025 论文《ACC-Collab: An Actor-Critic
 |------|------|----------|----------|
 | `src.data` | 数据加载与预处理，统一 5 个基准的格式 | `loader.py`, `preprocessor.py` | datasets (HuggingFace) |
 | `src.prompts` | 6 类 Prompt 模板（single_shot / guided / deliberation_actor / deliberation_critic 及其 guided 变体），按数据集分派 | `templates.py`, `formatter.py` | 无外部依赖 |
-| `src.deliberation` | 审议引擎：自然审议循环 + 引导审议生成 + MC roll-out 奖励估计 | `engine.py`, `rollouts.py` | prompts, reward |
-| `src.reward` | 答案抽取(zeta)、准确率计算、Wilson 置信区间、奖励差值计算 | `accuracy.py`, `partial.py` | scipy, numpy |
-| `src.trajectory` | Algorithm 1 完整实现 + 偏好数据集构建 | `generator.py`, `preference.py` | deliberation, reward |
+| `src.algorithms` | 审议引擎、奖励计算、MC roll-out、Algorithm 1 轨迹生成 | `deliberation.py`, `reward.py`, `rollout.py`, `trajectory.py` | prompts, scipy, numpy |
+| `src.trajectory` | 偏好数据集构建 | `preference.py` | algorithms |
 | `src.training` | DPO 训练(trl)、LoRA 配置(peft)、交替训练调度 | `dpo_trainer.py`, `lora_config.py`, `alternating.py` | trl, peft, transformers |
 | `src.inference` | vLLM 推理封装（懒加载） | `vllm_server.py` | vllm |
 | `src.evaluation` | 基准评估：逐轮准确率、改进率 | `benchmarks.py` | deliberation, reward |
 | `src.utils` | OmegaConf 配置合并、日志、WandB 集成 | `config.py`, `logging_utils.py` | omegaconf, wandb |
 
-**注意**：`src.data.preprocessor` 和 `src.reward.accuracy` 都有各自的 `extract_answer` 实现，前者用于数据预处理阶段，后者用于奖励计算和评估阶段。两套实现的逻辑相似但返回格式不同（前者返回小写 "yes"/"no"，后者返回大写 "YES"/"NO"）。
+**注意**：`src.data.preprocessor` 和 `src.algorithms.reward` 都有各自的 `extract_answer` 实现，前者用于数据预处理阶段，后者用于奖励计算和评估阶段。两套实现的逻辑相似但返回格式不同（前者返回小写 "yes"/"no"，后者返回大写 "YES"/"NO"）。
 
 ## 配置系统
 
