@@ -10,7 +10,7 @@ common:
   # 随机种子
   seed: 42
   # 调试时限制样本数，null 表示不限制
-  max_samples: 3
+  max_samples: 10
   # 是否启用 WandB
   use_wandb: false
 
@@ -41,9 +41,9 @@ step03:
   model_type: null
   lora_r: 256
   learning_rate: 5.0e-5
-  batch_size: 4
+  batch_size: 1
   num_epochs: 1
-  max_length: 2048
+  max_length: 1024
 
 # Step 4: 训练 Actor
 step04:
@@ -53,9 +53,9 @@ step04:
   model_type: null
   lora_r: 256
   learning_rate: 5.0e-5
-  batch_size: 4
+  batch_size: 1
   num_epochs: 1
-  max_length: 2048
+  max_length: 1024
 
 # Step 5: 评估
 step05:

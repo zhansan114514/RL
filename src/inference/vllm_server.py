@@ -53,6 +53,24 @@ class VLLMInference:
         except ImportError:
             raise ImportError("vLLM required. pip install vllm")
 
+        # V100 (compute capability 7.0) does not support BF16
+        # vLLM's dtype="auto" handles this automatically, but we add
+        # explicit logging for clarity
+        requested_dtype = self._init_kwargs.get("dtype", "auto")
+        if requested_dtype == "auto":
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    # Check first device (vLLM will use same dtype for all)
+                    dev_name = torch.cuda.get_device_name(0)
+                    if "V100" in dev_name or "TITAN V" in dev_name:
+                        logger.info(
+                            f"Detected {dev_name} (no BF16 support). "
+                            "vLLM will use float16 automatically."
+                        )
+            except Exception:
+                pass  # Silently skip if CUDA detection fails
+
         # Map logical device index to the corresponding physical GPU ID.
         # e.g. if CUDA_VISIBLE_DEVICES="2,3" and cuda_device=1,
         # we want physical GPU 3, so set CUDA_VISIBLE_DEVICES="3".

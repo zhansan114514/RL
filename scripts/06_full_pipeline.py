@@ -14,6 +14,13 @@ import os
 
 from _utils import resolve_config, setup_logging
 
+# Apply NVML fix if needed (for PyTorch 2.10+ with old NVIDIA drivers)
+try:
+    from src.utils import nvml_fix
+    nvml_fix.auto_apply_nvml_fix()
+except ImportError:
+    pass  # NVML fix module not available
+
 setup_logging()
 logger = logging.getLogger(__name__)
 
@@ -41,6 +48,7 @@ STEP_DEFAULTS = {
     "critic_device": 0,
     "dtype": "float32",
     "gpu_memory_utilization": 0.8,
+    "max_model_len": 4096,
 }
 
 
@@ -144,12 +152,14 @@ def main():
         cuda_device=args.actor_device,
         dtype=args.dtype,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        max_model_len=args.max_model_len,
     )
     critic_model = VLLMInference(
         critic_path,
         cuda_device=args.critic_device,
         dtype=args.dtype,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        max_model_len=args.max_model_len,
     )
 
     results = evaluate_benchmark(

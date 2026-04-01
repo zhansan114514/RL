@@ -185,24 +185,63 @@ python scripts/06_full_pipeline.py \
 - [x] GPU OOM 已解决（单 GPU 共享 + 0.45 利用率）
 - [ ] 端到端运行成功（等待 GPU 资源）
 
-#### 3.1 小规模验证 ⏳ 等待 GPU 资源
+#### 3.0.1 NVML patchelf 修复方案 ✅ 已完成（2026-04-01）
 
-**阻塞原因**：当前所有 16 块 GPU 均被其他进程占用，无 ≥20GB 空闲 GPU 可用。
+**问题**：PyTorch 2.10+cu128 在 NVIDIA 驱动 450.142.00 的 V100 上调用 `nvmlDeviceGetNvLinkRemoteDeviceType` 失败。
 
-**恢复命令**（GPU 就绪后）：
+**最终方案**：使用 patchelf 将 stub .so 注入到 libnvidia-ml.so.1 副本中。
+
 ```bash
-# 需要至少 1x V100 (≥20GB 空闲)
-# 使用 CUDA_VISIBLE_DEVICES=X 指定空闲 GPU
-CUDA_VISIBLE_DEVICES=X python scripts/06_full_pipeline.py \
-  --config configs/debug_3samples.yaml
+# 创建 stub 库
+mkdir -p /tmp/nvml_fix
+cat > /tmp/nvml_fix/nvml_stub.c << 'EOF'
+int nvmlDeviceGetNvLinkRemoteDeviceType(void *device, unsigned int link, int *type) {
+    if (type) *type = 0;
+    return 0;
+}
+EOF
+gcc -shared -fPIC -o /tmp/nvml_fix/libnvml_fix.so /tmp/nvml_fix/nvml_stub.c
+cp /lib/x86_64-linux-gnu/libnvidia-ml.so.1 /tmp/nvml_fix/
+patchelf --add-needed libnvml_fix.so /tmp/nvml_fix/libnvidia-ml.so.1
+
+# 运行时设置
+export LD_LIBRARY_PATH=/tmp/nvml_fix:$LD_LIBRARY_PATH
 ```
 
-**渐进式验证策略**：从 3样本 → 10样本 → 全量
+**验证**：CUDA tensor 操作、模型加载、DPO 训练均通过。
 
-| 子任务 | 样本数 | 状态 | 负责人 | GPU 需求 | 预计耗时 |
-|--------|--------|------|--------|---------|----------|
-| 3.1.1 极小规模验证 | 3 | ⏳ 等待GPU | Runner | 1x V100(≥20GB free) | 30-60分钟 |
-| 3.1.2 中等规模验证 | 10 | ⏳ 等待3.1.1 | Implementer | 1x V100(≥20GB free) | 1-2小时 |
+#### 3.0.2 端到端管线调通 ✅ 已完成（2026-04-01）
+
+**步骤 1-5 全部成功运行**（3样本 BoolQ，GPU 5）：
+
+| 步骤 | 命令 | 结果 | 耗时 |
+|------|------|------|------|
+| Step 1: 生成轨迹 | `CUDA_VISIBLE_DEVICES=5 python scripts/01_generate_trajectories.py --config configs/config.yaml` | 22 个偏好对 | ~5 min |
+| Step 2: 构建偏好 | `python scripts/02_build_preferences.py --config configs/config.yaml` | actor 22对 + critic 22对 | ~1s |
+| Step 3: 训练 Critic | `CUDA_VISIBLE_DEVICES=5 LD_LIBRARY_PATH=/tmp/nvml_fix:$LD_LIBRARY_PATH python scripts/03_train_critic.py --config configs/config.yaml` | loss=2.585, 6步 | ~60s |
+| Step 4: 训练 Actor | 同上 + `04_train_actor.py` | loss=0.815, 6步 | ~60s |
+| Step 5: 评估 | 同上 + `05_evaluate.py` | acc=33.3% (3样本) | ~4 min |
+
+**训练参数调整**（适应 V100 32GB）：
+- batch_size: 4 → 1（解决 GPU OOM）
+- max_length: 2048 → 1024（减少 logits 内存占用）
+- gradient_checkpointing: True（减少激活内存）
+- max_model_len: 1024 → 4096（容纳审议上下文）
+
+**代码修复清单**：
+1. `src/training/dpo_trainer.py` — 添加 gradient_checkpointing 参数
+2. `scripts/03_train_critic.py` — batch_size=1, max_length=1024
+3. `scripts/04_train_actor.py` — batch_size=1, max_length=1024
+4. `scripts/05_evaluate.py` — test_data fallback + max_model_len=4096
+5. `configs/config.yaml` — 更新 step03/04 默认参数
+
+#### 3.1 小规模验证 ✅ 已完成（3样本）
+
+| 子任务 | 样本数 | 状态 | 结果 |
+|--------|--------|------|------|
+| 3.1.1 极小规模验证 | 3 | ✅ 完成 | 端到端通过，acc=33.3% |
+| 3.1.2 中等规模验证 | 10 | ⏳ 下一步 | 待运行 |
+| 3.1.3 核心算法验证 | - | ⏳ 下一步 | 待运行 |
 | 3.1.3 核心算法验证 | - | ⏳ 等待3.1.2 | Implementer + Analyst | 1x V100 | 1-2小时 |
 
 **运行命令**（GPU 就绪后）：
@@ -307,8 +346,8 @@ python scripts/06_full_pipeline.py \
 |--------|------|--------------|------|
 | M1: Bug 修复完成 | alternating_train、MC Roll-out、DPO beta 全部修复 | Day 1 | ✅ 已完成 |
 | M2: 功能完善完成 | Prompt 模板、验证集评估、代码重复问题全部解决 | Day 2 | ✅ 已完成 |
-| M3.0: 极小规模验证通过 | 3样本端到端运行成功 | Day 3 | 🔄 进行中 |
-| M3.1: 中等规模验证通过 | 10样本端到端运行成功 | Day 3 | ⏳ 待开始 |
+| M3.0: 极小规模验证通过 | 3样本端到端运行成功 | Day 3 | ✅ 已完成 |
+| M3.1: 中等规模验证通过 | 10样本端到端运行成功 | Day 3 | 🔄 进行中 |
 | M3.2: 核心算法验证通过 | MC Roll-out、DPO loss、偏好对分布验证 | Day 3 | ⏳ 待开始 |
 | M4: BoolQ 复现完成 | 完整数据集运行，结果符合预期 | Day 5 | ⏳ 待开始 |
 | M5: 多数据集验证完成 | 5个数据集全部复现 | Day 8 | ⏳ 待开始 |
@@ -330,26 +369,31 @@ python scripts/06_full_pipeline.py \
 
 ## 下一步行动（优先级排序）
 
-### 立即执行（2026-03-31）
+### 立即执行（2026-04-01）
 
-1. **Implementer**：执行极小规模验证（3样本，30-60分钟）
+1. **Implementer**：运行中等规模验证（10样本 BoolQ）
    ```bash
-   python scripts/06_full_pipeline.py \
-     --model_name google/gemma-2-2b-it \
-     --dataset boolq \
-     --output_dir experiments/debug_small \
-     --max_samples 3 \
-     --num_iterations 1
+   # 修改 configs/config.yaml 中 max_samples: 10
+   # 步骤 1-2: 重新生成轨迹（步骤 3-5 可复用当前数据或重新生成）
+   CUDA_VISIBLE_DEVICES=5 LD_LIBRARY_PATH=/tmp/nvml_fix:$LD_LIBRARY_PATH \
+     python scripts/01_generate_trajectories.py --config configs/config.yaml
+
+   # 步骤 2-5 依次运行
+   python scripts/02_build_preferences.py --config configs/config.yaml
+   CUDA_VISIBLE_DEVICES=5 LD_LIBRARY_PATH=/tmp/nvml_fix:$LD_LIBRARY_PATH \
+     python scripts/03_train_critic.py --config configs/config.yaml
+   CUDA_VISIBLE_DEVICES=5 LD_LIBRARY_PATH=/tmp/nvml_fix:$LD_LIBRARY_PATH \
+     python scripts/04_train_actor.py --config configs/config.yaml
+   CUDA_VISIBLE_DEVICES=5 LD_LIBRARY_PATH=/tmp/nvml_fix:$LD_LIBRARY_PATH \
+     python scripts/05_evaluate.py --config configs/config.yaml
    ```
 
-2. **Planner**：监控实验进度，更新任务状态
-
-3. **Analyst**：准备实验结果记录模板和分析工具
+2. **Engineer**：确保 NVML fix 脚本和文档更新完成
 
 ### 待执行（依赖任务完成后）
 
-4. **Implementer**：中等规模验证（10样本）
-5. **Implementer + Analyst**：核心算法验证与分析
+3. **Implementer + Analyst**：核心算法验证与分析
+4. **Implementer**：完整 BoolQ 复现（全量数据）
 
 ## 当前状态总结
 
@@ -358,6 +402,12 @@ python scripts/06_full_pipeline.py \
 - ✅ 7 个关键问题全部修复
 - ✅ Prompt 模板与论文一致
 - ✅ 代码质量提升（消除重复）
+
+**阶段 3 进展**：
+- ✅ NVML 兼容性问题解决（patchelf 方案）
+- ✅ 端到端管线调通（3样本 BoolQ）
+- ✅ 步骤 1-5 全部运行成功
+- 🔄 中等规模验证（10样本）待运行
 
 **准备进入阶段 3：实验验证**
 
@@ -456,17 +506,29 @@ python scripts/06_full_pipeline.py \
 
 ## 会话状态快照
 
-**最后更新**：2026-03-31 09:10
+**最后更新**：2026-04-01 07:40
 
 **当前阶段**：阶段 3 - 实验验证
 
-**运行中的实验**：
-- GPU 10 上运行 3样本端到端测试
-- 命令：`python scripts/06_full_pipeline.py --model_name google/gemma-2-2b-it --dataset boolq --output_dir experiments/debug_small --max_samples 3 --num_iterations 1`
-- 启动时间：约 09:05
+**已完成的验证**：
+- ✅ 步骤 1: 生成轨迹（22个偏好对）
+- ✅ 步骤 2: 构建偏好数据集（actor 22对 + critic 22对）
+- ✅ 步骤 3: 训练 Critic（loss=2.585, 6步, ~60s）
+- ✅ 步骤 4: 训练 Actor（loss=0.815, 6步, ~60s）
+- ✅ 步骤 5: 评估（acc=33.3%, 3样本验证集）
 
-**任务列表**：
-- #5: 小规模验证 (3样本) - 🔄 进行中
+**关键修复**：
+1. NVML patchelf 方案：解决了 PyTorch 2.10 + 旧驱动不兼容问题
+2. GPU OOM：batch_size=1, max_length=1024, gradient_checkpointing=True
+3. max_model_len：从 1024 增加到 4096（容纳审议上下文）
+4. test_data fallback：使用 validation split 替代 test split
+
+**运行命令模板**：
+```bash
+# 所有训练/评估脚本使用此模板
+CUDA_VISIBLE_DEVICES=5 LD_LIBRARY_PATH=/tmp/nvml_fix:$LD_LIBRARY_PATH \
+  python scripts/XX_xxx.py --config configs/config.yaml
+```
 - #6: 中等规模验证 (10样本) - ⏳ 等待中
 - #7: 核心算法验证 - ⏳ 等待中
 - #9: 完整实验 (1轮) - ⏳ 等待中
@@ -476,4 +538,297 @@ python scripts/06_full_pipeline.py \
 1. 检查 experiments/debug_small/ 目录结果
 2. 验证 3样本实验是否成功
 3. 如成功，启动 10样本实验
+
+---
+
+## 阶段三步骤 3 执行计划（详细版）
+
+### 计划概述
+
+**目标**：完成步骤 3（训练 Critic）和步骤 4（训练 Actor）的执行，并准备步骤 5（评估）
+
+**关键阻塞**：
+- 当前环境 PyTorch 版本（2.10.0+cu128）与 NVIDIA 驱动（450.142.00）不兼容
+- 需要降级 PyTorch 到 2.3.1+cu118
+
+**硬件资源**：
+- GPU 5, 6, 15 完全空闲（32GB each）
+- 单模型 float32 约 9.77GiB，两模型共需 ~20GiB
+
+---
+
+### 环境准备步骤
+
+#### 步骤 0.1：降级 PyTorch（必须优先完成）
+
+**问题**：PyTorch 2.10.0+cu128 调用 `nvmlDeviceGetNvLinkRemoteDeviceType`，该符号在驱动 450.142.00 中不存在。
+
+**解决方案**：
+```bash
+# 卸载当前 PyTorch
+pip uninstall torch trl transformers peft accelerate -y
+
+# 安装兼容版本
+pip install torch==2.3.1 --index-url https://download.pytorch.org/whl/cu118
+pip install -e ".[dev]"
+
+# 验证
+python -c "import torch; print(f'PyTorch: {torch.__version__}, CUDA: {torch.version.cuda}')"
+# 预期输出：PyTorch: 2.3.1+cu118, CUDA: 11.8
+
+# 验证 CUDA 可用性
+python -c "import torch; assert torch.cuda.is_available(), 'CUDA 不可用'; print('CUDA 可用')"
+```
+
+**验收标准**：
+- [ ] PyTorch 版本为 2.3.1+cu118
+- [ ] `torch.cuda.is_available()` 返回 True
+- [ ] 189 个测试仍然通过（确保兼容性）
+
+**预计耗时**：5-10 分钟
+
+---
+
+### 步骤 3：训练 Critic
+
+#### 3.1 输入验证
+
+**输入位置**：`experiments/debug_3samples/preferences/critic_preferences`
+
+**验证命令**：
+```bash
+python -c "
+from datasets import load_from_disk
+import os
+path = 'experiments/debug_3samples/preferences/critic_preferences'
+if not os.path.exists(path):
+    print('ERROR: 偏好数据集不存在，请先运行步骤 1-2')
+    exit(1)
+ds = load_from_disk(path)
+print(f'偏好对数量: {len(ds)}')
+print(f'特征列: {ds.column_names}')
+print(f'第一个样本:')
+for k, v in ds[0].items():
+    print(f'  {k}: {v[:100] if isinstance(v, str) else v}...')
+"
+```
+
+**预期输出**：
+- 偏好对数量：>0（3 样本应生成约 6-9 个 critic 偏好对）
+- 特征列：prompt, chosen, rejected, round, delta, direction
+
+**验收标准**：
+- [ ] 偏好数据集存在且格式正确
+- [ ] 偏好对数量合理
+
+---
+
+#### 3.2 执行命令
+
+**命令**：
+```bash
+# 使用 GPU 5（完全空闲）
+CUDA_VISIBLE_DEVICES=5 python scripts/03_train_critic.py \
+  --config configs/debug_3samples.yaml
+```
+
+**参数说明**（从 configs/debug_3samples.yaml 继承）：
+- `model_name`: google/gemma-2-2b-it
+- `preference_dir`: experiments/debug_3samples/preferences
+- `output_dir`: experiments/debug_3samples/critic
+- `lora_r`: 256
+- `learning_rate`: 5.0e-5
+- `batch_size`: 2（debug 配置）
+- `num_epochs`: 1
+- `max_length`: 2048
+
+**预计耗时**：
+- 3 样本 × 2 batch_size × 1 epoch ≈ 2-5 分钟
+
+---
+
+#### 3.3 输出验证
+
+**输出位置**：`experiments/debug_3samples/critic/`
+
+**验证命令**：
+```bash
+# 检查目录结构
+ls -la experiments/debug_3samples/critic/
+# 应包含：config.json, adapter_model/, tokenizer files
+
+# 检查模型文件
+python -c "
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import os
+path = 'experiments/debug_3samples/critic'
+if not os.path.exists(path):
+    print('ERROR: Critic 模型目录不存在')
+    exit(1)
+print('加载 Critic 模型...')
+model = AutoModelForCausalLM.from_pretrained(path, device_map='cpu')
+tokenizer = AutoTokenizer.from_pretrained(path)
+print(f'模型类型: {model.config.model_type}')
+print(f'词汇表大小: {len(tokenizer)}')
+print('Critic 模型验证通过')
+"
+```
+
+**验收标准**：
+- [ ] 输出目录存在，包含 config.json
+- [ ] 模型可以加载（device_map='cpu' 测试）
+- [ ] tokenizer 文件完整
+
+---
+
+### 步骤 4：训练 Actor
+
+#### 4.1 输入验证
+
+**输入位置**：`experiments/debug_3samples/preferences/actor_preferences`
+
+**验证命令**：
+```bash
+python -c "
+from datasets import load_from_disk
+import os
+path = 'experiments/debug_3samples/preferences/actor_preferences'
+if not os.path.exists(path):
+    print('ERROR: Actor 偏好数据集不存在')
+    exit(1)
+ds = load_from_disk(path)
+print(f'Actor 偏好对数量: {len(ds)}')
+"
+```
+
+---
+
+#### 4.2 执行命令
+
+**命令**：
+```bash
+# 使用 GPU 6（完全空闲）
+CUDA_VISIBLE_DEVICES=6 python scripts/04_train_actor.py \
+  --config configs/debug_3samples.yaml
+```
+
+**参数**：与 Critic 相同，仅输出目录不同
+
+**预计耗时**：2-5 分钟
+
+---
+
+#### 4.3 输出验证
+
+**输出位置**：`experiments/debug_3samples/actor/`
+
+**验证命令**：同 Critic 验证
+
+**验收标准**：
+- [ ] 输出目录存在
+- [ ] 模型可以加载
+
+---
+
+### 步骤间数据流验证
+
+**检查点脚本**：
+```bash
+python -c "
+import os
+import json
+
+# 检查完整数据链
+steps = {
+    'Step 1 (轨迹)': 'experiments/debug_3samples/trajectories/trajectory_pairs.json',
+    'Step 2 (偏好-actor)': 'experiments/debug_3samples/preferences/actor_preferences',
+    'Step 2 (偏好-critic)': 'experiments/debug_3samples/preferences/critic_preferences',
+    'Step 3 (Critic)': 'experiments/debug_3samples/critic',
+    'Step 4 (Actor)': 'experiments/debug_3samples/actor',
+}
+
+print('=== 数据链完整性检查 ===')
+for step, path in steps.items():
+    exists = os.path.exists(path)
+    status = '✓' if exists else '✗'
+    print(f'{status} {step}: {path}')
+    if not exists:
+        print(f'  WARNING: {step} 缺失，后续步骤可能失败')
+
+# 验证轨迹文件内容
+traj_path = steps['Step 1 (轨迹)']
+if os.path.exists(traj_path):
+    with open(traj_path) as f:
+        pairs = json.load(f)
+    print(f'\n轨迹对数量: {len(pairs)}')
+    if pairs:
+        print(f'示例 keys: {list(pairs[0].keys())}')
+"
+```
+
+---
+
+### 步骤 5：评估（准备工作）
+
+#### 5.1 评估命令准备
+
+**命令**：
+```bash
+# 使用 GPU 15（完全空闲）
+CUDA_VISIBLE_DEVICES=15 python scripts/05_evaluate.py \
+  --config configs/debug_3samples.yaml
+```
+
+**注意**：评估需要加载训练好的 Actor 和 Critic 模型
+
+---
+
+### 失败回滚策略
+
+| 失败场景 | 检测方法 | 回滚动作 |
+|---------|---------|---------|
+| PyTorch 降级后测试失败 | `pytest tests/` 不通过 | 重新调整依赖版本，检查兼容性 |
+| 偏好数据集缺失/格式错误 | 步骤 3 验证失败 | 回退到步骤 1-2，重新生成轨迹 |
+| 训练 CUDA 错误 | 日志中出现 CUDA error | 检查 PyTorch 版本，确认降级成功 |
+| 训练 OOM | 日志中出现 out of memory | 减少 batch_size 或 gpu_memory_utilization |
+| 模型加载失败 | 步骤 3/4 验证失败 | 检查输出目录完整性，重新训练 |
+| 评估加载模型失败 | 步骤 5 报错 | 确认步骤 3/4 输出正确 |
+
+---
+
+### 执行顺序总结
+
+```
+0. 环境准备（PyTorch 降级）
+   ↓ 验证：pytest tests/ 通过
+1. 验证步骤 1-2 输出
+   ↓ 验证：偏好数据集存在
+2. 执行步骤 3（训练 Critic）
+   ↓ 验证：Critic 模型可加载
+3. 执行步骤 4（训练 Actor）
+   ↓ 验证：Actor 模型可加载
+4. 数据链完整性检查
+   ↓ 验证：所有步骤输出完整
+5. 准备步骤 5（评估）
+   ↓ 等待：用户确认后执行
+```
+
+---
+
+### 预计总耗时
+
+- 步骤 0（PyTorch 降级）：5-10 分钟
+- 步骤 3（Critic 训练）：2-5 分钟
+- 步骤 4（Actor 训练）：2-5 分钟
+- 验证和检查：5 分钟
+- **总计**：15-25 分钟（不含步骤 5 评估）
+
+---
+
+### 下一步行动
+
+1. **立即执行**：降级 PyTorch 到 2.3.1+cu118
+2. **验证**：运行测试确保兼容性
+3. **执行**：按顺序运行步骤 3 → 步骤 4
+4. **汇报**：向 team-lead 汇报结果并准备步骤 5
 

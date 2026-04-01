@@ -191,12 +191,14 @@ def alternating_train(
             gpu_memory_utilization=gpu_memory_utilization,
             cuda_device=actor_device,
             dtype=dtype,
+            max_model_len=4096,  # Accommodate deliberation context
         )
         critic_model = VLLMInference(
             current_critic_path,
             gpu_memory_utilization=gpu_memory_utilization,
             cuda_device=critic_device,
             dtype=dtype,
+            max_model_len=4096,  # Accommodate deliberation context
         )
 
         current_critic_path = _generate_pairs_and_train(
@@ -230,12 +232,14 @@ def alternating_train(
             gpu_memory_utilization=gpu_memory_utilization,
             cuda_device=actor_device,
             dtype=dtype,
+            max_model_len=4096,  # Accommodate deliberation context
         )
         critic_model = VLLMInference(
             current_critic_path,
             gpu_memory_utilization=gpu_memory_utilization,
             cuda_device=critic_device,
             dtype=dtype,
+            max_model_len=4096,  # Accommodate deliberation context
         )
 
         current_actor_path = _generate_pairs_and_train(
@@ -272,12 +276,14 @@ def alternating_train(
                 gpu_memory_utilization=gpu_memory_utilization,
                 cuda_device=actor_device,
                 dtype=dtype,
+                max_model_len=4096,  # Accommodate deliberation context
             )
             critic_model = VLLMInference(
                 current_critic_path,
                 gpu_memory_utilization=gpu_memory_utilization,
                 cuda_device=critic_device,
                 dtype=dtype,
+                max_model_len=4096,  # Accommodate deliberation context
             )
 
             val_results = evaluate_benchmark(

@@ -37,6 +37,7 @@ STEP_DEFAULTS = {
     "critic_device": 0,
     "dtype": "float32",
     "gpu_memory_utilization": 0.45,
+    "max_model_len": 4096,
 }
 
 
@@ -77,6 +78,10 @@ def main():
 
     data = load_dataset(args.dataset, seed=args.seed)
     test_data = data.get("test", [])
+    if not test_data:
+        test_data = data.get("validation", [])
+        if test_data:
+            logger.info("  No test split found, using validation split for evaluation")
     if args.max_samples:
         test_data = test_data[:args.max_samples]
     logger.info(f"  Test samples: {len(test_data)}")
@@ -91,12 +96,14 @@ def main():
         cuda_device=args.actor_device,
         dtype=args.dtype,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        max_model_len=args.max_model_len,
     )
     critic = VLLMInference(
         args.critic_path,
         cuda_device=args.critic_device,
         dtype=args.dtype,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        max_model_len=args.max_model_len,
     )
 
     logger.info("Evaluating...")

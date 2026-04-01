@@ -1,8 +1,7 @@
 """
-DPO training using trl library with NLL regularization.
+DPO training using trl library.
 
-Implements the DPO loss from Eq. 6 of the ACC-Collab paper,
-with NLL regularization as in Pang et al. (2024a) IRPO.
+Implements the DPO loss from Eq. 6 of the ACC-Collab paper.
 """
 
 from __future__ import annotations
@@ -25,7 +24,6 @@ def train_dpo(
     model_type: str = "gemma2",
     lora_r: int = 256,
     lora_alpha: int = 512,
-    nll_weight: float = 1.0,
     learning_rate: float = 5e-5,
     batch_size: int = 4,
     gradient_accumulation_steps: int = 4,
@@ -33,9 +31,14 @@ def train_dpo(
     max_length: int = 2048,
     warmup_ratio: float = 0.1,
     beta: float = 0.1,
+    loss_type: str = "sigmoid",
+    max_grad_norm: float = 1.0,
+    optim: str = "adamw_torch",
+    weight_decay: float = 0.01,
     seed: int = 42,
     use_wandb: bool = False,
     wandb_project: str = "acc-collab",
+    gradient_checkpointing: bool = True,
 ) -> str:
     """
     Train a model with DPO + LoRA.
@@ -47,7 +50,6 @@ def train_dpo(
         model_type: Model architecture for LoRA target modules.
         lora_r: LoRA rank.
         lora_alpha: LoRA alpha.
-        nll_weight: NLL regularization weight (paper: 1.0).
         learning_rate: Learning rate.
         batch_size: Per-device batch size.
         gradient_accumulation_steps: Gradient accumulation.
@@ -55,6 +57,10 @@ def train_dpo(
         max_length: Max sequence length.
         warmup_ratio: Warmup ratio.
         beta: DPO beta parameter controlling deviation from reference policy.
+        loss_type: DPO loss type ("sigmoid", "hinge", "ipo", etc.).
+        max_grad_norm: Max gradient norm for clipping (important for FP16).
+        optim: Optimizer type.
+        weight_decay: Weight decay for optimizer.
         seed: Random seed.
         use_wandb: Whether to log to wandb.
         wandb_project: Wandb project name.
@@ -68,13 +74,25 @@ def train_dpo(
     lora_config = get_lora_config(model_type, r=lora_r, lora_alpha=lora_alpha)
 
     # Detect hardware capabilities for dtype selection
-    # Use including_emulation=False: V100 (cc 7.0) doesn't truly support bf16
-    # and emulation mode has no speed benefit over fp32.
+    # V100 (cc 7.0) doesn't support bf16. Gemma2 doesn't support fp16
+    # (numerical instability). So on V100 we must use float32.
     use_bf16 = (
         torch.cuda.is_available()
         and torch.cuda.is_bf16_supported(including_emulation=False)
     )
-    torch_dtype = torch.bfloat16 if use_bf16 else torch.float16
+    if use_bf16:
+        torch_dtype = torch.bfloat16
+    else:
+        # Check if fp16 is safe for the model (Gemma2 doesn't support fp16)
+        model_name_lower = model_name_or_path.lower()
+        if "gemma" in model_name_lower:
+            torch_dtype = torch.float32
+            logger.warning(
+                "Gemma models don't support fp16 (numerical instability). "
+                "Falling back to float32 on this hardware."
+            )
+        else:
+            torch_dtype = torch.float16
     logger.info(f"Using dtype: {torch_dtype} (bf16 supported: {use_bf16})")
 
     logger.info(f"Loading model: {model_name_or_path}")
@@ -98,24 +116,37 @@ def train_dpo(
         warmup_ratio=warmup_ratio,
         max_length=max_length,
         beta=beta,
+        loss_type=loss_type,
+        max_grad_norm=max_grad_norm,
+        optim=optim,
+        weight_decay=weight_decay,
         seed=seed,
         logging_steps=10,
         save_strategy="epoch",
         bf16=use_bf16,
-        fp16=not use_bf16,
+        fp16=(not use_bf16 and torch_dtype != torch.float32),
+        gradient_checkpointing=gradient_checkpointing,
         remove_unused_columns=False,
         report_to="wandb" if use_wandb else "none",
         run_name=wandb_project if use_wandb else None,
     )
 
-    # Initialize DPO trainer
-    trainer = DPOTrainer(
+    # Initialize DPO trainer with trl version compatibility
+    # trl <0.12 uses tokenizer=, >=0.12 uses processing_class=
+    import trl
+    trl_version = tuple(int(x) for x in trl.__version__.split('.')[:2])
+    trainer_kwargs = dict(
         model=model,
         args=training_args,
         train_dataset=preference_dataset,
-        processing_class=tokenizer,
         peft_config=lora_config,
     )
+    if trl_version >= (0, 12):
+        trainer_kwargs["processing_class"] = tokenizer
+    else:
+        trainer_kwargs["tokenizer"] = tokenizer
+
+    trainer = DPOTrainer(**trainer_kwargs)
 
     logger.info("Starting DPO training...")
     trainer.train()

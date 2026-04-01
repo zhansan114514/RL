@@ -15,6 +15,13 @@ import os
 
 from _utils import resolve_config, setup_logging
 
+# Apply NVML fix if needed (for PyTorch 2.10+ with old NVIDIA drivers)
+try:
+    from src.utils import nvml_fix
+    nvml_fix.auto_apply_nvml_fix()
+except ImportError:
+    pass  # NVML fix module not available
+
 setup_logging()
 logger = logging.getLogger(__name__)
 
@@ -27,9 +34,9 @@ STEP_DEFAULTS = {
     "model_type": None,
     "lora_r": 256,
     "learning_rate": 5e-5,
-    "batch_size": 4,
+    "batch_size": 1,
     "num_epochs": 1,
-    "max_length": 2048,
+    "max_length": 1024,
     "seed": 42,
     "use_wandb": False,
 }
