@@ -14,14 +14,14 @@ class TestAnswerExtraction:
     @pytest.mark.parametrize(
         "response, expected",
         [
-            ("The answer is Yes.", "yes"),
-            ("Final answer: No", "no"),
-            ("Based on the passage, the answer is Yes", "yes"),
-            ("I think the answer is no.", "no"),
-            ("Yes, that is correct.", "yes"),
-            ("No, that is incorrect.", "no"),
-            ("YES", "yes"),
-            ("NO", "no"),
+            ("The answer is Yes.", "YES"),
+            ("Final answer: No", "NO"),
+            ("Based on the passage, the answer is Yes", "YES"),
+            ("I think the answer is no.", "NO"),
+            ("Yes, that is correct.", "YES"),
+            ("No, that is incorrect.", "NO"),
+            ("YES", "YES"),
+            ("NO", "NO"),
             # "The sky is blue" has no Yes/No → None
 
         ],
@@ -267,14 +267,14 @@ class TestDataPreprocessorEdgeCases:
 
         long_text = " ".join(["word"] * 10000) + " The answer is Yes."
         result = extract_answer(long_text, task_type="yes_no")
-        assert result == "yes"
+        assert result == "YES"
 
     def test_extract_answer_mixed_type_fallback(self):
         """Mixed type should fallback to yes_no when MC fails."""
         from src.data.preprocessor import extract_answer
 
         result = extract_answer("The answer is Yes.", task_type="mixed")
-        assert result == "yes"
+        assert result == "YES"
 
     def test_extract_answer_invalid_task_type(self):
         """Invalid task type should return None."""

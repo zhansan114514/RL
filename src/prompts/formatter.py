@@ -8,7 +8,7 @@ from typing import Any
 
 from src.prompts.templates import (
     PromptType,
-    get_template,
+    get_prompt_template,
 )
 
 
@@ -30,7 +30,7 @@ def format_prompt(
     Returns:
         Formatted prompt string.
     """
-    template = get_template(dataset_name, prompt_type)
+    template = get_prompt_template(dataset_name, prompt_type)
 
     # Build format variables from sample + kwargs
     fmt_vars: dict[str, Any] = {

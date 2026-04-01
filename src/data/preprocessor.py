@@ -6,106 +6,10 @@ import re
 import logging
 from typing import Any, Optional
 
+# Re-export from the canonical reward module (authoritative zeta function)
+from src.algorithms.reward import extract_answer, normalize_answer
+
 logger = logging.getLogger(__name__)
-
-
-def extract_answer(response: str, task_type: str = "yes_no") -> Optional[str]:
-    """
-    Extract structured answer from LLM text response.
-
-    This implements the zeta function zeta(z_a^(T)) from the paper.
-
-    Args:
-        response: Raw text response from the LLM.
-        task_type: One of "yes_no", "multiple_choice", "mixed".
-
-    Returns:
-        Extracted answer string, or None if extraction fails.
-    """
-    if not response or not response.strip():
-        return None
-
-    if task_type == "yes_no":
-        return _extract_yes_no(response)
-    elif task_type == "multiple_choice":
-        return _extract_multiple_choice(response)
-    elif task_type == "mixed":
-        # Try multiple choice first, then yes/no
-        result = _extract_multiple_choice(response)
-        if result:
-            return result
-        return _extract_yes_no(response)
-    else:
-        logger.warning(f"Unknown task_type: {task_type}")
-        return None
-
-
-def _extract_yes_no(response: str) -> Optional[str]:
-    """Extract Yes/No answer from response."""
-    # Clean response
-    text = response.strip()
-
-    # Priority patterns (ordered by specificity)
-    patterns = [
-        r"[Ff]inal [Aa]nswer:?\s*(Yes|No)",
-        r"[Aa]nswer:?\s*(Yes|No)",
-        r"[Tt]he answer is\s*(Yes|No)",
-        r"I (?:think|believe) (?:the answer is )?(?:Yes|No)",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            return match.group(1).lower()
-
-    # Fallback: find the last Yes/No in the text
-    matches = re.findall(r"\b(Yes|No)\b", text, re.IGNORECASE)
-    if matches:
-        return matches[-1].lower()
-
-    return None
-
-
-def _extract_multiple_choice(response: str) -> Optional[str]:
-    """Extract A/B/C/D option from response."""
-    text = response.strip()
-
-    # Priority patterns
-    patterns = [
-        r"[Ff]inal [Aa]nswer:?\s*\(([A-D])\)",
-        r"[Ff]inal [Aa]nswer:?\s*([A-D])[\.\s]",
-        r"[Aa]nswer:?\s*\(([A-D])\)",
-        r"[Aa]nswer:?\s*([A-D])[\.\s]",
-        r"\(([A-D])\)",
-        r"[Oo]ption\s*([A-D])",
-        r"[Cc]hoice\s*([A-D])",
-        r"[Tt]he (?:correct )?(?:answer|option) is\s*\(?\s*([A-D])\s*\)?",
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, re.IGNORECASE)
-        if match:
-            return match.group(1).upper()
-
-    # Fallback: find standalone A/B/C/D near "answer" context
-    match = re.search(r"\b([A-D])\b(?=[\.\,\;\:]?\s*$|\s*(?:is|\.))", text, re.MULTILINE)
-    if match:
-        return match.group(1).upper()
-
-    return None
-
-
-def normalize_answer(answer: str) -> str:
-    """
-    Normalize answer for consistent comparison.
-
-    Args:
-        answer: Raw answer string.
-
-    Returns:
-        Normalized answer string.
-    """
-    if answer is None:
-        return ""
-    return str(answer).strip().lower().strip("()").strip(".").upper()[:1] if answer else ""
 
 
 def standardize_sample(

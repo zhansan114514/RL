@@ -55,7 +55,7 @@ def main():
 
     logger.info(f"Total pairs: {len(all_pairs)}")
 
-    from src.trajectory.preference import build_preference_dataset, to_hf_dataset
+    from src.trajectory.preference import build_preference_dataset, convert_to_hf_dataset
 
     for agent in ["actor", "critic"]:
         prefs = build_preference_dataset(all_pairs, min_delta=args.min_delta, agent=agent)
@@ -63,7 +63,7 @@ def main():
             logger.warning(f"No preference pairs for {agent}, skipping")
             continue
 
-        hf_dataset = to_hf_dataset(prefs)
+        hf_dataset = convert_to_hf_dataset(prefs)
         output_path = os.path.join(args.output_dir, f"{agent}_preferences")
         hf_dataset.save_to_disk(output_path)
         logger.info(f"  {agent}: {len(prefs)} pairs -> {output_path}")

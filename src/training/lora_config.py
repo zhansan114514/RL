@@ -10,23 +10,21 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Default target modules for common architectures
-LLAMA_TARGET_MODULES = [
+# Target modules shared by all supported architectures (llama3, mistral, gemma2)
+DEFAULT_TARGET_MODULES = [
     "q_proj", "k_proj", "v_proj", "o_proj",
     "gate_proj", "up_proj", "down_proj",
 ]
 
-MISTRAL_TARGET_MODULES = LLAMA_TARGET_MODULES
-
-GEMMA_TARGET_MODULES = [
-    "q_proj", "k_proj", "v_proj", "o_proj",
-    "gate_proj", "up_proj", "down_proj",
-]
+# Backward-compatible aliases
+LLAMA_TARGET_MODULES = DEFAULT_TARGET_MODULES
+MISTRAL_TARGET_MODULES = DEFAULT_TARGET_MODULES
+GEMMA_TARGET_MODULES = DEFAULT_TARGET_MODULES
 
 MODEL_TARGET_MODULES = {
-    "llama3": LLAMA_TARGET_MODULES,
-    "mistral": MISTRAL_TARGET_MODULES,
-    "gemma2": GEMMA_TARGET_MODULES,
+    "llama3": DEFAULT_TARGET_MODULES,
+    "mistral": DEFAULT_TARGET_MODULES,
+    "gemma2": DEFAULT_TARGET_MODULES,
 }
 
 
@@ -50,7 +48,7 @@ def get_lora_config(
     """
     from peft import LoraConfig, TaskType
 
-    target_modules = MODEL_TARGET_MODULES.get(model_type, LLAMA_TARGET_MODULES)
+    target_modules = MODEL_TARGET_MODULES.get(model_type, DEFAULT_TARGET_MODULES)
 
     config = LoraConfig(
         r=r,

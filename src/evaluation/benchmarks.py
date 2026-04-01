@@ -7,8 +7,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from src.deliberation.engine import deliberate
-from src.reward.accuracy import (
+from src.algorithms.deliberation import deliberate
+from src.algorithms.reward import (
     extract_answer,
     compute_accuracy,
     compute_accuracy_with_ci,

@@ -204,7 +204,7 @@ DATASET_TEMPLATES = {
 }
 
 
-def get_template(
+def get_prompt_template(
     dataset_name: str,
     prompt_type: PromptType,
 ) -> str:

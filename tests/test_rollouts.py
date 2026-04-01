@@ -37,9 +37,8 @@ class TestMCRolloutEdgeCases:
         assert 0.0 <= result <= 1.0
 
     def test_zero_simulations(self):
-        """Zero simulations causes division by zero - this is expected behavior."""
+        """Zero simulations should safely return 0.0 (handled gracefully)."""
         from src.deliberation.rollouts import estimate_final_accuracy
-        import pytest
 
         actor = MagicMock()
         critic = MagicMock()
@@ -51,17 +50,16 @@ class TestMCRolloutEdgeCases:
             "task_type": "yes_no",
         }
 
-        # With num_simulations=0, we expect division by zero
-        # This is a known edge case that should be avoided in practice
-        with pytest.raises(ZeroDivisionError):
-            estimate_final_accuracy(
-                actor, critic, sample, "boolq",
-                current_actor_response="The answer is Yes.",
-                current_critic_response="Good.",
-                previous_responses=[],
-                num_simulations=0,
-                remaining_rounds=1,
-            )
+        # With num_simulations=0, should return 0.0 gracefully
+        result = estimate_final_accuracy(
+            actor, critic, sample, "boolq",
+            current_actor_response="The answer is Yes.",
+            current_critic_response="Good.",
+            previous_responses=[],
+            num_simulations=0,
+            remaining_rounds=1,
+        )
+        assert result == 0.0
 
     def test_all_simulations_correct(self):
         """When all simulations give correct answer, should return 1.0."""
@@ -494,7 +492,7 @@ class TestMCRolloutOneStepFixVerification:
             })
             return original_format(dataset_name, prompt_type, sample_arg, **kwargs)
 
-        with patch("src.prompts.formatter.format_prompt", side_effect=capture_format):
+        with patch("src.algorithms.rollout.format_prompt", side_effect=capture_format):
             estimate_final_accuracy(
                 actor, critic, sample, "boolq",
                 current_actor_response="Current response.",
@@ -549,13 +547,13 @@ class TestMCRolloutOneStepFixVerification:
 
     def test_paper_compliance_one_step_description(self):
         """Verify code documentation mentions one-step roll-out per paper."""
-        from src.deliberation import rollouts
+        from src.algorithms import rollout
 
         # Check that the module docstring mentions one-step
-        module_doc = rollouts.__doc__
+        module_doc = rollout.__doc__
         assert "one-step" in module_doc.lower()
         assert "roll-out" in module_doc.lower() or "rollout" in module_doc.lower()
 
         # Check function docstring
-        func_doc = rollouts.estimate_final_accuracy.__doc__
+        func_doc = rollout.estimate_final_accuracy.__doc__
         assert "one-step" in func_doc.lower() or "one step" in func_doc.lower()

@@ -50,8 +50,8 @@ class TestAlternatingTrainModelPaths:
     """Test model path propagation in alternating training."""
 
     @patch("src.inference.vllm_server.VLLMInference")
-    @patch("src.training.alternating.train_dpo")
-    @patch("src.training.alternating.generate_trajectories")
+    @patch("src.training.trainer.train_dpo")
+    @patch("src.training.trainer.generate_trajectories")
     def test_model_path_propagation_single_iteration(
         self, mock_gen_traj, mock_train_dpo, mock_vllm
     ):
@@ -88,8 +88,8 @@ class TestAlternatingTrainModelPaths:
         assert "critic_path" in result
 
     @patch("src.inference.vllm_server.VLLMInference")
-    @patch("src.training.alternating.train_dpo")
-    @patch("src.training.alternating.generate_trajectories")
+    @patch("src.training.trainer.train_dpo")
+    @patch("src.training.trainer.generate_trajectories")
     def test_model_path_propagation_two_iterations(
         self, mock_gen_traj, mock_train_dpo, mock_vllm
     ):
@@ -141,8 +141,8 @@ class TestAlternatingTrainModelPaths:
         assert "actor" in train_calls[3]   # Second actor training
 
     @patch("src.inference.vllm_server.VLLMInference")
-    @patch("src.training.alternating.train_dpo")
-    @patch("src.training.alternating.generate_trajectories")
+    @patch("src.training.trainer.train_dpo")
+    @patch("src.training.trainer.generate_trajectories")
     def test_empty_dataset_handling(self, mock_gen_traj, mock_train_dpo, mock_vllm):
         """Empty dataset should raise ValueError."""
         from src.training.alternating import alternating_train
@@ -161,8 +161,8 @@ class TestAlternatingTrainModelPaths:
             )
 
     @patch("src.inference.vllm_server.VLLMInference")
-    @patch("src.training.alternating.train_dpo")
-    @patch("src.training.alternating.generate_trajectories")
+    @patch("src.training.trainer.train_dpo")
+    @patch("src.training.trainer.generate_trajectories")
     def test_no_preference_pairs_raises_error(
         self, mock_gen_traj, mock_train_dpo, mock_vllm
     ):
@@ -195,8 +195,8 @@ class TestAlternatingTrainModelPathsFixVerification:
     """Verify the alternating_train model path fix (issue #18)."""
 
     @patch("src.inference.vllm_server.VLLMInference")
-    @patch("src.training.alternating.train_dpo")
-    @patch("src.training.alternating.generate_trajectories")
+    @patch("src.training.trainer.train_dpo")
+    @patch("src.training.trainer.generate_trajectories")
     def test_second_iteration_uses_trained_model_paths(
         self, mock_gen_traj, mock_train_dpo, mock_vllm
     ):
@@ -237,8 +237,8 @@ class TestAlternatingTrainModelPathsFixVerification:
         assert "trained_critic" in result["critic_path"]
 
     @patch("src.inference.vllm_server.VLLMInference")
-    @patch("src.training.alternating.train_dpo")
-    @patch("src.training.alternating.generate_trajectories")
+    @patch("src.training.trainer.train_dpo")
+    @patch("src.training.trainer.generate_trajectories")
     def test_vllm_uses_updated_paths_between_iterations(
         self, mock_gen_traj, mock_train_dpo, mock_vllm
     ):
@@ -289,8 +289,8 @@ class TestAlternatingTrainModelPathsFixVerification:
         assert has_trained_path, "Should use trained model paths in second iteration"
 
     @patch("src.inference.vllm_server.VLLMInference")
-    @patch("src.training.alternating.train_dpo")
-    @patch("src.training.alternating.generate_trajectories")
+    @patch("src.training.trainer.train_dpo")
+    @patch("src.training.trainer.generate_trajectories")
     def test_three_iterations_path_progression(
         self, mock_gen_traj, mock_train_dpo, mock_vllm
     ):
@@ -371,8 +371,8 @@ class TestDPOBetaParameterFixVerification:
     """Verify the DPO beta parameter fix (issue #21)."""
 
     @patch("src.inference.vllm_server.VLLMInference")
-    @patch("src.training.alternating.generate_trajectories")
-    @patch("src.training.alternating.train_dpo")
+    @patch("src.training.trainer.generate_trajectories")
+    @patch("src.training.trainer.train_dpo")
     def test_beta_passed_from_alternating_train_to_dpo(
         self, mock_train_dpo, mock_gen, mock_vllm
     ):

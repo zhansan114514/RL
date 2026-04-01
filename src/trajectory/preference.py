@@ -55,7 +55,7 @@ def build_preference_dataset(
     return dataset
 
 
-def to_hf_dataset(
+def convert_to_hf_dataset(
     preference_data: list[dict],
 ) -> "datasets.Dataset":
     """Convert preference data list to HuggingFace Dataset."""

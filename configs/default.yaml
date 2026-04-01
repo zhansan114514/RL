@@ -1,0 +1,57 @@
+# ACC-Collab 全局默认配置
+# 这是唯一的全局默认值来源。所有硬编码参数集中于此。
+# 覆盖优先级：default.yaml < model/*.yaml < data/*.yaml < train/*.yaml < 实验配置 < CLI overrides
+
+seed: 42
+experiment_name: "acc-collab"
+wandb_project: "acc-collab"
+log_dir: "experiments/logs"
+
+# 模型默认值
+model:
+  name: "google/gemma-2-2b-it"
+  type: "gemma2"
+
+# 数据集默认值
+dataset:
+  name: "boolq"
+  max_samples: null
+
+# 推理参数（消除 max_model_len 和 gpu_memory_utilization 的硬编码）
+inference:
+  max_model_len: 4096
+  gpu_memory_utilization: 0.45
+  dtype: "auto"
+  max_tokens: 256
+  temperature: 0.7
+
+# 审议参数（论文 Section 4）
+deliberation:
+  num_rounds: 5
+  reward_threshold: 0.0
+  num_simulations: 5
+
+# 训练参数（论文 Section 5）
+training:
+  lora_r: 256
+  lora_alpha: 512
+  learning_rate: 5e-5
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  num_epochs: 1
+  max_length: 2048
+  warmup_ratio: 0.1
+  beta: 0.1
+  loss_type: "sigmoid"
+  max_grad_norm: 1.0
+  optim: "adamw_torch"
+  weight_decay: 0.01
+  gradient_checkpointing: true
+
+# 交替训练调度
+scheduler:
+  num_iterations: 1
+  actor_device: 0
+  critic_device: 0
+  early_stopping_patience: null
+  min_improvement: 0.0

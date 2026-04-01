@@ -4,7 +4,7 @@ import pytest
 
 from src.prompts.templates import (
     PromptType,
-    get_template,
+    get_prompt_template,
     get_available_datasets,
     get_available_prompt_types,
     BOOLQ_TEMPLATES,
@@ -17,18 +17,18 @@ class TestTemplateRetrieval:
     """Test template lookup and validation."""
 
     def test_get_boolq_single_shot(self):
-        template = get_template("boolq", PromptType.SINGLE_SHOT)
+        template = get_prompt_template("boolq", PromptType.SINGLE_SHOT)
         assert "yes-no question" in template
         assert "{question}" in template
         assert "{passage}" in template
 
     def test_get_boolq_guided_single_shot(self):
-        template = get_template("boolq", PromptType.GUIDED_SINGLE_SHOT)
+        template = get_prompt_template("boolq", PromptType.GUIDED_SINGLE_SHOT)
         assert "{target_answer}" in template
         assert "{question}" in template
 
     def test_get_mmlu_single_shot(self):
-        template = get_template("mmlu", PromptType.SINGLE_SHOT)
+        template = get_prompt_template("mmlu", PromptType.SINGLE_SHOT)
         assert "{choice_a}" in template
         assert "{choice_b}" in template
         assert "{choice_c}" in template
@@ -36,7 +36,7 @@ class TestTemplateRetrieval:
 
     def test_get_unknown_dataset_raises(self):
         with pytest.raises(ValueError, match="Unknown dataset"):
-            get_template("fake_dataset", PromptType.SINGLE_SHOT)
+            get_prompt_template("fake_dataset", PromptType.SINGLE_SHOT)
 
     def test_all_datasets_have_all_6_template_types(self):
         """Each dataset must have all 6 prompt types."""

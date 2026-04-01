@@ -47,7 +47,7 @@ def compute_dataset_stats(samples: list[dict]) -> dict[str, Any]:
     return stats
 
 
-def print_dataset_summary(data: dict[str, list[dict]], name: str) -> None:
+def log_dataset_summary(data: dict[str, list[dict]], name: str) -> None:
     """Print a formatted summary of a loaded dataset."""
     logger.info(f"\n{'='*60}")
     logger.info(f"Dataset: {name}")
