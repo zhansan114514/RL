@@ -10,7 +10,7 @@ common:
   # 随机种子
   seed: 42
   # 调试时限制样本数，null 表示不限制
-  max_samples: 10
+  max_samples: null
   # 是否启用 WandB
   use_wandb: false
 

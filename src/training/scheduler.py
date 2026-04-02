@@ -17,7 +17,7 @@ import logging
 from typing import Optional
 
 from src.training.model_manager import create_model_pair, cleanup_models
-from src.training.trainer import train_agent
+from src.training.trainer import generate_trajectory_data, train_dpo_from_pairs
 
 logger = logging.getLogger(__name__)
 
@@ -101,18 +101,25 @@ def alternating_train(
             dtype=dtype,
         )
 
-        current_critic_path = train_agent(
-            "critic",
+        # Phase A: Generate trajectories with vLLM
+        critic_pairs = generate_trajectory_data(
             actor_model, critic_model, dataset, dataset_name,
-            current_critic_path, output_base_dir, iteration, model_type,
             num_rounds=num_rounds, reward_threshold=reward_threshold,
             num_simulations=num_simulations, max_tokens=max_tokens,
             temperature=temperature, seed=seed,
-            lora_r=lora_r, learning_rate=learning_rate,
-            batch_size=batch_size, num_epochs=num_epochs, beta=beta,
         )
 
+        # Phase B: Release vLLM models BEFORE loading training model
         cleanup_models(actor_model, critic_model)
+
+        # Phase C: DPO training on now-freed GPU
+        current_critic_path = train_dpo_from_pairs(
+            "critic", critic_pairs,
+            current_critic_path, output_base_dir, iteration, model_type,
+            lora_r=lora_r, learning_rate=learning_rate,
+            batch_size=batch_size, num_epochs=num_epochs, beta=beta,
+            seed=seed, device=critic_device,
+        )
 
         # Step 2: Train actor (fix critic)
         logger.info("Step 2: Training Actor (critic fixed)")
@@ -123,18 +130,25 @@ def alternating_train(
             dtype=dtype,
         )
 
-        current_actor_path = train_agent(
-            "actor",
+        # Phase A: Generate trajectories with vLLM
+        actor_pairs = generate_trajectory_data(
             actor_model, critic_model, dataset, dataset_name,
-            current_actor_path, output_base_dir, iteration, model_type,
             num_rounds=num_rounds, reward_threshold=reward_threshold,
             num_simulations=num_simulations, max_tokens=max_tokens,
             temperature=temperature, seed=seed,
-            lora_r=lora_r, learning_rate=learning_rate,
-            batch_size=batch_size, num_epochs=num_epochs, beta=beta,
         )
 
+        # Phase B: Release vLLM models BEFORE loading training model
         cleanup_models(actor_model, critic_model)
+
+        # Phase C: DPO training on now-freed GPU
+        current_actor_path = train_dpo_from_pairs(
+            "actor", actor_pairs,
+            current_actor_path, output_base_dir, iteration, model_type,
+            lora_r=lora_r, learning_rate=learning_rate,
+            batch_size=batch_size, num_epochs=num_epochs, beta=beta,
+            seed=seed, device=actor_device,
+        )
 
         # Validation
         if val_dataset is not None:

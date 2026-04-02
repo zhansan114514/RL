@@ -8,5 +8,5 @@ This file re-exports all public symbols for backward compatibility.
 """
 
 from src.training.scheduler import alternating_train
-from src.training.trainer import train_agent
+from src.training.trainer import train_agent, generate_trajectory_data, train_dpo_from_pairs
 from src.training.model_manager import create_model_pair, cleanup_models

@@ -39,6 +39,7 @@ def train_dpo(
     use_wandb: bool = False,
     wandb_project: str = "acc-collab",
     gradient_checkpointing: bool = True,
+    device: int = 0,
 ) -> str:
     """
     Train a model with DPO + LoRA.
@@ -95,102 +96,94 @@ def train_dpo(
             torch_dtype = torch.float16
     logger.info(f"Using dtype: {torch_dtype} (bf16 supported: {use_bf16})")
 
-    logger.info(f"Loading model: {model_name_or_path}")
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name_or_path,
-        torch_dtype=torch_dtype,
-        device_map={"": 0},
-        low_cpu_mem_usage=True,
-    )
-    tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    # DPO training arguments
-    # Per ACC-Collab paper Appendix A: "we use a negative log-likelihood (NLL)
-    # regularization term (with weight 1)"
-    # In trl >=0.14, NLL regularization is achieved by adding "sft" to loss_types
-    # with corresponding weight in loss_weights.
-    training_args = DPOConfig(
-        output_dir=output_dir,
-        num_train_epochs=num_epochs,
-        per_device_train_batch_size=batch_size,
-        gradient_accumulation_steps=gradient_accumulation_steps,
-        learning_rate=learning_rate,
-        warmup_ratio=warmup_ratio,
-        max_length=max_length,
-        beta=beta,
-        loss_type=[loss_type, "sft"],  # DPO loss + NLL (SFT) loss
-        loss_weights=[1.0, 1.0],  # weight=1 for both DPO and NLL as per paper
-        max_grad_norm=max_grad_norm,
-        optim=optim,
-        weight_decay=weight_decay,
-        seed=seed,
-        logging_steps=10,
-        save_strategy="epoch",
-        bf16=use_bf16,
-        fp16=(not use_bf16 and torch_dtype != torch.float32),
-        gradient_checkpointing=gradient_checkpointing,
-        remove_unused_columns=False,
-        report_to="wandb" if use_wandb else "none",
-        run_name=wandb_project if use_wandb else None,
-    )
-
-    # Initialize DPO trainer with trl version compatibility
-    # trl <0.12 uses tokenizer=, >=0.12 uses processing_class=
-    import trl
-    trl_version = tuple(int(x) for x in trl.__version__.split('.')[:2])
-    trainer_kwargs = dict(
-        model=model,
-        args=training_args,
-        train_dataset=preference_dataset,
-        peft_config=lora_config,
-    )
-    if trl_version >= (0, 12):
-        trainer_kwargs["processing_class"] = tokenizer
-    else:
-        trainer_kwargs["tokenizer"] = tokenizer
-
-    trainer = DPOTrainer(**trainer_kwargs)
-
-    logger.info("Starting DPO training...")
-    trainer.train()
-    logger.info("Training complete.")
-
-    # Save LoRA adapter first, then merge into base model for vLLM compatibility
-    adapter_dir = output_dir + "_adapter"
-    trainer.save_model(adapter_dir)
-    logger.info(f"LoRA adapter saved to: {adapter_dir}")
-
-    # Merge LoRA weights into base model
+    # Resolve target physical GPU id
     import os
-
-    if os.path.exists(os.path.join(adapter_dir, "adapter_config.json")):
-        logger.info("Merging LoRA weights into base model...")
-        from peft import PeftModel
-
-        base_model = AutoModelForCausalLM.from_pretrained(
-            model_name_or_path,
-            torch_dtype=torch_dtype,
-            device_map="cpu",
-        )
-        merged_model = PeftModel.from_pretrained(base_model, adapter_dir)
-        merged_model = merged_model.merge_and_unload()
-        merged_model.save_pretrained(output_dir)
-        tokenizer.save_pretrained(output_dir)
-        logger.info(f"Merged model saved to: {output_dir}")
-
-        del base_model, merged_model
+    _prev_cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES")
+    _all_gpus = _prev_cuda_vis.split(",") if _prev_cuda_vis else [
+        str(i) for i in range(torch.cuda.device_count())
+    ]
+    if device < len(_all_gpus):
+        target_physical = _all_gpus[device].strip()
     else:
-        # Fallback: no adapter found (e.g. in mock/test environments)
-        logger.warning("No adapter_config.json found, saving model as-is.")
-        trainer.save_model(output_dir)
-        tokenizer.save_pretrained(output_dir)
+        target_physical = str(device)
 
-    gc.collect()
-    try:
-        torch.cuda.empty_cache()
-    except RuntimeError:
-        pass
+    # Save preference dataset to disk and run DPO training in a subprocess.
+    # This is necessary because CUDA context may already be initialized by
+    # vLLM, making CUDA_VISIBLE_DEVICES ineffective in the current process.
+    # A subprocess gets a fresh CUDA context where CUDA_VISIBLE_DEVICES works.
+    _temp_dir = None
+    if preference_dataset is not None:
+        import tempfile
+        from datasets import load_from_disk
+        _temp_dir = tempfile.mkdtemp(prefix="dpo_data_")
+        dataset_path = os.path.join(_temp_dir, "preference_dataset")
+        preference_dataset.save_to_disk(dataset_path)
+        logger.info(f"Saved preference dataset to {dataset_path} for subprocess training")
+    else:
+        dataset_path = None
+
+    # Build subprocess config
+    _config_path = os.path.join(
+        _temp_dir or tempfile.mkdtemp(prefix="dpo_cfg_"), "config.json"
+    )
+    _config = {
+        "model_name_or_path": model_name_or_path,
+        "dataset_path": dataset_path,
+        "output_dir": output_dir,
+        "model_type": model_type,
+        "lora_r": lora_r,
+        "lora_alpha": lora_alpha,
+        "learning_rate": learning_rate,
+        "batch_size": batch_size,
+        "gradient_accumulation_steps": gradient_accumulation_steps,
+        "num_epochs": num_epochs,
+        "max_length": max_length,
+        "warmup_ratio": warmup_ratio,
+        "beta": beta,
+        "loss_type": loss_type,
+        "max_grad_norm": max_grad_norm,
+        "optim": optim,
+        "weight_decay": weight_decay,
+        "seed": seed,
+        "use_wandb": use_wandb,
+        "wandb_project": wandb_project,
+        "gradient_checkpointing": gradient_checkpointing,
+    }
+    with open(_config_path, "w") as f:
+        import json
+        json.dump(_config, f)
+
+    # Run training in subprocess with isolated CUDA context
+    import subprocess
+    import sys
+
+    _runner_script = os.path.join(os.path.dirname(__file__), "_dpo_runner.py")
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = target_physical
+    logger.info(f"DPO training on physical GPU {target_physical} (isolated subprocess)")
+
+    result = subprocess.run(
+        [sys.executable, _runner_script, _config_path],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=3600,
+    )
+
+    if result.stdout:
+        for line in result.stdout.strip().split("\n"):
+            if line.strip():
+                logger.info(f"[DPO worker] {line}")
+    if result.returncode != 0:
+        logger.error(f"DPO subprocess failed (exit {result.returncode}):")
+        if result.stderr:
+            for line in result.stderr.strip().split("\n")[-20:]:
+                logger.error(f"  {line}")
+        raise RuntimeError(f"DPO training failed with exit code {result.returncode}")
+
+    # Cleanup temp files
+    import shutil
+    if _temp_dir and os.path.exists(_temp_dir):
+        shutil.rmtree(_temp_dir, ignore_errors=True)
 
     return output_dir

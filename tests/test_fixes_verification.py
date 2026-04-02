@@ -344,15 +344,16 @@ class TestFix4DPONLLRegularization:
     def test_dpo_config_includes_nll_regularization(self):
         """DPOConfig should have loss_type=[dpo_loss, "sft"] for NLL regularization."""
         # Since train_dpo imports transformers/trl internally which may try to download models,
-        # we'll verify the fix by checking the source code directly
+        # we'll verify the fix by checking the source code directly.
+        # The DPO training logic lives in _dpo_runner.py (subprocess runner).
         import inspect
-        from src.training.dpo_trainer import train_dpo
+        from src.training._dpo_runner import _run
 
-        source = inspect.getsource(train_dpo)
+        source = inspect.getsource(_run)
 
         # Verify loss_type is set to a list including "sft"
-        assert 'loss_type=[loss_type, "sft"]' in source, \
-            "Code should set loss_type=[loss_type, 'sft'] for NLL regularization"
+        assert 'loss_type=[loss_type_val, "sft"]' in source, \
+            "Code should set loss_type=[loss_type_val, 'sft'] for NLL regularization"
 
         # Verify loss_weights is set
         assert 'loss_weights=[1.0, 1.0]' in source, \
@@ -365,26 +366,28 @@ class TestFix4DPONLLRegularization:
     def test_nll_regularization_with_custom_loss_type(self):
         """NLL regularization should work with any base loss_type."""
         import inspect
-        from src.training.dpo_trainer import train_dpo
+        from src.training._dpo_runner import _run
 
-        source = inspect.getsource(train_dpo)
+        source = inspect.getsource(_run)
 
-        # The code uses the loss_type parameter and adds "sft" to it
-        # Verify the pattern: loss_type=[loss_type, "sft"]
-        assert 'loss_type=[loss_type, "sft"]' in source, \
-            "Code should use parameter loss_type and add 'sft' to the list"
+        # The code reads loss_type from config and adds "sft" to it
+        assert 'loss_type=[loss_type_val, "sft"]' in source, \
+            "Code should use loss_type parameter and add 'sft' to the list"
 
     def test_dpo_code_mentions_nll_regularization(self):
         """The code should document NLL regularization in comments."""
-        # Read the source code to check for NLL documentation
         import inspect
-        from src.training.dpo_trainer import train_dpo
+        from src.training._dpo_runner import _run
 
-        source = inspect.getsource(train_dpo)
-        # The NLL regularization is documented in comments before DPOConfig
-        assert "NLL" in source or "negative log-likelihood" in source.lower(), \
+        source = inspect.getsource(_run)
+        # The NLL regularization is documented in dpo_trainer.py comments
+        from src.training.dpo_trainer import train_dpo
+        trainer_source = inspect.getsource(train_dpo)
+
+        combined = source + trainer_source
+        assert "NLL" in combined or "negative log-likelihood" in combined.lower(), \
             "Code should mention NLL regularization"
-        assert "sft" in source.lower(), "Code should mention SFT loss for NLL regularization"
+        assert "sft" in combined.lower(), "Code should mention SFT loss for NLL regularization"
 
 
 class TestFix5RolloutSimResponsesInterleaved:
