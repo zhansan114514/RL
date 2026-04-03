@@ -71,22 +71,20 @@ def main():
         train_data = train_data[:args.max_samples]
     logger.info(f"  Samples: {len(train_data)}")
 
-    logger.info(f"Loading models: {args.model_name}")
-    logger.info(f"  Actor on GPU {args.actor_device}, Critic on GPU {args.critic_device}")
+    logger.info(f"Loading model: {args.model_name}")
+    logger.info(f"  Actor/Critic share same model on GPU {args.actor_device}")
     from src.inference.vllm_server import VLLMInference
 
-    actor = VLLMInference(
+    # Actor and Critic use the same base model -> share one VLLMInference
+    # instance to fit in a single GPU.
+    shared_model = VLLMInference(
         args.model_name,
         cuda_device=args.actor_device,
         dtype=args.dtype,
         gpu_memory_utilization=args.gpu_memory_utilization,
     )
-    critic = VLLMInference(
-        args.model_name,
-        cuda_device=args.critic_device,
-        dtype=args.dtype,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-    )
+    actor = shared_model
+    critic = shared_model
 
     logger.info("Generating trajectories...")
     from src.algorithms.trajectory import generate_trajectories

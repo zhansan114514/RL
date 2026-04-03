@@ -87,24 +87,35 @@ def main():
     logger.info(f"  Test samples: {len(test_data)}")
 
     logger.info(f"Loading actor: {args.actor_path}")
-    logger.info(f"Loading critic: {args.critic_path}")
-    logger.info(f"  Actor on GPU {args.actor_device}, Critic on GPU {args.critic_device}")
+    logger.info(f"  Actor/Critic share same GPU {args.actor_device}")
     from src.inference.vllm_server import VLLMInference
 
-    actor = VLLMInference(
-        args.actor_path,
-        cuda_device=args.actor_device,
-        dtype=args.dtype,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        max_model_len=args.max_model_len,
-    )
-    critic = VLLMInference(
-        args.critic_path,
-        cuda_device=args.critic_device,
-        dtype=args.dtype,
-        gpu_memory_utilization=args.gpu_memory_utilization,
-        max_model_len=args.max_model_len,
-    )
+    # If actor and critic share same path, use single instance
+    if actor_path == critic_path:
+        shared_model = VLLMInference(
+            actor_path,
+            cuda_device=args.actor_device,
+            dtype=args.dtype,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+            max_model_len=args.max_model_len,
+        )
+        actor = shared_model
+        critic = shared_model
+    else:
+        critic = VLLMInference(
+            critic_path,
+            cuda_device=args.critic_device,
+            dtype=args.dtype,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+            max_model_len=args.max_model_len,
+        )
+        actor = VLLMInference(
+            actor_path,
+            cuda_device=args.actor_device,
+            dtype=args.dtype,
+            gpu_memory_utilization=args.gpu_memory_utilization,
+            max_model_len=args.max_model_len,
+        )
 
     logger.info("Evaluating...")
     from src.evaluation.benchmarks import evaluate_benchmark

@@ -1,0 +1,78 @@
+# Experiment config for single H100 GPU
+# All outputs go to cache_dir (default: cache/)
+# Trajectories can be persisted and reused across runs
+
+common:
+  cache_dir: "cache"
+  model_name: "google/gemma-2-2b-it"
+  dataset: "boolq"
+  seed: 42
+  max_samples: 100
+  use_wandb: false
+
+step01:
+  output_dir: "cache/trajectories"
+  num_rounds: 3
+  num_simulations: 3
+  reward_threshold: 0.0
+  max_tokens: 256
+  temperature: 0.7
+  actor_device: 0
+  critic_device: 0
+  dtype: "bfloat16"
+  gpu_memory_utilization: 0.45
+
+step02:
+  input_dir: "cache/trajectories"
+  output_dir: "cache/preferences"
+  min_delta: 0.0
+
+step03:
+  preference_dir: "cache/preferences"
+  output_dir: "cache/models/critic"
+  model_type: null
+  lora_r: 256
+  learning_rate: 5.0e-5
+  batch_size: 1
+  num_epochs: 1
+  max_length: 1024
+
+step04:
+  preference_dir: "cache/preferences"
+  output_dir: "cache/models/actor"
+  model_type: null
+  lora_r: 256
+  learning_rate: 5.0e-5
+  batch_size: 1
+  num_epochs: 1
+  max_length: 1024
+
+step05:
+  actor_path: "cache/models/actor"
+  critic_path: "cache/models/critic"
+  output_dir: "cache/content/eval"
+  num_rounds: 3
+  max_tokens: 256
+  temperature: 0.7
+  actor_device: 0
+  critic_device: 0
+  dtype: "bfloat16"
+  gpu_memory_utilization: 0.45
+
+step06:
+  output_dir: "cache/content/full_pipeline"
+  num_iterations: 1
+  num_rounds: 3
+  lora_r: 256
+  learning_rate: 5.0e-5
+  batch_size: 4
+  num_epochs: 1
+  num_simulations: 3
+  reward_threshold: 0.0
+  skip_training: false
+  reuse_trajectories: false
+  actor_device: 0
+  critic_device: 0
+  dtype: "bfloat16"
+  gpu_memory_utilization: 0.45
+  max_model_len: 4096

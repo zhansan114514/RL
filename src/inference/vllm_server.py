@@ -40,7 +40,7 @@ class VLLMInference:
             "max_model_len": max_model_len,
             "dtype": dtype,
             "trust_remote_code": trust_remote_code,
-            "enforce_eager": True,
+            "enforce_eager": False,
             "disable_log_stats": True,
         }
 
@@ -71,40 +71,23 @@ class VLLMInference:
             except Exception:
                 pass  # Silently skip if CUDA detection fails
 
-        # Map logical device index to the corresponding physical GPU ID.
-        # e.g. if CUDA_VISIBLE_DEVICES="2,3" and cuda_device=1,
-        # we want physical GPU 3, so set CUDA_VISIBLE_DEVICES="3".
-        _prev_cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES")
+        # Set CUDA_VISIBLE_DEVICES to target the desired physical GPU.
+        # cuda_device is always treated as a physical GPU ID.
+        # Each vLLM instance spawns its own child process (EngineCore)
+        # which inherits CUDA_VISIBLE_DEVICES at spawn time, so we can
+        # safely change it between model loads without affecting already-
+        # running engines.
         if self._cuda_device is not None:
-            if _prev_cuda_vis:
-                visible = [d.strip() for d in _prev_cuda_vis.split(",")]
-            else:
-                import torch
-                visible = [str(i) for i in range(torch.cuda.device_count())]
-
-            if self._cuda_device >= len(visible):
-                raise ValueError(
-                    f"cuda_device={self._cuda_device} but only {len(visible)} "
-                    f"GPUs visible (CUDA_VISIBLE_DEVICES={_prev_cuda_vis})"
-                )
-            target_physical = visible[self._cuda_device]
+            target_physical = str(self._cuda_device)
             os.environ["CUDA_VISIBLE_DEVICES"] = target_physical
             logger.info(
-                f"Loading model on physical GPU {target_physical} "
-                f"(logical device {self._cuda_device}): {self.model_name}"
+                f"Loading model on physical GPU {target_physical}: {self.model_name}"
             )
         else:
             logger.info(f"Loading model: {self.model_name}")
 
         self._llm = LLM(self.model_name, **self._init_kwargs)
         self._tokenizer = self._llm.get_tokenizer()
-
-        # Restore original CUDA_VISIBLE_DEVICES (child process already started).
-        if self._cuda_device is not None:
-            if _prev_cuda_vis is not None:
-                os.environ["CUDA_VISIBLE_DEVICES"] = _prev_cuda_vis
-            else:
-                os.environ.pop("CUDA_VISIBLE_DEVICES", None)
 
     def generate(
         self,

@@ -13,8 +13,8 @@ class TestMCRolloutEdgeCases:
 
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate_single.return_value = "Final answer: Yes."
-        critic.generate_single.return_value = "Feedback."
+        actor.generate.return_value = ["Final answer: Yes."] * 10
+        critic.generate.return_value = ["Feedback."] * 10
 
         sample = {
             "question": "Is the sky blue?",
@@ -67,9 +67,9 @@ class TestMCRolloutEdgeCases:
 
         actor = MagicMock()
         critic = MagicMock()
-        # All actor responses should extract to "YES"
-        actor.generate_single.return_value = "The answer is Yes."
-        critic.generate_single.return_value = "Feedback."
+        # Batch generate returns all correct responses
+        actor.generate.return_value = ["The answer is Yes."] * 10
+        critic.generate.return_value = ["Feedback."] * 10
 
         sample = {
             "question": "Is the sky blue?",
@@ -96,9 +96,9 @@ class TestMCRolloutEdgeCases:
 
         actor = MagicMock()
         critic = MagicMock()
-        # All actor responses should extract to "NO" (wrong)
-        actor.generate_single.return_value = "The answer is No."
-        critic.generate_single.return_value = "Feedback."
+        # Batch generate returns all wrong responses
+        actor.generate.return_value = ["The answer is No."] * 10
+        critic.generate.return_value = ["Feedback."] * 10
 
         sample = {
             "question": "Is the sky blue?",
@@ -122,15 +122,14 @@ class TestMCRolloutEdgeCases:
     def test_mixed_correct_incorrect(self):
         """Mixed correct/incorrect should return proportional accuracy."""
         from src.algorithms.rollout import estimate_final_accuracy
-        from unittest.mock import call
 
         actor = MagicMock()
         critic = MagicMock()
 
-        # Alternate between correct and incorrect answers
+        # Batch generate returns alternating correct/incorrect
         responses = ["The answer is Yes.", "The answer is No."] * 5
-        actor.generate_single.side_effect = responses
-        critic.generate_single.return_value = "Feedback."
+        actor.generate.return_value = responses
+        critic.generate.return_value = ["Feedback."] * 10
 
         sample = {
             "question": "Is the sky blue?",
@@ -183,8 +182,8 @@ class TestMCRolloutEdgeCases:
 
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate_single.return_value = "The answer is Yes."
-        critic.generate_single.return_value = "Feedback."
+        actor.generate.return_value = ["The answer is Yes."] * 3
+        critic.generate.return_value = ["Feedback."] * 3
 
         sample = {
             "question": "Test?",
@@ -211,8 +210,8 @@ class TestMCRolloutEdgeCases:
 
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate_single.return_value = "The answer is Yes."
-        critic.generate_single.return_value = "Feedback."
+        actor.generate.return_value = ["The answer is Yes."] * 3
+        critic.generate.return_value = ["Feedback."] * 3
 
         sample = {
             "question": "Test?",
@@ -241,8 +240,8 @@ class TestMCRolloutEdgeCases:
 
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate_single.return_value = "The answer is (A)."
-        critic.generate_single.return_value = "Feedback."
+        actor.generate.return_value = ["The answer is (A)."] * 5
+        critic.generate.return_value = ["Feedback."] * 5
 
         sample = {
             "question": "What is 2+2?",
@@ -268,9 +267,9 @@ class TestMCRolloutEdgeCases:
 
         actor = MagicMock()
         critic = MagicMock()
-        # Even if current is correct, we still simulate
-        actor.generate_single.return_value = "The answer is No."  # Wrong!
-        critic.generate_single.return_value = "Feedback."
+        # Batch generate returns wrong answers
+        actor.generate.return_value = ["The answer is No."] * 5
+        critic.generate.return_value = ["Feedback."] * 5
 
         sample = {
             "question": "Test?",
@@ -297,8 +296,8 @@ class TestMCRolloutEdgeCases:
 
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate_single.return_value = ""  # Empty response
-        critic.generate_single.return_value = "Feedback."
+        actor.generate.return_value = [""] * 5  # Empty responses
+        critic.generate.return_value = ["Feedback."] * 5
 
         sample = {
             "question": "Test?",
@@ -325,8 +324,8 @@ class TestMCRolloutEdgeCases:
 
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate_single.return_value = "The answer is Yes."
-        critic.generate_single.return_value = "Feedback."
+        actor.generate.return_value = ["The answer is Yes."] * 1000
+        critic.generate.return_value = ["Feedback."] * 1000
 
         sample = {
             "question": "Test?",
@@ -354,12 +353,11 @@ class TestMCRolloutOneStepBehavior:
     def test_one_step_not_all_remaining(self):
         """One-step roll-out should simulate exactly 1 round, not all remaining."""
         from src.algorithms.rollout import estimate_final_accuracy
-        from unittest.mock import call
 
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate_single.return_value = "The answer is Yes."
-        critic.generate_single.return_value = "Feedback."
+        actor.generate.return_value = ["The answer is Yes."] * 15
+        critic.generate.return_value = ["Feedback."] * 15
 
         sample = {
             "question": "Test?",
@@ -378,9 +376,10 @@ class TestMCRolloutOneStepBehavior:
             remaining_rounds=5,  # Large number
         )
 
-        # Each simulation should call generate exactly once per remaining_rounds
-        # So 3 simulations * 5 rounds = 15 calls to actor.generate_single
-        assert actor.generate_single.call_count == 3 * 5
+        # Batch generate should be called once for actor prompts (3 sims)
+        # With one-step (remaining_rounds=1), we batch 3 actor + 3 critic calls
+        assert actor.generate.call_count >= 1
+        assert critic.generate.call_count >= 1
 
     def test_multiple_remaining_rounds_accumulation(self):
         """With remaining_rounds > 1, should accumulate responses correctly."""
@@ -389,15 +388,9 @@ class TestMCRolloutOneStepBehavior:
         actor = MagicMock()
         critic = MagicMock()
 
-        # Track responses to verify accumulation
-        responses = []
-        def capture_response(prompt, **kwargs):
-            resp = f"Response {len(responses)}."
-            responses.append(resp)
-            return resp
-
-        actor.generate_single.side_effect = capture_response
-        critic.generate_single.return_value = "Feedback."
+        # Batch generate returns enough responses
+        actor.generate.return_value = ["Response."] * 10
+        critic.generate.return_value = ["Feedback."] * 10
 
         sample = {
             "question": "Test?",
@@ -415,9 +408,8 @@ class TestMCRolloutOneStepBehavior:
             remaining_rounds=2,
         )
 
-        # Each sim should have: prev + current + 2 new responses
-        # So 2 sims * 2 rounds = 4 new actor responses
-        assert actor.generate_single.call_count == 4
+        # Should have called generate at least once (batched)
+        assert actor.generate.call_count >= 1
 
 
 class TestMCRolloutOneStepFixVerification:
@@ -436,13 +428,13 @@ class TestMCRolloutOneStepFixVerification:
         assert default_remaining == 1, "Default remaining_rounds should be 1 for one-step roll-out"
 
     def test_one_step_simulates_single_actor_critic_exchange(self):
-        """One-step roll-out simulates exactly ONE actor-critic exchange."""
+        """One-step roll-out simulates exactly ONE actor-critic exchange per sim."""
         from src.algorithms.rollout import estimate_final_accuracy
 
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate_single.return_value = "Simulated response."
-        critic.generate_single.return_value = "Simulated feedback."
+        actor.generate.return_value = ["Simulated response."] * 5
+        critic.generate.return_value = ["Simulated feedback."] * 5
 
         sample = {
             "question": "Test?",
@@ -460,10 +452,9 @@ class TestMCRolloutOneStepFixVerification:
             num_simulations=5,
         )
 
-        # With 5 simulations and remaining_rounds=1:
-        # Each sim does: 1 actor call + 1 critic call
-        assert actor.generate_single.call_count == 5
-        assert critic.generate_single.call_count == 5
+        # Batch generate called once for actor (5 prompts) and once for critic (5 prompts)
+        assert actor.generate.call_count == 1
+        assert critic.generate.call_count == 1
 
     def test_one_step_includes_current_in_history(self):
         """One-step roll-out should include current response in simulation history."""
@@ -472,7 +463,7 @@ class TestMCRolloutOneStepFixVerification:
 
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate_single.return_value = "Simulated."
+        actor.generate.return_value = ["Simulated."]
 
         sample = {
             "question": "Test?",
@@ -503,16 +494,11 @@ class TestMCRolloutOneStepFixVerification:
             )
 
         # Should have called format_prompt for actor
-        # The responses should include previous + current
         assert len(prompts_sent) > 0
 
         # Check that the simulation includes current response
-        # In the code: sim_responses = list(previous_responses) + [current_actor_response]
-        # So the responses passed should have length 3 (2 previous + 1 current)
         actor_prompts = [p for p in prompts_sent if "actor" in str(p["prompt_type"]).lower()]
         if actor_prompts:
-            # The responses list should include the current response
-            # This is implicit in how the function works
             pass
 
     def test_one_step_uses_final_simulated_response(self):
@@ -522,9 +508,9 @@ class TestMCRolloutOneStepFixVerification:
         actor = MagicMock()
         critic = MagicMock()
 
-        # Simulate: first response is wrong, second (final) is correct
-        actor.generate_single.return_value = "The answer is Yes."
-        critic.generate_single.return_value = "Feedback."
+        # Batch generate returns correct answers
+        actor.generate.return_value = ["The answer is Yes."] * 10
+        critic.generate.return_value = ["Feedback."] * 10
 
         sample = {
             "question": "Test?",

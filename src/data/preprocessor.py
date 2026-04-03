@@ -48,7 +48,13 @@ def standardize_sample(
         result["passage"] = sample.get("passage", "")
 
         choices = sample.get("choices", [])
-        if isinstance(choices, list):
+        if isinstance(choices, dict):
+            # ARC format: {"text": [...], "label": ["A", "B", ...]}
+            choice_texts = choices.get("text", [])
+            choice_labels = choices.get("label", [])
+            result["choices"] = choice_texts
+            result["choice_labels"] = choice_labels if choice_labels else [chr(65 + i) for i in range(len(choice_texts))]
+        elif isinstance(choices, list):
             result["choices"] = choices
             # Map choices to A/B/C/D
             labels = [chr(65 + i) for i in range(len(choices))]
@@ -57,7 +63,8 @@ def standardize_sample(
         # Handle answer as index or string
         answer = sample.get("answer", sample.get("answerKey", ""))
         if isinstance(answer, int):
-            result["answer"] = chr(65 + answer) if answer < len(choices) else ""
+            n_choices = len(result["choices"]) if result["choices"] else 4
+            result["answer"] = chr(65 + answer) if answer < n_choices else ""
         elif isinstance(answer, str):
             result["answer"] = answer.upper().strip("()")
 

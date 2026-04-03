@@ -94,22 +94,42 @@ def generate_trajectories(
             max_tokens=max_tokens, temperature=temperature,
         )
 
-        # Guided towards correct answer
+        # Batch guided trajectory generation: collect both directions' prompts
         z_y_actor_prompt = _make_guided_prompt(
             dataset_name, sample, correct_answer, t, previous_responses,
             actor_response, agent="actor",
         )
-        z_y_actor = actor_model.generate_single(
-            z_y_actor_prompt, max_tokens=max_tokens, temperature=temperature,
+        z_not_y_actor_prompt = _make_guided_prompt(
+            dataset_name, sample, wrong_answer, t, previous_responses,
+            actor_response, agent="actor",
         )
+
+        # Batch actor inference: 2 guided prompts at once
+        guided_actor_resps = actor_model.generate(
+            [z_y_actor_prompt, z_not_y_actor_prompt],
+            max_tokens=max_tokens, temperature=temperature,
+        )
+        z_y_actor = guided_actor_resps[0]
+        z_not_y_actor = guided_actor_resps[1]
+
+        # Batch critic inference: 2 guided critic prompts at once
         z_y_critic_prompt = _make_guided_prompt(
             dataset_name, sample, correct_answer, t, previous_responses,
             z_y_actor, agent="critic",
         )
-        z_y_critic = critic_model.generate_single(
-            z_y_critic_prompt, max_tokens=max_tokens, temperature=temperature,
+        z_not_y_critic_prompt = _make_guided_prompt(
+            dataset_name, sample, wrong_answer, t, previous_responses,
+            z_not_y_actor, agent="critic",
         )
 
+        guided_critic_resps = critic_model.generate(
+            [z_y_critic_prompt, z_not_y_critic_prompt],
+            max_tokens=max_tokens, temperature=temperature,
+        )
+        z_y_critic = guided_critic_resps[0]
+        z_not_y_critic = guided_critic_resps[1]
+
+        # Batch MC roll-out: estimate both guided rewards together
         v_guided_correct = estimate_final_accuracy(
             actor_model, critic_model, sample, dataset_name,
             current_actor_response=z_y_actor,
@@ -118,22 +138,6 @@ def generate_trajectories(
             num_simulations=num_simulations,
             remaining_rounds=1,
             max_tokens=max_tokens, temperature=temperature,
-        )
-
-        # Guided away from correct answer
-        z_not_y_actor_prompt = _make_guided_prompt(
-            dataset_name, sample, wrong_answer, t, previous_responses,
-            actor_response, agent="actor",
-        )
-        z_not_y_actor = actor_model.generate_single(
-            z_not_y_actor_prompt, max_tokens=max_tokens, temperature=temperature,
-        )
-        z_not_y_critic_prompt = _make_guided_prompt(
-            dataset_name, sample, wrong_answer, t, previous_responses,
-            z_not_y_actor, agent="critic",
-        )
-        z_not_y_critic = critic_model.generate_single(
-            z_not_y_critic_prompt, max_tokens=max_tokens, temperature=temperature,
         )
 
         v_guided_wrong = estimate_final_accuracy(

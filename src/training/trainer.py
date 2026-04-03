@@ -8,6 +8,7 @@ Extracted from alternating.py to separate concerns:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import traceback
@@ -17,6 +18,51 @@ from src.trajectory.preference import build_preference_dataset, convert_to_hf_da
 from src.training.dpo_trainer import train_dpo
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Trajectory persistence (JSONL)
+# ---------------------------------------------------------------------------
+
+def _trajectory_path(cache_dir: str, agent: str, iteration: int) -> str:
+    """Return the JSONL path for a given agent and iteration."""
+    d = os.path.join(cache_dir, "trajectories")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f"{agent}_iter{iteration}.jsonl")
+
+
+def save_trajectory_batch(
+    pairs: list[dict],
+    cache_dir: str,
+    agent: str,
+    iteration: int,
+) -> str:
+    """Append trajectory pairs to a JSONL file. Returns the file path."""
+    path = _trajectory_path(cache_dir, agent, iteration)
+    with open(path, "a", encoding="utf-8") as f:
+        for p in pairs:
+            f.write(json.dumps(p, ensure_ascii=False) + "\n")
+    logger.info(f"Saved {len(pairs)} trajectory pairs to {path}")
+    return path
+
+
+def load_trajectory_data(
+    cache_dir: str,
+    agent: str,
+    iteration: int,
+) -> list[dict] | None:
+    """Load trajectory pairs from JSONL. Returns None if file missing."""
+    path = _trajectory_path(cache_dir, agent, iteration)
+    if not os.path.exists(path):
+        return None
+    pairs = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                pairs.append(json.loads(line))
+    logger.info(f"Loaded {len(pairs)} trajectory pairs from {path}")
+    return pairs
 
 
 def generate_trajectory_data(
@@ -31,6 +77,9 @@ def generate_trajectory_data(
     max_tokens: int = 256,
     temperature: float = 0.7,
     seed: int = 42,
+    cache_dir: str | None = None,
+    agent: str = "critic",
+    iteration: int = 0,
 ) -> list[dict]:
     """Generate deliberation trajectory pairs for all samples.
 
@@ -48,6 +97,9 @@ def generate_trajectory_data(
         max_tokens: Max generation tokens.
         temperature: Sampling temperature.
         seed: Random seed.
+        cache_dir: If set, persist trajectory pairs to disk as JSONL.
+        agent: Which agent is being trained ("actor" or "critic").
+        iteration: Current alternating-training iteration.
 
     Returns:
         List of trajectory pairs (preference data).
@@ -66,6 +118,11 @@ def generate_trajectory_data(
                 seed=seed,
             )
             pairs.extend(batch)
+
+            # Persist incrementally so we don't lose work on crash
+            if cache_dir and batch:
+                save_trajectory_batch(batch, cache_dir, agent, iteration)
+
         except Exception as e:
             logger.warning(f"  Sample {i} failed: {e}")
             logger.debug(f"  Traceback:\n{traceback.format_exc()}")
@@ -164,6 +221,7 @@ def train_agent(
     num_epochs: int = 1,
     beta: float = 0.1,
     device: int = 0,
+    cache_dir: str | None = None,
 ) -> str:
     """
     Run trajectory generation + DPO training for one agent.
@@ -194,6 +252,7 @@ def train_agent(
         num_epochs: Training epochs.
         beta: DPO beta.
         device: CUDA device for DPO training.
+        cache_dir: If set, persist and reuse trajectory data.
 
     Returns:
         Path to the trained model.
@@ -206,6 +265,9 @@ def train_agent(
         max_tokens=max_tokens,
         temperature=temperature,
         seed=seed,
+        cache_dir=cache_dir,
+        agent=agent,
+        iteration=iteration,
     )
     return train_dpo_from_pairs(
         agent, pairs, current_model_path, output_base_dir, iteration, model_type,

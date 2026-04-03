@@ -3,7 +3,7 @@ ACC-Collab full pipeline script.
 
 Usage:
     python scripts/06_full_pipeline.py \
-    --config configs/config.yaml
+    --config configs/experiment_gpu1.yaml
 """
 
 from __future__ import annotations
@@ -25,12 +25,13 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 ALLOWED_DATASETS = ("boolq", "mmlu", "bbh", "sciq", "arc")
-COMMON_KEYS = ("model_name", "dataset", "max_samples", "seed", "use_wandb")
+COMMON_KEYS = ("model_name", "dataset", "max_samples", "seed", "use_wandb", "cache_dir")
 
 STEP_DEFAULTS = {
     "model_name": "google/gemma-2-2b-it",
     "dataset": "boolq",
-    "output_dir": "experiments/gemma2_boolq",
+    "cache_dir": "cache",
+    "output_dir": None,          # auto-derived from cache_dir if not set
     "num_iterations": 1,
     "num_rounds": 5,
     "lora_r": 256,
@@ -43,6 +44,7 @@ STEP_DEFAULTS = {
     "seed": 42,
     "max_samples": None,
     "skip_training": False,
+    "reuse_trajectories": False,
     "use_wandb": False,
     "actor_device": 0,
     "critic_device": 0,
@@ -57,7 +59,7 @@ def parse_args():
         description="ACC-Collab Pipeline",
     )
     parser.add_argument(
-        "--config", type=str, default="configs/config.yaml",
+        "--config", type=str, default="configs/experiment_gpu1.yaml",
         help="YAML config path.",
     )
     cli_args = parser.parse_args()
@@ -70,7 +72,22 @@ def parse_args():
 
 def main():
     args = parse_args()
-    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Derive output_dir from cache_dir if not explicitly set
+    cache_dir = getattr(args, "cache_dir", "cache") or "cache"
+    output_dir = getattr(args, "output_dir", None) or cache_dir
+    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(os.path.join(cache_dir, "trajectories"), exist_ok=True)
+    os.makedirs(os.path.join(cache_dir, "logs"), exist_ok=True)
+
+    # Clean stale trajectory files if not reusing
+    reuse = getattr(args, "reuse_trajectories", False)
+    if not reuse:
+        traj_dir = os.path.join(cache_dir, "trajectories")
+        for f in os.listdir(traj_dir):
+            if f.endswith(".jsonl"):
+                os.remove(os.path.join(traj_dir, f))
+                logger.info(f"Cleaned stale trajectory: {f}")
 
     logger.info("=" * 60)
     logger.info("ACC-Collab Pipeline")
@@ -78,7 +95,9 @@ def main():
         logger.info(f"  Config: {args.config}")
     logger.info(f"  Model: {args.model_name}")
     logger.info(f"  Dataset: {args.dataset}")
-    logger.info(f"  Output: {args.output_dir}")
+    logger.info(f"  Cache dir: {cache_dir}")
+    logger.info(f"  Output dir: {output_dir}")
+    logger.info(f"  Reuse trajectories: {reuse}")
     logger.info("=" * 60)
 
     # --- Step 1: Load dataset ---
@@ -105,7 +124,7 @@ def main():
     if not args.skip_training:
         # --- Step 2: Alternating training ---
         logger.info("[Step 2] Running alternating Actor-Critic training...")
-        from src.training.alternating import alternating_train
+        from src.training.scheduler import alternating_train
         from src.utils.model_utils import detect_model_type
 
         model_type = detect_model_type(args.model_name)
@@ -115,7 +134,7 @@ def main():
             critic_path=args.model_name,
             dataset=train_data,
             dataset_name=args.dataset,
-            output_base_dir=args.output_dir,
+            output_base_dir=output_dir,
             model_type=model_type,
             num_iterations=args.num_iterations,
             num_rounds=args.num_rounds,
@@ -133,6 +152,8 @@ def main():
             critic_device=args.critic_device,
             dtype=args.dtype,
             gpu_memory_utilization=args.gpu_memory_utilization,
+            cache_dir=cache_dir,
+            reuse_trajectories=reuse,
         )
         actor_path = result["actor_path"]
         critic_path = result["critic_path"]
@@ -169,12 +190,58 @@ def main():
 
     logger.info("Results:")
     for k, v in results.items():
-        logger.info(f"  {k}: {v}")
+        if k != "sample_details":
+            logger.info(f"  {k}: {v}")
 
-    results_path = os.path.join(args.output_dir, "results.json")
+    # Save full results (including sample details)
+    results_path = os.path.join(output_dir, "results.json")
     with open(results_path, "w") as f:
-        json.dump(results, f, indent=2)
+        json.dump(results, f, indent=2, ensure_ascii=False)
     logger.info(f"Results saved to: {results_path}")
+
+    # Save a separate summary file (compact, no sample details)
+    summary = {k: v for k, v in results.items() if k != "sample_details"}
+    summary_path = os.path.join(output_dir, "summary.json")
+    with open(summary_path, "w") as f:
+        json.dump(summary, f, indent=2)
+    logger.info(f"Summary saved to: {summary_path}")
+
+    # Print final experiment summary
+    _print_final_summary(args, results, output_dir)
+
+
+def _print_final_summary(args, results: dict, output_dir: str) -> None:
+    """Print a comprehensive final experiment summary."""
+    import time
+    sep = "#" * 70
+
+    logger.info("")
+    logger.info(sep)
+    logger.info("  EXPERIMENT COMPLETE - FINAL SUMMARY")
+    logger.info(sep)
+    logger.info(f"  Model:        {args.model_name}")
+    logger.info(f"  Dataset:      {args.dataset}")
+    logger.info(f"  Iterations:   {args.num_iterations}")
+    logger.info(f"  Rounds:       {args.num_rounds}")
+    logger.info(f"  Simulations:  {args.num_simulations}")
+    logger.info(f"  Train samples:{args.max_samples or 'all'}")
+    logger.info(f"  Test samples: {results['num_samples']}")
+    logger.info(f"  Output dir:   {output_dir}")
+    logger.info(sep[:-1])
+    logger.info(f"  Initial Accuracy:  {results['initial_accuracy']:.4f} ({results['initial_accuracy']*100:.2f}%)")
+    logger.info(f"  Final Accuracy:    {results['final_accuracy']:.4f} ({results['final_accuracy']*100:.2f}%)")
+    logger.info(f"  95% CI:            {results['ci_95']}")
+    logger.info(f"  Improvement Rate:  {results['improvement_rate']:.4f} ({results['improvement_rate']*100:.2f}%)")
+    logger.info(f"  Absolute Gain:     {results['absolute_improvement']:+.4f} ({results['absolute_improvement']*100:+.2f}pp)")
+    logger.info(f"  Per-round acc:     {[f'{a:.3f}' for a in results['per_round_accuracy']]}")
+    flip = results['flip_statistics']
+    logger.info(f"  Flipped correct:   {flip['flipped_to_correct']}/{results['num_samples']}")
+    logger.info(f"  Flipped wrong:     {flip['flipped_to_wrong']}/{results['num_samples']}")
+    logger.info(f"  Eval time:         {results['eval_time_seconds']}s")
+    logger.info(sep)
+    logger.info("")
+    logger.info(f"Full results: {os.path.join(output_dir, 'results.json')}")
+    logger.info(f"Summary:      {os.path.join(output_dir, 'summary.json')}")
 
 
 if __name__ == "__main__":

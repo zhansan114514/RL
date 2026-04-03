@@ -17,7 +17,11 @@ import logging
 from typing import Optional
 
 from src.training.model_manager import create_model_pair, cleanup_models
-from src.training.trainer import generate_trajectory_data, train_dpo_from_pairs
+from src.training.trainer import (
+    generate_trajectory_data,
+    load_trajectory_data,
+    train_dpo_from_pairs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +52,8 @@ def alternating_train(
     critic_device: int = 1,
     dtype: str = "auto",
     gpu_memory_utilization: float = 0.45,
+    cache_dir: Optional[str] = None,
+    reuse_trajectories: bool = False,
 ) -> dict[str, str]:
     """
     Run alternating Actor-Critic training.
@@ -78,6 +84,9 @@ def alternating_train(
         critic_device: CUDA device index for critic.
         dtype: Model dtype for inference.
         gpu_memory_utilization: GPU memory fraction for vLLM.
+        cache_dir: If set, persist trajectory pairs to this directory.
+        reuse_trajectories: If True and cache_dir is set, reuse existing
+            trajectory JSONL files instead of regenerating.
 
     Returns:
         Dict with final actor_path, critic_path, and validation_metrics.
@@ -101,9 +110,11 @@ def alternating_train(
             dtype=dtype,
         )
 
-        # Phase A: Generate trajectories with vLLM
-        critic_pairs = generate_trajectory_data(
+        # Phase A: Generate trajectories with vLLM (or load cached)
+        critic_pairs = _get_or_generate_pairs(
             actor_model, critic_model, dataset, dataset_name,
+            agent="critic", iteration=iteration,
+            cache_dir=cache_dir, reuse=reuse_trajectories,
             num_rounds=num_rounds, reward_threshold=reward_threshold,
             num_simulations=num_simulations, max_tokens=max_tokens,
             temperature=temperature, seed=seed,
@@ -130,9 +141,11 @@ def alternating_train(
             dtype=dtype,
         )
 
-        # Phase A: Generate trajectories with vLLM
-        actor_pairs = generate_trajectory_data(
+        # Phase A: Generate trajectories with vLLM (or load cached)
+        actor_pairs = _get_or_generate_pairs(
             actor_model, critic_model, dataset, dataset_name,
+            agent="actor", iteration=iteration,
+            cache_dir=cache_dir, reuse=reuse_trajectories,
             num_rounds=num_rounds, reward_threshold=reward_threshold,
             num_simulations=num_simulations, max_tokens=max_tokens,
             temperature=temperature, seed=seed,
@@ -197,6 +210,53 @@ def alternating_train(
         result["best_val_accuracy"] = best_val_acc
 
     return result
+
+
+def _get_or_generate_pairs(
+    actor_model,
+    critic_model,
+    dataset: list[dict],
+    dataset_name: str,
+    *,
+    agent: str,
+    iteration: int,
+    cache_dir: Optional[str],
+    reuse: bool,
+    num_rounds: int,
+    reward_threshold: float,
+    num_simulations: int,
+    max_tokens: int,
+    temperature: float,
+    seed: int,
+) -> list[dict]:
+    """Load cached trajectories if available and reuse=True, else generate."""
+    if reuse and cache_dir:
+        cached = load_trajectory_data(cache_dir, agent, iteration)
+        if cached is not None:
+            if len(cached) > 0:
+                logger.info(
+                    f"Reusing {len(cached)} cached {agent} trajectory pairs "
+                    f"(iter {iteration})"
+                )
+                return cached
+            else:
+                logger.warning(
+                    f"Cached {agent} iter {iteration} file exists but is empty. "
+                    "Regenerating."
+                )
+
+    return generate_trajectory_data(
+        actor_model, critic_model, dataset, dataset_name,
+        num_rounds=num_rounds,
+        reward_threshold=reward_threshold,
+        num_simulations=num_simulations,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        seed=seed,
+        cache_dir=cache_dir,
+        agent=agent,
+        iteration=iteration,
+    )
 
 
 def _run_validation(

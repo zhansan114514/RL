@@ -44,3 +44,9 @@ Thumbs.db
 
 # claude
 .claude/
+
+# cache
+cache/
+.cache/
+
+exp.md

@@ -125,8 +125,8 @@ class TestFix2TrajectoryStartsFromT1:
 
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate_single.return_value = "Guided actor"
-        critic.generate_single.return_value = "Guided critic"
+        actor.generate.return_value = ["Guided actor"] * 4
+        critic.generate.return_value = ["Guided critic"] * 4
 
         sample = {
             "question": "Test?",
@@ -143,7 +143,7 @@ class TestFix2TrajectoryStartsFromT1:
         )
 
         # With 3 rounds (t=0,1,2), guided trajectories should only be for t=1,2
-        # So _make_guided_prompt should be called 4 times per round (actor+critic * 2 directions)
+        # _make_guided_prompt called 4 times per round (actor+critic * 2 directions)
         # For 2 rounds: 4 * 2 = 8 calls total
         assert mock_guided_prompt.call_count == 8, f"Expected 8 calls for t=1,2, got {mock_guided_prompt.call_count}"
 
@@ -166,8 +166,8 @@ class TestFix2TrajectoryStartsFromT1:
 
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate_single.return_value = "Guided"
-        critic.generate_single.return_value = "Guided critic"
+        actor.generate.return_value = ["Guided"] * 4
+        critic.generate.return_value = ["Guided critic"] * 4
 
         sample = {
             "question": "Test?",
@@ -220,8 +220,8 @@ class TestFix3TrajectoryIfElifStructure:
 
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate_single.return_value = "Guided actor"
-        critic.generate_single.return_value = "Guided critic"
+        actor.generate.return_value = ["Guided actor"] * 4
+        critic.generate.return_value = ["Guided critic"] * 4
 
         sample = {
             "question": "Test?",
@@ -268,8 +268,8 @@ class TestFix3TrajectoryIfElifStructure:
 
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate_single.return_value = "Guided actor"
-        critic.generate_single.return_value = "Guided critic"
+        actor.generate.return_value = ["Guided actor"] * 4
+        critic.generate.return_value = ["Guided critic"] * 4
 
         sample = {
             "question": "Test?",
@@ -317,8 +317,8 @@ class TestFix3TrajectoryIfElifStructure:
 
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate_single.return_value = "Guided actor"
-        critic.generate_single.return_value = "Guided critic"
+        actor.generate.return_value = ["Guided actor"] * 4
+        critic.generate.return_value = ["Guided critic"] * 4
 
         sample = {
             "question": "Test?",
@@ -399,8 +399,8 @@ class TestFix5RolloutSimResponsesInterleaved:
 
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate_single.return_value = "The answer is Yes."
-        critic.generate_single.return_value = "Feedback."
+        actor.generate.return_value = ["The answer is Yes."]
+        critic.generate.return_value = ["Feedback."]
 
         sample = {
             "question": "Test?",
@@ -430,20 +430,18 @@ class TestFix5RolloutSimResponsesInterleaved:
         # previous + current_actor + current_critic
         # = [Prev actor 0, Prev critic 0, Current actor, Current critic]
         assert len(responses_passed) > 0
-        # With remaining_rounds=1, sim_responses also gets appended with simulated responses
-        # So we expect at least 4 (previous + current) and possibly 6 (with simulated)
         assert len(responses_passed[0]) >= 4, f"Expected at least 4 responses, got {len(responses_passed[0])}"
         assert "Current actor" in responses_passed[0]
         assert "Current critic" in responses_passed[0]
 
-    def test_sim_responses_appends_both_actor_and_critic_in_loop(self):
-        """Inside simulation loop, both actor and critic responses should be appended."""
+    def test_sim_responses_uses_batch_generate(self):
+        """Optimized rollout should use batch generate for all simulations."""
         from src.algorithms.rollout import estimate_final_accuracy
 
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate_single.return_value = "Simulated actor"
-        critic.generate_single.return_value = "Simulated critic"
+        actor.generate.return_value = ["Simulated actor"] * 3
+        critic.generate.return_value = ["Simulated critic"] * 3
 
         sample = {
             "question": "Test?",
@@ -452,50 +450,21 @@ class TestFix5RolloutSimResponsesInterleaved:
             "task_type": "yes_no",
         }
 
-        # Track responses passed to format_prompt in each iteration
-        all_responses_lists = []
-        original_format = __import__('src.prompts.formatter', fromlist=['format_prompt']).format_prompt
-        def track_format(dataset_name, prompt_type, sample_arg, **kwargs):
-            all_responses_lists.append(list(kwargs.get("responses", [])))  # Copy list
-            return original_format(dataset_name, prompt_type, sample_arg, **kwargs)
+        estimate_final_accuracy(
+            actor, critic, sample, "boolq",
+            current_actor_response="Current A",
+            current_critic_response="Current C",
+            previous_responses=[],
+            num_simulations=3,
+            remaining_rounds=1,
+        )
 
-        with patch('src.algorithms.rollout.format_prompt', side_effect=track_format):
-            estimate_final_accuracy(
-                actor, critic, sample, "boolq",
-                current_actor_response="Current A",
-                current_critic_response="Current C",
-                previous_responses=[],
-                num_simulations=1,
-                remaining_rounds=2,  # 2 rounds to test accumulation
-            )
-
-        # Should have called format_prompt multiple times
-        # For remaining_rounds=2: 2 actor prompts + 2 critic prompts = 4 calls
-        # But we only care about actor prompts (they use responses)
-
-        # First actor call: [Current A, Current C]
-        # After simulation, appends [Sim A, Sim C]
-        # Second actor call: [Current A, Current C, Sim A, Sim C]
-        actor_prompts_responses = [r for i, r in enumerate(all_responses_lists)
-                                    if i % 2 == 0]  # Every other call is actor
-
-        assert len(actor_prompts_responses) >= 2, "Should have at least 2 actor prompts"
-
-        # Note: The actual implementation appends to sim_responses which is initially
-        # [Current A, Current C], then gets [Sim A, Sim C] appended during the loop.
-        # But the way the code works, the first iteration starts with the current responses
-        # and the format_prompt sees the list as it's being built.
-
-        # What we care about: both actor and critic responses are added to the list
-        # The list should grow by 2 each iteration (actor + critic)
-
-        # Check that responses are being accumulated (interleaved)
-        first_len = len(actor_prompts_responses[0])
-        second_len = len(actor_prompts_responses[1])
-
-        # Each iteration should add 2 responses (actor + critic)
-        assert second_len >= first_len, "Responses should accumulate"
-        assert second_len - first_len >= 2, "Should add at least 2 responses per iteration"
+        # Should call batch generate once for actor and once for critic
+        assert actor.generate.call_count == 1
+        assert critic.generate.call_count == 1
+        # Actor should receive 3 prompts (one per simulation)
+        assert len(actor.generate.call_args[0][0]) == 3
+        assert len(critic.generate.call_args[0][0]) == 3
 
     def test_interleaved_order_preserved(self):
         """Responses should maintain actor, critic, actor, critic order."""
@@ -503,8 +472,8 @@ class TestFix5RolloutSimResponsesInterleaved:
 
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate_single.return_value = "Yes."
-        critic.generate_single.return_value = "Good."
+        actor.generate.return_value = ["Yes."]
+        critic.generate.return_value = ["Good."]
 
         sample = {
             "question": "Test?",

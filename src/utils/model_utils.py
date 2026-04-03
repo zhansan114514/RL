@@ -39,6 +39,8 @@ def detect_model_type(model_name: str) -> str:
         return "mistral"
     elif "gemma" in name:
         return "gemma2"
+    elif "qwen3" in name or "qwen" in name:
+        return "qwen3"
     else:
         # Default fallback
         logger.warning(
