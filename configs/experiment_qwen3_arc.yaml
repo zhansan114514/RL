@@ -70,7 +70,7 @@ step06:
   num_simulations: 5
   reward_threshold: 0.0
   skip_training: false
-  reuse_trajectories: false
+  reuse_trajectories: true
   actor_device: 5
   critic_device: 6
   dtype: "bfloat16"

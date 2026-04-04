@@ -160,6 +160,10 @@ def train_dpo(
     _runner_script = os.path.join(os.path.dirname(__file__), "_dpo_runner.py")
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = target_physical
+    # Ensure src package is importable in the subprocess
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    existing_pp = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = project_root + ((":" + existing_pp) if existing_pp else "")
     logger.info(f"DPO training on physical GPU {target_physical} (isolated subprocess)")
 
     result = subprocess.run(
