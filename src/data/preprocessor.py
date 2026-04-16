@@ -68,12 +68,40 @@ def standardize_sample(
         elif isinstance(answer, str):
             result["answer"] = answer.upper().strip("()")
 
+    elif task_type == "math":
+        # MATH/GSM8K format with \boxed{} or "#### number" answers
+        result["question"] = sample.get("question", "")
+        result["passage"] = ""
+
+        # Extract answer from various formats
+        raw_answer = sample.get("answer", "")
+        if isinstance(raw_answer, str):
+            # Try to extract from \boxed{...}
+            boxed_match = re.search(r'\\boxed\{([^}]+)\}', raw_answer)
+            if boxed_match:
+                result["answer"] = boxed_match.group(1).strip()
+            # Try GSM8K "#### number" format
+            elif "####" in raw_answer:
+                after_hash = raw_answer.split("####")[-1].strip()
+                # Extract numeric value
+                num_match = re.search(r'-?[0-9]+(?:\.[0-9]+)?', after_hash)
+                result["answer"] = num_match.group(0) if num_match else after_hash
+            else:
+                # Extract last number as fallback
+                nums = re.findall(r'-?[0-9]+(?:\.[0-9]+)?', raw_answer)
+                result["answer"] = nums[-1] if nums else raw_answer.strip()
+        else:
+            result["answer"] = str(raw_answer).strip()
+
+        result["choices"] = []
+
     return result
 
 
 def generate_wrong_answer(
     correct_answer: str,
     choices: list[str] | None = None,
+    task_type: str = "multiple_choice",
     rng: "random.Random | None" = None,
 ) -> str:
     """
@@ -81,10 +109,12 @@ def generate_wrong_answer(
 
     For yes/no: flip the answer.
     For multiple choice: pick a random wrong option.
+    For math: perturb the numeric answer.
 
     Args:
         correct_answer: The correct answer.
         choices: Available choices for multiple choice tasks.
+        task_type: Task type (yes_no, multiple_choice, math).
         rng: Optional random.Random instance for reproducibility.
 
     Returns:
@@ -95,10 +125,28 @@ def generate_wrong_answer(
     if rng is None:
         rng = random.Random()
 
-    correct = correct_answer.lower().strip()
+    correct = correct_answer.strip()
 
-    if correct in ("yes", "no"):
-        return "no" if correct == "yes" else "yes"
+    if task_type == "math":
+        # For math, perturb the numeric answer
+        try:
+            num = float(correct)
+            strategies = ["negate", "perturb_up", "perturb_down", "add_one"]
+            strategy = rng.choice(strategies)
+            if strategy == "negate":
+                return str(-num)
+            elif strategy == "perturb_up":
+                return str(round(num * rng.uniform(1.1, 1.5), 2))
+            elif strategy == "perturb_down":
+                return str(round(num * rng.uniform(0.5, 0.9), 2))
+            else:  # add_one
+                return str(num + rng.choice([-1, 1, 2, -2]))
+        except ValueError:
+            # Non-numeric answer, return a generic wrong value
+            return "0"
+
+    if correct.lower() in ("yes", "no"):
+        return "no" if correct.lower() == "yes" else "yes"
 
     if choices:
         wrong_options = [c for c in choices if c.upper() != correct.upper()]

@@ -1,0 +1,30 @@
+# 3 Actors with distinct reasoning styles
+# Each trains on its style subset (data-level diversification)
+
+actors:
+  actor_algebraic:
+    reasoning_style: "algebraic"
+    model_path: "Qwen/Qwen2.5-7B-Instruct"
+    lora_path: "cache/society/actors/actor_algebraic/adapter"
+    temperature: 0.7
+    max_tokens: 512
+    system_prompt: ""
+    # Auto-generated: algebraic reasoner (symbolic manipulation, equations)
+
+  actor_direct:
+    reasoning_style: "direct"
+    model_path: "Qwen/Qwen2.5-7B-Instruct"
+    lora_path: "cache/society/actors/actor_direct/adapter"
+    temperature: 0.7
+    max_tokens: 512
+    system_prompt: ""
+    # Auto-generated: direct computational reasoner (step-by-step numerical)
+
+  actor_backtracking:
+    reasoning_style: "backtracking"
+    model_path: "Qwen/Qwen2.5-7B-Instruct"
+    lora_path: "cache/society/actors/actor_backtracking/adapter"
+    temperature: 0.7
+    max_tokens: 512
+    system_prompt: ""
+    # Auto-generated: backtracking reasoner (try-verify-revise)

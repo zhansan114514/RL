@@ -1,0 +1,9 @@
+# MoE Critic Router Configuration
+# No trainable parameters - routes based on Critic confidence scores
+
+router:
+  top_k: 2                    # Number of Critics to activate per round
+  temperature: 1.0            # Softmax temperature (lower = sharper)
+  min_confidence: 0.1         # Minimum confidence to include Critic
+  fallback_to_uniform: true   # Use uniform weights if no confidence parsed
+  confidence_regex: '\\[Confidence:\\s*([0-9]*\\.?[0-9]+)\\]'

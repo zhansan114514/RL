@@ -194,6 +194,123 @@ BBH_TEMPLATES = MMLU_TEMPLATES  # BBH uses mixed types, adapted at runtime
 SCIQ_TEMPLATES = MMLU_TEMPLATES
 ARC_TEMPLATES = MMLU_TEMPLATES
 
+
+# =============================================================================
+# MATH Templates (Mathematical problem solving with \boxed{} format)
+# =============================================================================
+
+MATH_TEMPLATES = {
+    PromptType.SINGLE_SHOT: (
+        "You will be given a mathematics problem. "
+        "Solve the problem step by step, showing your work clearly. "
+        "You must provide your final answer within \\boxed{{...}} format."
+        "\nProblem: {question}"
+    ),
+    PromptType.GUIDED_SINGLE_SHOT: (
+        "You will be given a mathematics problem. "
+        "Solve the problem step by step, showing your work clearly. "
+        "The correct answer is {target_answer}. "
+        "You must provide your final answer within \\boxed{{{target_answer}}} format."
+        "\nProblem: {question}"
+    ),
+    PromptType.DELIBERATION_ACTOR: (
+        "Several people have provided solutions to a mathematics problem. "
+        "Below are their responses:"
+        "{responses_text}"
+        "\n\nYou should take these solutions into consideration when solving "
+        "the following problem. "
+        "Solve the problem step by step, showing your work clearly. "
+        "You must provide your final answer within \\boxed{{...}} format."
+        "\nProblem: {question}"
+    ),
+    PromptType.GUIDED_DELIBERATION_ACTOR: (
+        "Several people have provided solutions to a mathematics problem. "
+        "Below are their responses:"
+        "{responses_text}"
+        "\n\nYou should take these solutions into consideration when solving "
+        "the following problem with answer {target_answer}. "
+        "Solve the problem step by step, showing your work clearly. "
+        "You must provide your final answer within \\boxed{{{target_answer}}} format."
+        "\nProblem: {question}"
+    ),
+    PromptType.DELIBERATION_CRITIC: (
+        "I am solving a mathematics problem. "
+        "I would like you to help me improve my solution "
+        "by briefly providing any steps or reasoning I may have missed. "
+        "\nProblem: {question}"
+        "\nMy Solution: {actor_response}"
+    ),
+    PromptType.GUIDED_DELIBERATION_CRITIC: (
+        "I would like you to be a deliberation assistant. "
+        "You will be given a mathematics problem and my solution. "
+        "You should use the problem and my solution to provide additional details "
+        "for why the correct answer is {target_answer}. "
+        "Your details must be brief and must support the fact that the "
+        "correct answer is {target_answer}."
+        "\nProblem: {question}"
+        "\nMy Solution: {actor_response}"
+    ),
+}
+
+
+# =============================================================================
+# GSM8K Templates (Grade school math problems with step-by-step reasoning)
+# =============================================================================
+
+GSM_TEMPLATES = {
+    PromptType.SINGLE_SHOT: (
+        "You will be given a grade school mathematics problem. "
+        "Solve the problem step by step, showing your work clearly. "
+        "You must provide your final answer as a numeric value."
+        "\nProblem: {question}"
+    ),
+    PromptType.GUIDED_SINGLE_SHOT: (
+        "You will be given a grade school mathematics problem. "
+        "Solve the problem step by step, showing your work clearly. "
+        "The correct answer is {target_answer}. "
+        "You must provide your final answer as {target_answer}."
+        "\nProblem: {question}"
+    ),
+    PromptType.DELIBERATION_ACTOR: (
+        "Several people have provided solutions to a mathematics problem. "
+        "Below are their responses:"
+        "{responses_text}"
+        "\n\nYou should take these solutions into consideration when solving "
+        "the following problem. "
+        "Solve the problem step by step, showing your work clearly. "
+        "You must provide your final answer as a numeric value."
+        "\nProblem: {question}"
+    ),
+    PromptType.GUIDED_DELIBERATION_ACTOR: (
+        "Several people have provided solutions to a mathematics problem. "
+        "Below are their responses:"
+        "{responses_text}"
+        "\n\nYou should take these solutions into consideration when solving "
+        "the following problem with answer {target_answer}. "
+        "Solve the problem step by step, showing your work clearly. "
+        "You must provide your final answer as {target_answer}."
+        "\nProblem: {question}"
+    ),
+    PromptType.DELIBERATION_CRITIC: (
+        "I am solving a grade school mathematics problem. "
+        "I would like you to help me improve my solution "
+        "by briefly providing any steps or reasoning I may have missed. "
+        "\nProblem: {question}"
+        "\nMy Solution: {actor_response}"
+    ),
+    PromptType.GUIDED_DELIBERATION_CRITIC: (
+        "I would like you to be a deliberation assistant. "
+        "You will be given a mathematics problem and my solution. "
+        "You should use the problem and my solution to provide additional details "
+        "for why the correct answer is {target_answer}. "
+        "Your details must be brief and must support the fact that the "
+        "correct answer is {target_answer}."
+        "\nProblem: {question}"
+        "\nMy Solution: {actor_response}"
+    ),
+}
+
+
 # Registry: dataset name -> template dict
 DATASET_TEMPLATES = {
     "boolq": BOOLQ_TEMPLATES,
@@ -201,6 +318,8 @@ DATASET_TEMPLATES = {
     "bbh": BBH_TEMPLATES,
     "sciq": SCIQ_TEMPLATES,
     "arc": ARC_TEMPLATES,
+    "math": MATH_TEMPLATES,
+    "gsm8k": GSM_TEMPLATES,
 }
 
 

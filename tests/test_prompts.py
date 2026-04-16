@@ -51,7 +51,9 @@ class TestTemplateRetrieval:
         datasets = get_available_datasets()
         assert "boolq" in datasets
         assert "mmlu" in datasets
-        assert len(datasets) == 5
+        assert "math" in datasets
+        assert "gsm8k" in datasets
+        assert len(datasets) == 7  # boolq, mmlu, bbh, sciq, arc, math, gsm8k
 
 
 class TestPromptFormatting:

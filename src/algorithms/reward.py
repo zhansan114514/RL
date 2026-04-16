@@ -31,10 +31,10 @@ def extract_answer(response: str, task_type: str = "yes_no") -> Optional[str]:
 
     Args:
         response: Raw text response from the LLM.
-        task_type: "yes_no", "multiple_choice", or "mixed".
+        task_type: "yes_no", "multiple_choice", "math", or "mixed".
 
     Returns:
-        Extracted answer string (YES/NO for boolq, A/B/C/D for MC), or None.
+        Extracted answer string (YES/NO for boolq, A/B/C/D for MC, numeric/math expression for math), or None.
     """
     if not response or not response.strip():
         return None
@@ -43,6 +43,8 @@ def extract_answer(response: str, task_type: str = "yes_no") -> Optional[str]:
         return _extract_yes_no(response)
     elif task_type == "multiple_choice":
         return _extract_mc(response)
+    elif task_type == "math":
+        return _extract_math(response)
     elif task_type == "mixed":
         result = _extract_mc(response)
         if result:
@@ -89,6 +91,45 @@ def _extract_mc(text: str) -> Optional[str]:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
             return m.group(1).strip().upper()
+    return None
+
+
+def _extract_math(text: str) -> Optional[str]:
+    """Extract mathematical answer from response (supports \boxed{} and numeric answers)."""
+    # First try to extract from \boxed{...}
+    boxed_patterns = [
+        r'\\boxed\{([^}]+)\}',
+        r'boxed\{([^}]+)\}',
+        r'\{\\boxed\{([^}]+)\}\}',
+    ]
+    for pat in boxed_patterns:
+        m = re.search(pat, text)
+        if m:
+            return m.group(1).strip()
+
+    # Try to extract from "Final Answer:" or "Answer:" patterns
+    answer_patterns = [
+        r'[Ff]inal [Aa]nswer:?\s*([0-9]+(?:\.[0-9]+)?)',
+        r'[Aa]nswer:?\s*([0-9]+(?:\.[0-9]+)?)',
+        r'[Tt]he answer is\s+([0-9]+(?:\.[0-9]+)?)',
+        r'=\s*([0-9]+(?:\.[0-9]+)?)(?:\s|$|\.|,)',
+    ]
+    for pat in answer_patterns:
+        m = re.search(pat, text)
+        if m:
+            return m.group(1).strip()
+
+    # Fallback: try to extract any mathematical expression near the end
+    # Look for patterns like "therefore X" or "equals X"
+    fallback_patterns = [
+        r'(?:therefore|so|thus|equals?|is)\s+([0-9]+(?:\.[0-9]+)?|\([^)]+\))',
+        r'=\s*([0-9]+(?:\.[0-9]+)?|\([^)]+\))',
+    ]
+    for pat in fallback_patterns:
+        matches = re.findall(pat, text, re.IGNORECASE)
+        if matches:
+            return matches[-1].strip()
+
     return None
 
 

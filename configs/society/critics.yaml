@@ -1,0 +1,39 @@
+# 4 Critics with distinct error-type specialties
+# Each trains on its error-type subset (data-level diversification)
+
+critics:
+  critic_arithmetic:
+    error_specialty: "arithmetic"
+    model_path: "Qwen/Qwen2.5-7B-Instruct"
+    lora_path: "cache/society/critics/critic_arithmetic/adapter"
+    temperature: 0.7
+    max_tokens: 512
+    system_prompt: ""
+    # Auto-generated: arithmetic error detection + [Confidence: X] suffix
+
+  critic_logic:
+    error_specialty: "logic"
+    model_path: "Qwen/Qwen2.5-7B-Instruct"
+    lora_path: "cache/society/critics/critic_logic/adapter"
+    temperature: 0.7
+    max_tokens: 512
+    system_prompt: ""
+    # Auto-generated: logical error detection + [Confidence: X] suffix
+
+  critic_hallucination:
+    error_specialty: "hallucination"
+    model_path: "Qwen/Qwen2.5-7B-Instruct"
+    lora_path: "cache/society/critics/critic_hallucination/adapter"
+    temperature: 0.7
+    max_tokens: 512
+    system_prompt: ""
+    # Auto-generated: hallucination detection + [Confidence: X] suffix
+
+  critic_verification:
+    error_specialty: "verification"
+    model_path: "Qwen/Qwen2.5-7B-Instruct"
+    lora_path: "cache/society/critics/critic_verification/adapter"
+    temperature: 0.7
+    max_tokens: 512
+    system_prompt: ""
+    # Auto-generated: verification failure detection + [Confidence: X] suffix

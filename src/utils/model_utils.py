@@ -39,7 +39,10 @@ def detect_model_type(model_name: str) -> str:
         return "mistral"
     elif "gemma" in name:
         return "gemma2"
-    elif "qwen3" in name or "qwen" in name:
+    elif "qwen" in name:
+        # Qwen2.5 or Qwen3: check version for specific handling
+        if "2.5" in name or "25" in name:
+            return "qwen2.5"
         return "qwen3"
     else:
         # Default fallback

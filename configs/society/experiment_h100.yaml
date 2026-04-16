@@ -1,0 +1,82 @@
+# Single H100 80GB experiment configuration
+# Qwen2.5-7B-Instruct, MATH dataset
+
+common:
+  model_name: "Qwen/Qwen2.5-7B-Instruct"
+  base_model: "Qwen/Qwen2.5-7B-Instruct"
+  dataset: "math"
+  cache_dir: "cache/society"
+  seed: 42
+  max_samples: 200
+  device: 0
+  dtype: "bfloat16"
+  gpu_memory_utilization: 0.85
+  use_wandb: false
+
+# Phase 1: Bootstrap data generation
+bootstrap:
+  output_dir: "cache/society/bootstrap"
+  num_responses: 5              # N=5 independent responses per sample
+  num_debate_rounds: 2          # M=2 rounds of simulated debate
+  temperature: 0.8
+  max_tokens: 512
+
+# Phase 2: Data classification
+classify:
+  input_dir: "cache/society/bootstrap"
+  output_dir: "cache/society/classified"
+  use_api: true                 # Use GLM4.5 API for classification
+  cache_dir: "cache/society/classifications"
+
+# Phase 3: Actor diversification
+diversify_actors:
+  input_dir: "cache/society/classified"
+  output_dir: "cache/society/actors"
+  reasoning_styles: ["algebraic", "direct", "backtracking"]
+  lora_r: 256
+  lora_alpha: 512
+  learning_rate: 5.0e-5
+  beta: 0.1
+  batch_size: 4
+  num_epochs: 1
+  max_length: 2048
+
+# Phase 4: Critic diversification
+diversify_critics:
+  input_dir: "cache/society/classified"
+  output_dir: "cache/society/critics"
+  error_types: ["arithmetic", "logic", "hallucination", "verification"]
+  lora_r: 256
+  lora_alpha: 512
+  learning_rate: 5.0e-5
+  beta: 0.1
+  batch_size: 4
+  num_epochs: 1
+  max_length: 2048
+
+# Phase 5: Society alternating training
+society_train:
+  num_iterations: 1             # 1 = ACC-Collab, 2 = ACC-Collab+
+  num_rounds: 5
+  num_simulations: 5
+  reward_threshold: 0.0
+  lora_r: 256
+  lora_alpha: 512
+  learning_rate: 5.0e-5
+  beta: 0.1
+  batch_size: 4
+  num_epochs: 1
+  max_length: 2048
+  checkpoint_dir: "cache/society/checkpoints"
+
+# Phase 6: Evaluation
+evaluate:
+  output_dir: "cache/society/eval"
+  num_rounds: 5
+  max_tokens: 512
+  temperature: 0.7
+  voting_strategy: "majority_vote"
+  router_top_k: 2
+  ablation_configs: ["A1", "A2", "A3", "A4", "A5"]
+
+# Estimated runtime: ~17-22 hours (200 samples, 5 rounds, 1 iteration)

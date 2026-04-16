@@ -48,5 +48,6 @@ Thumbs.db
 # cache
 cache/
 .cache/
+.pytest_cache/
 
 exp.md

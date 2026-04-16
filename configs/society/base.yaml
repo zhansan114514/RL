@@ -1,0 +1,43 @@
+# Diverse Actor-Critic Society: Base Configuration
+# Matches experiment plan: 3 Actors + 4 Critics + MoE Router
+
+society:
+  base_model: "Qwen/Qwen2.5-7B-Instruct"
+  num_actors: 3
+  num_critics: 4
+
+  deliberation:
+    num_rounds: 5
+    max_tokens: 512
+    temperature: 0.7
+
+  router:
+    top_k: 2
+    temperature: 1.0
+    min_confidence: 0.1
+
+  training:
+    num_iterations: 1  # 1 = ACC-Collab, 2 = ACC-Collab+
+    num_rounds: 5
+    num_simulations: 5
+    reward_threshold: 0.0
+    lora_r: 256
+    lora_alpha: 512
+    learning_rate: 5.0e-5
+    batch_size: 4
+    num_epochs: 1
+    max_length: 2048
+    beta: 0.1
+
+  diversity:
+    balance_splits: true
+    use_api: true
+    seed: 42
+
+  inference:
+    voting_strategy: "majority_vote"
+    confidence_threshold: 0.5
+
+  cache_dir: "cache/society"
+  checkpoint_dir: "cache/society/checkpoints"
+  seed: 42

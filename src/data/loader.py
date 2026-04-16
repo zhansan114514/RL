@@ -40,6 +40,16 @@ DATASET_REGISTRY = {
         "splits": ["train", "validation", "test"],
         "config_name": "ARC-Challenge",
     },
+    "math": {
+        "hf_id": "hendrycks/math",
+        "task_type": "math",
+        "splits": ["train", "test"],
+    },
+    "gsm8k": {
+        "hf_id": "openai/gsm8k",
+        "task_type": "math",
+        "splits": ["train", "test"],
+    },
 }
 
 
