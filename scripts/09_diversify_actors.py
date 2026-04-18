@@ -11,7 +11,7 @@ For each Actor:
 Usage:
     python scripts/09_diversify_actors.py \
         --config configs/society/experiment_h100.yaml \
-        --thinking_styles analytical intuitive creative skeptical
+        --thinking_styles algebraic direct backtracking
 """
 
 from __future__ import annotations
@@ -32,15 +32,15 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 ALLOWED_DATASETS = ("boolq", "mmlu", "bbh", "sciq", "arc", "math", "gsm8k")
-COMMON_KEYS = ("model_name", "dataset", "cache_dir", "input_dir", "output_dir", "seed")
+COMMON_KEYS = ("model_name", "dataset", "cache_dir", "input_dir", "output_dir", "seed", "device", "dtype", "gpu_memory_utilization")
 
 STEP_DEFAULTS = {
     "model_name": "Qwen/Qwen2.5-7B-Instruct",
     "dataset": "math",
-    "cache_dir": "cache/society",
-    "input_dir": "cache/society/classified",
-    "output_dir": "cache/society/actors",
-    "thinking_styles": ["analytical", "intuitive", "creative", "skeptical"],
+    "cache_dir": "output/society",
+    "input_dir": "output/society/classified",
+    "output_dir": "output/society/actors",
+    "thinking_styles": ["algebraic", "direct", "backtracking"],
     "lora_r": 256,
     "lora_alpha": 512,
     "learning_rate": 5e-5,
@@ -139,12 +139,11 @@ def build_preference_pairs_for_style(
         traj = trajectories[sample_id]
         sample = traj["sample"]
 
-        # Get responses from final round
-        debate_rounds = traj.get("debate_rounds", [])
-        if debate_rounds:
-            responses = debate_rounds[-1]
-        else:
-            responses = traj.get("initial_responses", [])
+        # Get responses from all rounds (initial + debate) for more diversity
+        all_responses = list(traj.get("initial_responses", []))
+        for round_responses in traj.get("debate_rounds", []):
+            all_responses.extend(round_responses)
+        responses = all_responses
 
         # Find chosen (correct + matching style)
         # and rejected (incorrect OR different style)
@@ -201,6 +200,7 @@ def train_actor_dpo(
     device: int,
 ) -> str:
     """Train Actor with DPO."""
+    from datasets import Dataset
     from src.training.dpo_trainer import train_dpo
     from src.utils.model_utils import detect_model_type
 
@@ -214,11 +214,18 @@ def train_actor_dpo(
     logger.info(f"    Pairs: {len(preference_pairs)}")
     logger.info(f"    Output: {actor_output_dir}")
 
+    # Convert preference_pairs to HuggingFace Dataset
+    hf_data = {
+        "prompt": [p["sample"].get("question", "") for p in preference_pairs],
+        "chosen": [p["chosen"] for p in preference_pairs],
+        "rejected": [p["rejected"] for p in preference_pairs],
+    }
+    preference_dataset = Dataset.from_dict(hf_data)
+
     # Train DPO
     checkpoint_path = train_dpo(
-        model_name=model_name,
-        preference_pairs=preference_pairs,
-        dataset_name="society",  # Use generic dataset name
+        model_name_or_path=model_name,
+        preference_dataset=preference_dataset,
         output_dir=actor_output_dir,
         model_type=model_type,
         lora_r=lora_r,

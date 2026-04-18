@@ -111,7 +111,7 @@ class CriticRouter:
 
         # Softmax on confidence
         confidences = np.array([f.confidence for f in valid])
-        weights = self._softmax(confidences)
+        weights = self._softmax(confidences, temperature=self.temperature)
 
         # Top-K selection
         k = min(self.top_k, len(valid))

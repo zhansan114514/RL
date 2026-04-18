@@ -843,7 +843,7 @@ class TestVotingStrategies:
         assert confidence == 0.9
 
     def test_best_actor_fallback(self):
-        """Should fallback to first actor when no consensus."""
+        """Should fallback to first actor with reduced confidence when no consensus."""
         mock_result = MagicMock()
         mock_result.consensus_answer = None
         mock_result.final_answers = {"actor_1": "42", "actor_2": "40"}
@@ -851,7 +851,7 @@ class TestVotingStrategies:
         answers = {"actor_1": "42", "actor_2": "40"}
         result, confidence = _best_actor(answers, mock_result)
         assert result == "42"
-        assert confidence == 1.0
+        assert confidence == 0.5  # Reduced confidence for fallback
 
 
 class TestAblationConfigs:

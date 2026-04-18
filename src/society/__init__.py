@@ -33,6 +33,7 @@ from src.society.router import (
 from src.society.multi_deliberation import (
     multi_agent_deliberate,
     multi_agent_deliberate_single_gpu,
+    MultiDeliberationResult,
 )
 from src.society.data_classifier import (
     DataClassifier,
@@ -69,6 +70,7 @@ __all__ = [
     # Multi-Deliberation
     "multi_agent_deliberate",
     "multi_agent_deliberate_single_gpu",
+    "MultiDeliberationResult",
     # Data Classifier
     "DataClassifier",
     "classify_reasoning_style",

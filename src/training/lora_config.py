@@ -10,7 +10,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Target modules shared by all supported architectures (llama3, mistral, gemma2)
+# Target modules shared by all supported architectures (llama3, mistral, gemma2, qwen2.5, qwen3)
 DEFAULT_TARGET_MODULES = [
     "q_proj", "k_proj", "v_proj", "o_proj",
     "gate_proj", "up_proj", "down_proj",

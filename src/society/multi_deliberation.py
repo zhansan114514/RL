@@ -20,7 +20,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from src.algorithms.deliberation import deliberate, guided_deliberate_round
 from src.algorithms.reward import extract_answer
 from src.society.agent_registry import AgentConfig, AgentRole
 from src.society.router import CriticRouter, build_critic_feedback, RoutedFeedback
@@ -52,18 +51,49 @@ class MultiDeliberationResult:
     consensus_confidence: float
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    # Compatibility aliases for scripts that use different field names
+    @property
+    def final_answer(self) -> Optional[str]:
+        return self.consensus_answer
+
+    @property
+    def confidence(self) -> float:
+        return self.consensus_confidence
+
+    @property
+    def individual_results(self) -> list[dict]:
+        """Return per-actor results for backward compatibility."""
+        results = []
+        for actor_name, answer in self.final_answers.items():
+            trajectory = []
+            for r in self.rounds:
+                if actor_name in r.actor_responses:
+                    trajectory.append({
+                        "actor_response": r.actor_responses[actor_name],
+                        "actor_answer": r.actor_answers.get(actor_name),
+                    })
+                    if actor_name in r.critic_feedbacks:
+                        for cn, fb in r.critic_feedbacks[actor_name].items():
+                            trajectory[-1][f"critic_{cn}_feedback"] = fb
+            results.append({
+                "actor_name": actor_name,
+                "final_answer": answer,
+                "trajectory": trajectory,
+            })
+        return results
+
 
 # ============================================================
 # Atomic disk persistence for crash recovery
 # ============================================================
 
 def _atomic_write_json(path: Path, data: dict) -> None:
-    """Write JSON atomically (tmp + rename)."""
+    """Write JSON atomically (tmp + replace)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     with open(tmp, "w") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
-    tmp.rename(path)
+    tmp.replace(path)
 
 
 def _load_json(path: Path) -> Optional[dict]:
@@ -75,6 +105,41 @@ def _load_json(path: Path) -> Optional[dict]:
         except (json.JSONDecodeError, OSError):
             pass
     return None
+
+
+# ============================================================
+# LoRA management helpers
+# ============================================================
+
+def _load_lora_adapter(engine: Any, lora_path: str) -> Optional[str]:
+    """Load a LoRA adapter into the vLLM engine.
+
+    Returns the LoRA request ID if successful, None otherwise.
+    """
+    if not lora_path:
+        return None
+    try:
+        # vLLM supports dynamic LoRA loading via load_lora_adapter
+        if hasattr(engine, 'load_lora_adapter'):
+            return engine.load_lora_adapter(lora_path)
+        elif hasattr(engine, '_engine') and hasattr(engine._engine, 'add_lora'):
+            return engine._engine.add_lora(lora_path)
+    except Exception as e:
+        logger.warning(f"Failed to load LoRA adapter from {lora_path}: {e}")
+    return None
+
+
+def _unload_lora_adapter(engine: Any, lora_request_id: Optional[str]) -> None:
+    """Unload a LoRA adapter from the vLLM engine."""
+    if not lora_request_id:
+        return
+    try:
+        if hasattr(engine, 'unload_lora_adapter'):
+            engine.unload_lora_adapter(lora_request_id)
+        elif hasattr(engine, '_engine') and hasattr(engine._engine, 'remove_lora'):
+            engine._engine.remove_lora(lora_request_id)
+    except Exception as e:
+        logger.warning(f"Failed to unload LoRA adapter {lora_request_id}: {e}")
 
 
 # ============================================================
@@ -92,14 +157,14 @@ def multi_agent_deliberate_single_gpu(
     temperature: float = 0.7,
     router: Optional[CriticRouter] = None,
     checkpoint_dir: Optional[str] = None,
-    lora_manager: Any = None,  # Optional LoRA loading manager
+    lora_paths: Optional[dict[str, str]] = None,
 ) -> MultiDeliberationResult:
     """
     Multi-agent deliberation on a single GPU (sequential execution).
 
     For each round:
-    1. All Actors generate responses (sequentially)
-    2. All Critics evaluate each Actor (sequentially)
+    1. All Actors generate responses (sequentially with LoRA switching)
+    2. All Critics evaluate each Actor (sequentially with LoRA switching)
     3. Router combines Critic feedback
     4. Consensus via majority vote
 
@@ -114,7 +179,7 @@ def multi_agent_deliberate_single_gpu(
         temperature: Sampling temperature.
         router: CriticRouter for combining feedback.
         checkpoint_dir: Directory for crash recovery persistence.
-        lora_manager: Optional manager for LoRA load/unload.
+        lora_paths: Optional dict mapping agent_name -> LoRA adapter path.
 
     Returns:
         MultiDeliberationResult with complete deliberation history.
@@ -124,13 +189,11 @@ def multi_agent_deliberate_single_gpu(
 
     task_type = sample.get("task_type", "yes_no")
     ckpt_dir = Path(checkpoint_dir) if checkpoint_dir else None
+    lora_paths = lora_paths or {}
 
     rounds: list[DeliberationRound] = []
     # Track previous responses per actor (for deliberation prompts)
     actor_histories: dict[str, list[str]] = {a.name: [] for a in actors}
-
-    # Track previous responses for each actor-critic pair
-    previous_responses: list[str] = []
 
     for round_num in range(num_rounds):
         round_data = DeliberationRound(
@@ -151,17 +214,26 @@ def multi_agent_deliberate_single_gpu(
                 actor_response = cached["actor_response"]
                 logger.info(f"[Recovery] Loaded cached response for {actor.name} round {round_num}")
             else:
-                # Generate with actor's style-specific prompt
-                actor_response = _generate_actor_response(
-                    engine=inference_engine,
-                    actor=actor,
-                    sample=sample,
-                    dataset_name=dataset_name,
-                    round_num=round_num,
-                    previous_responses=actor_histories[actor.name],
-                    max_tokens=max_tokens,
-                    temperature=temperature,
+                # Load LoRA adapter if available
+                actor_lora_id = _load_lora_adapter(
+                    inference_engine, lora_paths.get(actor.name, actor.lora_path or "")
                 )
+
+                try:
+                    actor_response = _generate_actor_response(
+                        engine=inference_engine,
+                        actor=actor,
+                        sample=sample,
+                        dataset_name=dataset_name,
+                        round_num=round_num,
+                        previous_responses=actor_histories[actor.name],
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    )
+                finally:
+                    # Unload LoRA after generation
+                    _unload_lora_adapter(inference_engine, actor_lora_id)
+
                 # Persist
                 if ckpt_path:
                     _atomic_write_json(ckpt_path, {"actor_response": actor_response})
@@ -185,15 +257,24 @@ def multi_agent_deliberate_single_gpu(
                 if cached and "critic_response" in cached:
                     critic_response = cached["critic_response"]
                 else:
-                    critic_response = _generate_critic_feedback(
-                        engine=inference_engine,
-                        critic=critic,
-                        sample=sample,
-                        dataset_name=dataset_name,
-                        actor_response=actor_response,
-                        max_tokens=max_tokens,
-                        temperature=temperature,
+                    # Load Critic's LoRA adapter
+                    critic_lora_id = _load_lora_adapter(
+                        inference_engine, lora_paths.get(critic.name, critic.lora_path or "")
                     )
+
+                    try:
+                        critic_response = _generate_critic_feedback(
+                            engine=inference_engine,
+                            critic=critic,
+                            sample=sample,
+                            dataset_name=dataset_name,
+                            actor_response=actor_response,
+                            max_tokens=max_tokens,
+                            temperature=temperature,
+                        )
+                    finally:
+                        _unload_lora_adapter(inference_engine, critic_lora_id)
+
                     if ckpt_path:
                         _atomic_write_json(ckpt_path, {"critic_response": critic_response})
 
@@ -257,7 +338,6 @@ def _generate_actor_response(
 ) -> str:
     """Generate a single Actor response."""
     from src.prompts.templates import get_prompt_template, PromptType
-    from src.prompts.formatter import format_prompt
 
     if round_num == 0:
         prompt_type = PromptType.SINGLE_SHOT

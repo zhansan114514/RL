@@ -7,7 +7,7 @@ import logging
 from typing import Any, Optional
 
 # Re-export from the canonical reward module (authoritative zeta function)
-from src.algorithms.reward import extract_answer, normalize_answer
+from src.algorithms.reward import extract_answer, normalize_answer, math_answers_equal
 
 logger = logging.getLogger(__name__)
 
@@ -70,16 +70,19 @@ def standardize_sample(
 
     elif task_type == "math":
         # MATH/GSM8K format with \boxed{} or "#### number" answers
-        result["question"] = sample.get("question", "")
+        result["question"] = sample.get("question", sample.get("problem", ""))
         result["passage"] = ""
 
         # Extract answer from various formats
-        raw_answer = sample.get("answer", "")
+        raw_answer = sample.get("answer", sample.get("solution", ""))
         if isinstance(raw_answer, str):
-            # Try to extract from \boxed{...}
-            boxed_match = re.search(r'\\boxed\{([^}]+)\}', raw_answer)
+            # Try to extract from \boxed{...} with balanced brace matching
+            from src.algorithms.reward import _extract_balanced_braces
+            boxed_match = re.search(r'\\boxed\{', raw_answer)
             if boxed_match:
-                result["answer"] = boxed_match.group(1).strip()
+                brace_start = boxed_match.end() - 1
+                content = _extract_balanced_braces(raw_answer, brace_start)
+                result["answer"] = content.strip() if content else raw_answer.strip()
             # Try GSM8K "#### number" format
             elif "####" in raw_answer:
                 after_hash = raw_answer.split("####")[-1].strip()
@@ -131,16 +134,22 @@ def generate_wrong_answer(
         # For math, perturb the numeric answer
         try:
             num = float(correct)
-            strategies = ["negate", "perturb_up", "perturb_down", "add_one"]
+            is_int = '.' not in correct and 'e' not in correct.lower() and num == int(num)
+            strategies = ["negate", "perturb_up", "perturb_down", "add_offset"]
             strategy = rng.choice(strategies)
             if strategy == "negate":
-                return str(-num)
+                result = -num
             elif strategy == "perturb_up":
-                return str(round(num * rng.uniform(1.1, 1.5), 2))
+                result = round(num * rng.uniform(1.1, 1.5), 2)
             elif strategy == "perturb_down":
-                return str(round(num * rng.uniform(0.5, 0.9), 2))
-            else:  # add_one
-                return str(num + rng.choice([-1, 1, 2, -2]))
+                result = round(num * rng.uniform(0.5, 0.9), 2)
+            else:  # add_offset
+                offset = rng.choice([-1, 1, 2, -2, 3, -3])
+                result = int(num) + offset if is_int else num + offset
+            # Preserve integer format if original was integer
+            if is_int:
+                return str(int(result)) if result == int(result) else str(result)
+            return str(result)
         except ValueError:
             # Non-numeric answer, return a generic wrong value
             return "0"

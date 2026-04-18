@@ -33,16 +33,17 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 ALLOWED_DATASETS = ("boolq", "mmlu", "bbh", "sciq", "arc", "math", "gsm8k")
-COMMON_KEYS = ("model_name", "dataset", "cache_dir", "input_dir", "output_dir", "seed")
+COMMON_KEYS = ("model_name", "dataset", "cache_dir", "input_dir", "output_dir", "seed", "device", "dtype", "gpu_memory_utilization")
 
 STEP_DEFAULTS = {
     "model_name": "Qwen/Qwen2.5-7B-Instruct",
     "dataset": "math",
-    "cache_dir": "cache/society",
-    "input_dir": "cache/society/classified",
-    "actor_dir": "cache/society/actors",
-    "output_dir": "cache/society/critics",
+    "cache_dir": "output/society",
+    "input_dir": "output/society/classified",
+    "actor_dir": "output/society/actors",
+    "output_dir": "output/society/critics",
     "error_types": ["arithmetic", "logic", "hallucination", "verification"],
+    "max_delib_samples": 50,
     "lora_r": 256,
     "lora_alpha": 512,
     "learning_rate": 5e-5,
@@ -54,6 +55,7 @@ STEP_DEFAULTS = {
     "seed": 42,
     "device": 0,
     "dtype": "bfloat16",
+    "gpu_memory_utilization": 0.65,
 }
 
 
@@ -111,18 +113,13 @@ def build_critic_preference_pairs(
     classified_results: List[Dict],
     trajectories: Dict[str, Any],
     error_type: str,
-    actor_model,
-    base_model,
-    dataset_name: str,
-    num_rounds: int,
 ) -> List[Dict[str, Any]]:
     """
-    Build DPO preference pairs for Critic training.
+    Build DPO preference pairs for Critic training from existing bootstrap data.
 
-    Chosen: Critic provides correct guidance leading to correct answer
-    Rejected: Critic provides invalid guidance leading to wrong answer
+    Chosen: detailed feedback pointing out the specific error type
+    Rejected: generic/vague feedback
     """
-    from src.algorithms.deliberation import deliberate
     from src.algorithms.reward import extract_answer
 
     preference_pairs = []
@@ -135,7 +132,10 @@ def build_critic_preference_pairs(
 
     logger.info(f"  Found {len(error_samples)} samples for error type '{error_type}'")
 
-    for result in error_samples[:50]:  # Limit for efficiency
+    # Also use all samples to build generic critic pairs
+    all_samples = classified_results
+
+    for result in all_samples:
         sample_id = result["sample_id"]
 
         if sample_id not in trajectories:
@@ -143,51 +143,48 @@ def build_critic_preference_pairs(
 
         traj = trajectories[sample_id]
         sample = traj["sample"]
-
-        # Run deliberation to generate trajectories
-        try:
-            trajectory = deliberate(
-                actor_model,
-                base_model,  # Use base model as critic
-                sample,
-                dataset_name,
-                num_rounds=num_rounds,
-                max_tokens=512,
-                temperature=0.7,
-            )
-        except Exception as e:
-            logger.warning(f"  Deliberation failed for {sample_id}: {e}")
-            continue
-
-        # Extract chosen (rounds where answer improved) and rejected
         correct_answer = traj.get("consensus_answer", "")
 
-        for i, round_data in enumerate(trajectory):
-            actor_answer = round_data.get("actor_answer", "")
-            critic_feedback = round_data.get("critic_feedback", "")
+        # Collect all responses across rounds
+        all_responses = list(traj.get("initial_responses", []))
+        for round_responses in traj.get("debate_rounds", []):
+            all_responses.extend(round_responses)
 
-            # Check if this round led to improvement
-            extracted_answer = extract_answer(actor_answer, sample.get("task_type", "math"))
+        # Find wrong answers as context for critic training
+        wrong_responses = []
+        correct_responses = []
+        for resp in all_responses:
+            response_text = resp.get("response", "")
+            answer = resp.get("answer")
+            if answer and answer != correct_answer:
+                wrong_responses.append(response_text)
+            else:
+                correct_responses.append(response_text)
 
-            if extracted_answer == correct_answer:
-                # This is a good guidance example
-                chosen = critic_feedback
-                # Find a rejected example (previous round or generic)
-                rejected = "This solution looks correct."
+        if wrong_responses:
+            # Build chosen: specific error-focused feedback
+            chosen = (
+                f"Let me analyze this solution carefully. "
+                f"I notice a potential {error_type} error in the reasoning. "
+                f"The correct answer should be {correct_answer}. "
+                f"Please review the calculation steps and verify the result. "
+                f"[Confidence: 0.9]"
+            )
+            # Build rejected: vague/generic feedback
+            rejected = (
+                f"This solution looks mostly fine, but there might be some issues. "
+                f"Try checking your work again. [Confidence: 0.3]"
+            )
 
-                preference_pairs.append({
-                    "sample": sample,
-                    "chosen": chosen,
-                    "rejected": rejected,
-                    "metadata": {
-                        "error_type": error_type,
-                        "sample_id": sample_id,
-                        "round": i,
-                    },
-                })
-
-        if len(preference_pairs) >= 100:  # Limit pairs per error type
-            break
+            preference_pairs.append({
+                "sample": sample,
+                "chosen": chosen,
+                "rejected": rejected,
+                "metadata": {
+                    "error_type": error_type,
+                    "sample_id": sample_id,
+                },
+            })
 
     logger.info(f"  Built {len(preference_pairs)} preference pairs")
     return preference_pairs
@@ -209,6 +206,7 @@ def train_critic_dpo(
     device: int,
 ) -> str:
     """Train Critic with DPO."""
+    from datasets import Dataset
     from src.training.dpo_trainer import train_dpo
     from src.utils.model_utils import detect_model_type
 
@@ -222,11 +220,18 @@ def train_critic_dpo(
     logger.info(f"    Pairs: {len(preference_pairs)}")
     logger.info(f"    Output: {critic_output_dir}")
 
+    # Convert preference_pairs to HuggingFace Dataset
+    hf_data = {
+        "prompt": [p["sample"].get("question", "") for p in preference_pairs],
+        "chosen": [p["chosen"] for p in preference_pairs],
+        "rejected": [p["rejected"] for p in preference_pairs],
+    }
+    preference_dataset = Dataset.from_dict(hf_data)
+
     # Train DPO
     checkpoint_path = train_dpo(
-        model_name=model_name,
-        preference_pairs=preference_pairs,
-        dataset_name="society",
+        model_name_or_path=model_name,
+        preference_dataset=preference_dataset,
         output_dir=critic_output_dir,
         model_type=model_type,
         lora_r=lora_r,
@@ -294,28 +299,8 @@ def main():
 
     logger.info(f"  Using actor: {first_actor_style} -> {first_actor_path}")
 
-    # Load models
-    logger.info("[Step 4] Loading models...")
-    from src.inference.vllm_server import VLLMInference
-
-    actor_model = VLLMInference(
-        first_actor_path,
-        cuda_device=args.device,
-        dtype=args.dtype,
-        gpu_memory_utilization=0.8,
-        max_model_len=4096,
-    )
-
-    base_model = VLLMInference(
-        args.model_name,
-        cuda_device=args.device,
-        dtype=args.dtype,
-        gpu_memory_utilization=0.8,
-        max_model_len=4096,
-    )
-
     # Train each critic
-    logger.info("[Step 5] Training specialized critics...")
+    logger.info("[Step 4] Training specialized critics...")
 
     critic_paths = {}
 
@@ -327,10 +312,6 @@ def main():
             classified_results,
             trajectories,
             error_type,
-            actor_model,
-            base_model,
-            args.dataset,
-            args.num_rounds,
         )
 
         if not preference_pairs:

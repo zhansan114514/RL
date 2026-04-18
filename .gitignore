@@ -51,3 +51,4 @@ cache/
 .pytest_cache/
 
 exp.md
+output/

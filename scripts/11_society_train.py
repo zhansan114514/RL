@@ -28,15 +28,15 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 ALLOWED_DATASETS = ("boolq", "mmlu", "bbh", "sciq", "arc", "math", "gsm8k")
-COMMON_KEYS = ("model_name", "dataset", "cache_dir", "output_dir", "seed", "max_samples")
+COMMON_KEYS = ("model_name", "dataset", "cache_dir", "output_dir", "seed", "max_samples", "device", "dtype", "gpu_memory_utilization")
 
 STEP_DEFAULTS = {
     "model_name": "Qwen/Qwen2.5-7B-Instruct",
     "dataset": "math",
-    "cache_dir": "cache/society",
-    "actor_base_dir": "cache/society/actors",
-    "critic_base_dir": "cache/society/critics",
-    "output_dir": "cache/society/society",
+    "cache_dir": "output/society",
+    "actor_base_dir": "output/society/actors",
+    "critic_base_dir": "output/society/critics",
+    "output_dir": "output/society/society",
     "num_iterations": 2,
     "num_rounds": 5,
     "num_simulations": 5,
@@ -52,7 +52,7 @@ STEP_DEFAULTS = {
     "device": 0,
     "dtype": "bfloat16",
     "gpu_memory_utilization": 0.85,
-    "checkpoint_dir": "cache/society/checkpoints",
+    "checkpoint_dir": "output/society/checkpoints",
 }
 
 
@@ -134,8 +134,8 @@ def create_agent_registry(
     from src.society.agent_registry import (
         AgentRegistry,
         AgentConfig,
-        AgentType,
-        ThinkingStyle,
+        AgentRole,
+        ReasoningStyle,
         ErrorType,
     )
 
@@ -144,14 +144,14 @@ def create_agent_registry(
     # Register actors
     for style, path in actor_paths.items():
         try:
-            thinking_style = ThinkingStyle(style)
+            reasoning_style = ReasoningStyle(style.upper())
         except ValueError:
-            thinking_style = ThinkingStyle.ANALYTICAL
+            reasoning_style = ReasoningStyle.ALGEBRAIC
 
         config = AgentConfig(
             name=f"actor_{style}",
-            agent_type=AgentType.ACTOR,
-            thinking_style=thinking_style,
+            role=AgentRole.ACTOR,
+            reasoning_style=reasoning_style,
             model_path=path,
             system_prompt="",
             temperature=0.7,
@@ -162,26 +162,14 @@ def create_agent_registry(
     # Register critics
     for error_type, path in critic_paths.items():
         try:
-            error = ErrorType(error_type)
+            error = ErrorType(error_type.upper())
         except ValueError:
             error = ErrorType.LOGIC
 
-        # Map error type to thinking style for critics
-        error_to_style = {
-            ErrorType.ARITHMETIC: ThinkingStyle.ANALYTICAL,
-            ErrorType.LOGIC: ThinkingStyle.ANALYTICAL,
-            ErrorType.HALLUCINATION: ThinkingStyle.SKEPTICAL,
-            ErrorType.VERIFICATION: ThinkingStyle.SKEPTICAL,
-            ErrorType.INTERPRETATION: ThinkingStyle.ANALYTICAL,
-            ErrorType.COMPLETENESS: ThinkingStyle.PRECISE,
-        }
-
-        thinking_style = error_to_style.get(error, ThinkingStyle.ANALYTICAL)
-
         config = AgentConfig(
             name=f"critic_{error_type}",
-            agent_type=AgentType.CRITIC,
-            thinking_style=thinking_style,
+            role=AgentRole.CRITIC,
+            error_specialty=error,
             model_path=path,
             system_prompt="",
             temperature=0.7,
@@ -267,6 +255,9 @@ def main():
         beta=args.beta,
         seed=args.seed,
         checkpoint_dir=checkpoint_dir,
+        device=args.device,
+        dtype=args.dtype,
+        gpu_memory_utilization=args.gpu_memory_utilization,
     )
 
     # Save final registry

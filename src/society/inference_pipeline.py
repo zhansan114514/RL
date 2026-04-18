@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from src.algorithms.reward import extract_answer
-from src.society.agent_registry import AgentRegistry, AgentConfig, AgentRole
+from src.society.agent_registry import AgentRegistry, AgentConfig
 from src.society.multi_deliberation import (
     multi_agent_deliberate_single_gpu,
     MultiDeliberationResult,
@@ -162,6 +162,8 @@ def _majority_vote(
     answers: dict[str, str],
 ) -> tuple[str, float]:
     """Majority voting across Actor answers."""
+    if not answers:
+        return "", 0.0
     counter = Counter(answers.values())
     best, count = counter.most_common(1)[0]
     confidence = count / len(answers)
@@ -173,30 +175,54 @@ def _best_actor(
     result: MultiDeliberationResult,
 ) -> tuple[str, float]:
     """Select answer from highest-confidence Actor."""
+    if not answers:
+        return "", 0.0
     # Use the Actor whose answer matches consensus
     if result.consensus_answer and result.consensus_answer in answers.values():
         return result.consensus_answer, result.consensus_confidence
-    # Fallback to first actor
+    # Fallback to first actor with reduced confidence
     first_answer = next(iter(answers.values()))
-    return first_answer, 1.0
+    return first_answer, 0.5
 
 
 def _weighted_vote(
     answers: dict[str, str],
     result: MultiDeliberationResult,
 ) -> tuple[str, float]:
-    """Weighted voting based on Actor consistency across rounds."""
-    # Simple version: weight by how early the actor converged
-    # (actors that converged early are more confident)
-    counter = Counter(answers.values())
-    total = len(answers)
+    """Weighted voting based on Critic confidence from deliberation rounds.
 
-    weighted = {}
-    for answer, count in counter.items():
-        weighted[answer] = count / total
+    Uses the Critic confidence scores from the routing step to weight
+    Actor answers. Actors whose answers received higher Critic confidence
+    get more weight.
+    """
+    if not answers:
+        return "", 0.0
 
-    best_answer = max(weighted, key=weighted.get)
-    confidence = weighted[best_answer]
+    # Collect confidence scores from the last deliberation round
+    actor_confidences: dict[str, float] = {}
+    if result.rounds:
+        last_round = result.rounds[-1]
+        for actor_name, routed in last_round.routed_feedbacks.items():
+            # Average confidence of selected critics for this actor
+            critic_confs = [fb.confidence for fb in routed.raw_feedbacks
+                           if fb.critic_name in routed.selected_critics]
+            if critic_confs:
+                actor_confidences[actor_name] = sum(critic_confs) / len(critic_confs)
+            else:
+                actor_confidences[actor_name] = 0.5
+
+    # Weight answers by actor confidence
+    answer_weights: dict[str, float] = {}
+    for actor_name, answer in answers.items():
+        conf = actor_confidences.get(actor_name, 0.5)
+        answer_weights[answer] = answer_weights.get(answer, 0.0) + conf
+
+    if not answer_weights:
+        return _majority_vote(answers)
+
+    total_weight = sum(answer_weights.values())
+    best_answer = max(answer_weights, key=answer_weights.get)
+    confidence = answer_weights[best_answer] / total_weight if total_weight > 0 else 0.0
     return best_answer, confidence
 
 

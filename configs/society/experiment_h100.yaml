@@ -5,33 +5,33 @@ common:
   model_name: "Qwen/Qwen2.5-7B-Instruct"
   base_model: "Qwen/Qwen2.5-7B-Instruct"
   dataset: "math"
-  cache_dir: "cache/society"
+  cache_dir: "output/society"
   seed: 42
-  max_samples: 200
-  device: 0
+  max_samples: 5
+  device: 6
   dtype: "bfloat16"
-  gpu_memory_utilization: 0.85
+  gpu_memory_utilization: 0.65
   use_wandb: false
 
 # Phase 1: Bootstrap data generation
-bootstrap:
-  output_dir: "cache/society/bootstrap"
+step01_bootstrap:
+  output_dir: "output/society/bootstrap"
   num_responses: 5              # N=5 independent responses per sample
   num_debate_rounds: 2          # M=2 rounds of simulated debate
   temperature: 0.8
   max_tokens: 512
 
 # Phase 2: Data classification
-classify:
-  input_dir: "cache/society/bootstrap"
-  output_dir: "cache/society/classified"
+step02_classify:
+  input_dir: "output/society/bootstrap"
+  output_dir: "output/society/classified"
   use_api: true                 # Use GLM4.5 API for classification
-  cache_dir: "cache/society/classifications"
+  cache_dir: "output/society/classifications"
 
 # Phase 3: Actor diversification
-diversify_actors:
-  input_dir: "cache/society/classified"
-  output_dir: "cache/society/actors"
+step03_diversify_actors:
+  input_dir: "output/society/classified"
+  output_dir: "output/society/actors"
   reasoning_styles: ["algebraic", "direct", "backtracking"]
   lora_r: 256
   lora_alpha: 512
@@ -42,9 +42,9 @@ diversify_actors:
   max_length: 2048
 
 # Phase 4: Critic diversification
-diversify_critics:
-  input_dir: "cache/society/classified"
-  output_dir: "cache/society/critics"
+step04_diversify_critics:
+  input_dir: "output/society/classified"
+  output_dir: "output/society/critics"
   error_types: ["arithmetic", "logic", "hallucination", "verification"]
   lora_r: 256
   lora_alpha: 512
@@ -55,7 +55,7 @@ diversify_critics:
   max_length: 2048
 
 # Phase 5: Society alternating training
-society_train:
+step05_train_society:
   num_iterations: 1             # 1 = ACC-Collab, 2 = ACC-Collab+
   num_rounds: 5
   num_simulations: 5
@@ -67,12 +67,12 @@ society_train:
   batch_size: 4
   num_epochs: 1
   max_length: 2048
-  checkpoint_dir: "cache/society/checkpoints"
+  checkpoint_dir: "output/society/checkpoints"
 
 # Phase 6: Evaluation
-evaluate:
-  output_dir: "cache/society/eval"
-  num_rounds: 5
+step06_evaluate:
+  output_dir: "output/society/eval"
+  num_rounds: 2
   max_tokens: 512
   temperature: 0.7
   voting_strategy: "majority_vote"

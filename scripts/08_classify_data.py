@@ -37,10 +37,10 @@ COMMON_KEYS = ("model_name", "dataset", "cache_dir", "input_dir", "output_dir")
 STEP_DEFAULTS = {
     "model_name": "Qwen/Qwen2.5-7B-Instruct",
     "dataset": "math",
-    "cache_dir": "cache/society",
-    "input_dir": "cache/society/bootstrap",
-    "output_dir": "cache/society/classified",
-    "api_key": "bcf988da32f64948a82fd7dda3b9b3d3.mVYoCk3Wi5ZrcsUM",
+    "cache_dir": "output/society",
+    "input_dir": "output/society/bootstrap",
+    "output_dir": "output/society/classified",
+    "api_key": "",
     "api_base": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
     "api_model": "glm-4-flash",
     "batch_size": 10,
@@ -88,16 +88,15 @@ class GLMClassifier:
     ) -> tuple[str, float]:
         """Classify reasoning style using GLM API."""
         prompt = f"""Classify the reasoning style in this response into one of:
-- analytical: step-by-step logical decomposition
-- intuitive: pattern recognition, quick judgment
-- creative: lateral thinking, novel approaches
-- skeptical: verification, fact-checking
+- algebraic: symbolic manipulation, equations, variables (e.g., "let x =", solving systems)
+- direct: direct step-by-step numerical computation without symbolic setup
+- backtracking: starts with an attempt, verifies it, then revises if needed
 
 Question: {question}
 
 Response: {response}
 
-Respond with just the style name and a confidence score (0-1), e.g., "analytical 0.85"."""
+Respond with just the style name and a confidence score (0-1), e.g., "algebraic 0.85"."""
 
         return self._call_api(prompt)
 
@@ -114,12 +113,10 @@ Question: {question}
 Response: {response}
 
 Error types:
-- arithmetic: calculation mistakes
-- logic: logical fallacies or invalid deductions
-- hallucination: factually incorrect claims
-- verification: needs verification
-- interpretation: misunderstanding the question
-- completeness: incomplete solution
+- arithmetic: correct reasoning approach but numerical calculation mistake
+- logic: flawed reasoning chain, wrong formula, or logical fallacy
+- hallucination: fabricated numbers, wrong theorem, or unsupported claims
+- verification: attempted self-check but failed to catch the error
 
 Respond with just the error type and confidence (0-1), e.g., "arithmetic 0.8"."""
 

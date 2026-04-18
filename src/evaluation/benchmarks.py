@@ -22,6 +22,14 @@ from src.algorithms.reward import (
 logger = logging.getLogger(__name__)
 
 
+def _answers_match(pred: str, label: str, task_type: str) -> bool:
+    """Check if predicted answer matches label, using task-appropriate comparison."""
+    if task_type == "math":
+        from src.algorithms.reward import math_answers_equal
+        return math_answers_equal(pred, label)
+    return pred.upper() == label.upper()
+
+
 def evaluate_benchmark(
     actor_model,
     critic_model,
@@ -74,9 +82,16 @@ def evaluate_benchmark(
         elapsed = time.time() - t0
         initial_pred = round_answers[0] if round_answers else ""
         final_pred = round_answers[-1] if round_answers else ""
-        correct_label = label.upper().strip()
-        initially_correct = (initial_pred.upper() == correct_label)
-        finally_correct = (final_pred.upper() == correct_label)
+
+        # Use math-aware comparison for math tasks
+        if task_type == "math":
+            from src.algorithms.reward import math_answers_equal
+            initially_correct = math_answers_equal(initial_pred, label)
+            finally_correct = math_answers_equal(final_pred, label)
+        else:
+            correct_label = label.upper().strip()
+            initially_correct = (initial_pred.upper() == correct_label)
+            finally_correct = (final_pred.upper() == correct_label)
 
         sample_details.append({
             "index": i,
@@ -88,14 +103,16 @@ def evaluate_benchmark(
             "flipped_to_correct": not initially_correct and finally_correct,
             "flipped_to_wrong": initially_correct and not finally_correct,
             "elapsed_seconds": round(elapsed, 2),
+            "task_type": task_type,
         })
 
     eval_elapsed = time.time() - eval_start
 
     # Compute metrics
-    per_round_acc = compute_per_round_accuracy(all_round_answers, labels)
+    task_type = test_samples[0].get("task_type", "yes_no") if test_samples else "yes_no"
+    per_round_acc = compute_per_round_accuracy(all_round_answers, labels, task_type=task_type)
     final_acc, ci_margin = compute_accuracy_with_ci(
-        all_round_answers[-1], labels,
+        all_round_answers[-1], labels, task_type=task_type,
     )
     initial_acc = per_round_acc[0] if per_round_acc else 0.0
     improvement = compute_improvement_rate(final_acc, initial_acc)
@@ -131,7 +148,7 @@ def evaluate_benchmark(
         },
         "correct_at_each_round": [
             sum(1 for d in sample_details
-                if all_round_answers[t][d["index"]].upper() == labels[d["index"]].upper())
+                if _answers_match(all_round_answers[t][d["index"]], labels[d["index"]], d.get("task_type", "yes_no")))
             for t in range(num_rounds)
         ],
         "eval_time_seconds": round(eval_elapsed, 1),

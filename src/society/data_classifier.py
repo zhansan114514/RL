@@ -48,10 +48,7 @@ class ErrorTypeResult:
 # ============================================================
 
 DEFAULT_API_URL = "https://open.bigmodel.cn/api/anthropic"
-DEFAULT_API_KEY = os.environ.get(
-    "GLM_API_KEY",
-    "bcf988da32f64948a82fd7dda3b9b3d3.mVYoCk3Wi5ZrcsUM",
-)
+DEFAULT_API_KEY = os.environ.get("GLM_API_KEY", "")
 DEFAULT_API_MODEL = "glm-4.5"
 
 # Classification prompts (from experiment plan)
@@ -96,6 +93,9 @@ def _call_api(
     model: str = DEFAULT_API_MODEL,
 ) -> Optional[str]:
     """Call GLM4.5 API for classification."""
+    if not api_key:
+        logger.warning("GLM_API_KEY not set, falling back to heuristic classification")
+        return None
     try:
         import anthropic
 

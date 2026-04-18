@@ -21,7 +21,7 @@ def detect_model_type(model_name: str) -> str:
         model_name: Model name or path (e.g., "google/gemma-2-2b-it").
 
     Returns:
-        Model architecture type: "llama3", "mistral", or "gemma2".
+        Model architecture type: "llama3", "mistral", "gemma2", "qwen2.5", or "qwen3".
         Defaults to "llama3" if no match is found.
 
     Examples:
@@ -31,6 +31,10 @@ def detect_model_type(model_name: str) -> str:
         'mistral'
         >>> detect_model_type("google/gemma-2-2b-it")
         'gemma2'
+        >>> detect_model_type("Qwen/Qwen2.5-7B-Instruct")
+        'qwen2.5'
+        >>> detect_model_type("Qwen/Qwen3-8B")
+        'qwen3'
     """
     name = model_name.lower()
     if "llama" in name:
@@ -40,8 +44,9 @@ def detect_model_type(model_name: str) -> str:
     elif "gemma" in name:
         return "gemma2"
     elif "qwen" in name:
-        # Qwen2.5 or Qwen3: check version for specific handling
-        if "2.5" in name or "25" in name:
+        # Qwen2.5 must be checked before generic Qwen3
+        # Match "qwen2.5" or "qwen-2.5" specifically, avoid false positives like "Qwen3-25B"
+        if "qwen2.5" in name.replace(" ", "").replace("-", ""):
             return "qwen2.5"
         return "qwen3"
     else:

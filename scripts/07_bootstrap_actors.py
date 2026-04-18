@@ -32,12 +32,12 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 ALLOWED_DATASETS = ("boolq", "mmlu", "bbh", "sciq", "arc", "math", "gsm8k")
-COMMON_KEYS = ("model_name", "dataset", "max_samples", "seed", "cache_dir")
+COMMON_KEYS = ("model_name", "dataset", "max_samples", "seed", "cache_dir", "device", "dtype", "gpu_memory_utilization")
 
 STEP_DEFAULTS = {
     "model_name": "Qwen/Qwen2.5-7B-Instruct",
     "dataset": "math",
-    "cache_dir": "cache/society",
+    "cache_dir": "output/society",
     "output_dir": None,
     "num_agents": 5,
     "num_debate_rounds": 2,
@@ -131,18 +131,19 @@ def generate_initial_responses(
 
         # Format prompt
         prompt = format_prompt(
-            sample,
             dataset_name,
             PromptType.SINGLE_SHOT,
+            sample,
         )
 
         # Generate response
-        response_text = model.generate(
+        gen_result = model.generate(
             prompt,
             max_tokens=max_tokens,
             temperature=temperature,
             seed=seed,
         )
+        response_text = gen_result[0] if isinstance(gen_result, list) else gen_result
 
         # Extract answer
         answer = extract_answer(response_text, sample.get("task_type", "math"))
@@ -185,19 +186,20 @@ def simulate_debate_round(
 
         # Format deliberation prompt
         prompt = format_prompt(
-            sample,
             dataset_name,
             PromptType.DELIBERATION_ACTOR,
+            sample,
             responses_text=responses_text,
         )
 
         # Generate response
-        response_text = model.generate(
+        gen_result = model.generate(
             prompt,
             max_tokens=max_tokens,
             temperature=temperature,
             seed=seed,
         )
+        response_text = gen_result[0] if isinstance(gen_result, list) else gen_result
 
         # Extract answer
         answer = extract_answer(response_text, sample.get("task_type", "math"))
@@ -231,7 +233,7 @@ def main():
     args = parse_args()
 
     # Setup directories
-    cache_dir = getattr(args, "cache_dir", "cache/society") or "cache/society"
+    cache_dir = getattr(args, "cache_dir", "output/society") or "output/society"
     output_dir = getattr(args, "output_dir", None) or os.path.join(cache_dir, "bootstrap")
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(os.path.join(cache_dir, "logs"), exist_ok=True)

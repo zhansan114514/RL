@@ -5,7 +5,7 @@ from unittest.mock import patch, MagicMock
 import re
 
 from src.training.lora_config import get_lora_config, MODEL_TARGET_MODULES, DEFAULT_TARGET_MODULES
-from src.algorithms.reward import extract_answer, normalize_answer, _extract_math
+from src.algorithms.reward import extract_answer, normalize_answer, _extract_math, math_answers_equal
 from src.data.preprocessor import standardize_sample
 
 
@@ -62,15 +62,15 @@ class TestMathAnswerExtraction:
             ("The answer is \\boxed{42}.", "42"),
             ("\\boxed{3.14}", "3.14"),
             ("Therefore, \\boxed{7}", "7"),
-            # Nested braces (regex captures first {} content)
-            ("\\boxed{{1,2,3}}", "{1,2,3"),  # Expected actual behavior: captures "{1,2,3"
+            # Nested braces (balanced brace matching)
+            ("\\boxed{{1,2,3}}", "{1,2,3}"),  # Balanced extraction preserves inner braces
             # With spaces
             ("\\boxed{  5  }", "5"),
-            # Mathematical expressions (regex captures content inside first {} only)
+            # Mathematical expressions (balanced brace matching)
             ("\\boxed{x^2 + 1}", "x^2 + 1"),
-            # Note: \frac and \sqrt have nested {}, our regex only captures first level
-            ("\\boxed{\\frac{1}{2}}", "\\frac{1"),  # Expected actual behavior
-            ("\\boxed{\\sqrt{2}}", "\\sqrt{2"),  # Expected actual behavior
+            # \frac and \sqrt with nested {} — balanced brace matching handles correctly
+            ("\\boxed{\\frac{1}{2}}", "\\frac{1}{2}"),  # Balanced extraction
+            ("\\boxed{\\sqrt{2}}", "\\sqrt{2}"),  # Balanced extraction
             # Multiple boxes (should extract first)
             ("First \\boxed{1} then \\boxed{2}", "1"),
             # Case insensitive variations
@@ -169,20 +169,26 @@ class TestMathAnswerNormalization:
     @pytest.mark.parametrize(
         "answer, expected",
         [
-            ("42", "4"),  # Takes first char and upper
-            ("  42  ", "4"),  # Whitespace stripped, then first char
-            ("(42)", "4"),  # Parentheses stripped, then first char
-            ("42.", "4"),  # Takes first char after stripping
-            ("YES", "Y"),
-            ("No", "N"),
+            ("42", "42"),        # Math mode: numeric normalization
+            ("  42  ", "42"),    # Whitespace stripped
+            ("42.0", "42.0"),    # Decimal preserved
+            ("3.14", "3.14"),    # Decimal preserved
+            ("-5", "-5"),        # Negative numbers
+            ("x^2 + 1", "x^2 + 1"),  # Expressions preserved
             ("", ""),
             (None, ""),
         ],
     )
     def test_normalize_math_answer(self, answer, expected):
-        """Should normalize answers for comparison."""
-        result = normalize_answer(answer)
+        """Should normalize math answers preserving numeric values."""
+        result = normalize_answer(answer, task_type="math")
         assert result == expected
+
+    def test_normalize_yes_no_still_works(self):
+        """Non-math task types should still use first-char normalization."""
+        assert normalize_answer("YES", "yes_no") == "Y"
+        assert normalize_answer("No", "yes_no") == "N"
+        assert normalize_answer("(A)", "multiple_choice") == "A"
 
 
 class TestMathDataPreprocessing:
@@ -265,38 +271,43 @@ class TestMathDataPreprocessing:
 
 
 class TestMathAnswerComparison:
-    """Test answer comparison for mathematical answers."""
+    """Test answer comparison for mathematical answers using math_answers_equal."""
 
     def test_exact_match(self):
         """Exact match should return True."""
-        pred = "42"
-        label = "42"
-        assert normalize_answer(pred) == normalize_answer(label)
+        assert math_answers_equal("42", "42")
 
     def test_whitespace_ignored(self):
         """Whitespace should be ignored."""
-        pred = "  42  "
-        label = "42"
-        assert normalize_answer(pred) == normalize_answer(label)
+        assert math_answers_equal("  42  ", "42")
 
-    def test_case_sensitive_for_math(self):
-        """Math answers are case-sensitive for expressions."""
-        pred = "x"
-        label = "X"
-        # normalize_answer takes first char and upper
-        assert normalize_answer(pred) == normalize_answer(label)
+    def test_integer_float_equivalence(self):
+        """Integer and float representations of same value should match."""
+        assert math_answers_equal("42", "42.0")
+        assert math_answers_equal("42.0", "42")
+
+    def test_numeric_tolerance(self):
+        """Numeric answers should match within tolerance."""
+        assert math_answers_equal("3.14159", "3.14159")
 
     def test_expression_match(self):
         """Should handle mathematical expressions."""
-        pred = r"x^2 + 1"
-        label = r"x^2 + 1"
-        assert normalize_answer(pred) == normalize_answer(label)
+        assert math_answers_equal(r"x^2 + 1", r"x^2 + 1")
 
     def test_fraction_match(self):
         """Should handle fractions."""
-        pred = r"\frac{1}{2}"
-        label = r"\frac{1}{2}"
-        assert normalize_answer(pred) == normalize_answer(label)
+        assert math_answers_equal(r"\frac{1}{2}", r"\frac{1}{2}")
+
+    def test_empty_answers(self):
+        """Empty answers should match each other."""
+        assert math_answers_equal("", "")
+        assert not math_answers_equal("42", "")
+        assert not math_answers_equal("", "42")
+
+    def test_different_values(self):
+        """Different numeric values should not match."""
+        assert not math_answers_equal("42", "43")
+        assert not math_answers_equal("3.14", "2.71")
 
 
 class TestMathExtractionEdgeCases:
@@ -306,18 +317,16 @@ class TestMathExtractionEdgeCases:
         """Should handle nested \\boxed{} patterns."""
         response = r"The answer is \boxed{\boxed{42}}."
         result = extract_answer(response, task_type="math")
-        # Our regex extracts content of first {} encountered
-        # \boxed{\boxed{42}} matches \boxed{ then captures {\boxed{42
-        # But actually our pattern is \boxed\{([^}]+)\} so it stops at first }
-        # Result: "{\boxed{42" or similar partial match
-        assert result is not None  # Just verify it doesn't crash
+        # Balanced brace matching: outer \boxed{} contains \boxed{42}
+        assert result is not None
+        # The content of the outer box is "\boxed{42}"
+        assert "42" in result
 
     def test_extract_boxed_with_spaces(self):
         """Should handle \\boxed with spaces before brace."""
         response = r"The answer is \boxed {42}."
         result = extract_answer(response, task_type="math")
-        # Our pattern expects no space, might not match
-        # But should try other patterns
+        # Pattern \boxed\{ doesn't match with space, tries other patterns
 
     def test_extract_boxed_empty(self):
         """Should handle empty \\boxed{}."""

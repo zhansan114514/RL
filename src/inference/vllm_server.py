@@ -97,6 +97,7 @@ class VLLMInference:
         top_p: float = 0.9,
         n: int = 1,
         stop: Optional[list[str]] = None,
+        seed: Optional[int] = None,
     ) -> list[str]:
         """Generate text from prompts."""
         self._ensure_loaded()
@@ -105,10 +106,17 @@ class VLLMInference:
         if isinstance(prompts, str):
             prompts = [prompts]
 
-        params = SamplingParams(
-            max_tokens=max_tokens, temperature=temperature,
-            top_p=top_p, n=n, stop=stop,
-        )
+        sampling_kwargs = {
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "n": n,
+            "stop": stop,
+        }
+        if seed is not None:
+            sampling_kwargs["seed"] = seed
+
+        params = SamplingParams(**sampling_kwargs)
         outputs = self._llm.generate(prompts, params)
         return [c.text for o in outputs for c in o.outputs]
 

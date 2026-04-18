@@ -94,18 +94,40 @@ def _extract_mc(text: str) -> Optional[str]:
     return None
 
 
+def _extract_balanced_braces(text: str, start: int) -> Optional[str]:
+    """Extract content inside balanced curly braces starting at position start.
+
+    Handles nested braces like \\boxed{\\frac{1}{2}}.
+    """
+    if start >= len(text) or text[start] != '{':
+        return None
+    depth = 0
+    i = start
+    while i < len(text):
+        if text[i] == '{':
+            depth += 1
+        elif text[i] == '}':
+            depth -= 1
+            if depth == 0:
+                return text[start + 1:i]
+        i += 1
+    return None
+
+
 def _extract_math(text: str) -> Optional[str]:
-    """Extract mathematical answer from response (supports \boxed{} and numeric answers)."""
-    # First try to extract from \boxed{...}
-    boxed_patterns = [
-        r'\\boxed\{([^}]+)\}',
-        r'boxed\{([^}]+)\}',
-        r'\{\\boxed\{([^}]+)\}\}',
+    """Extract mathematical answer from response (supports \\boxed{} and numeric answers)."""
+    # First try to extract from \boxed{...} with balanced brace matching
+    boxed_prefixes = [
+        r'\\boxed\{',
+        r'boxed\{',
+        r'\{\\boxed\{',
     ]
-    for pat in boxed_patterns:
-        m = re.search(pat, text)
-        if m:
-            return m.group(1).strip()
+    for prefix in boxed_prefixes:
+        for m in re.finditer(prefix, text):
+            brace_start = m.end() - 1  # position of the opening '{'
+            content = _extract_balanced_braces(text, brace_start)
+            if content is not None:
+                return content.strip()
 
     # Try to extract from "Final Answer:" or "Answer:" patterns
     answer_patterns = [
@@ -133,11 +155,64 @@ def _extract_math(text: str) -> Optional[str]:
     return None
 
 
-def normalize_answer(answer: str) -> str:
-    """Normalize answer for comparison (strip, upper, first char)."""
+def normalize_answer(answer: str, task_type: str = "yes_no") -> str:
+    """Normalize answer for comparison.
+
+    For yes_no / multiple_choice: strip, upper, first char (Y/N/A/B/C/D).
+    For math: strip whitespace, normalize numeric representation.
+    """
     if not answer:
         return ""
-    return str(answer).strip().strip("()").strip(".").upper()[:1]
+    s = str(answer).strip()
+    if task_type == "math":
+        return _normalize_math_answer(s)
+    return s.strip("()").strip(".").upper()[:1]
+
+
+def _normalize_math_answer(answer: str) -> str:
+    """Normalize a math answer for comparison.
+
+    Strips whitespace and LaTeX formatting, normalizes numeric values.
+    """
+    s = answer.strip()
+    # Strip surrounding \text{} if present
+    text_match = re.match(r'^\\text\{(.+)\}$', s)
+    if text_match:
+        s = text_match.group(1).strip()
+    # Try numeric comparison: parse as float and normalize
+    try:
+        num = float(s)
+        # If it's an integer value, return as int string to avoid "42.0" vs "42"
+        if num == int(num) and '.' not in s and 'e' not in s.lower():
+            return str(int(num))
+        return str(num)
+    except (ValueError, OverflowError):
+        pass
+    # Non-numeric: normalize LaTeX whitespace
+    s = re.sub(r'\s+', ' ', s)
+    return s
+
+
+def math_answers_equal(pred: str, label: str) -> bool:
+    """Compare two math answers with numeric tolerance.
+
+    Handles cases like "42" vs "42.0", "\\frac{1}{2}" vs "0.5", etc.
+    """
+    if not pred or not label:
+        return pred == label
+    norm_pred = _normalize_math_answer(pred.strip())
+    norm_label = _normalize_math_answer(label.strip())
+    # Direct string match after normalization
+    if norm_pred == norm_label:
+        return True
+    # Try numeric comparison with tolerance
+    try:
+        pred_num = float(norm_pred)
+        label_num = float(norm_label)
+        return abs(pred_num - label_num) < 1e-6
+    except (ValueError, OverflowError):
+        pass
+    return norm_pred == norm_label
 
 
 # ============================================================
@@ -147,6 +222,7 @@ def normalize_answer(answer: str) -> str:
 def compute_accuracy(
     predictions: list[str],
     labels: list[str],
+    task_type: str = "yes_no",
 ) -> float:
     """
     Compute simple accuracy.
@@ -154,6 +230,7 @@ def compute_accuracy(
     Args:
         predictions: List of predicted answers.
         labels: List of ground truth answers.
+        task_type: Task type for answer normalization ("yes_no", "multiple_choice", "math").
 
     Returns:
         Accuracy as float in [0, 1].
@@ -161,10 +238,16 @@ def compute_accuracy(
     if not predictions or not labels:
         return 0.0
 
-    correct = sum(
-        normalize_answer(p) == normalize_answer(l)
-        for p, l in zip(predictions, labels)
-    )
+    if task_type == "math":
+        correct = sum(
+            math_answers_equal(p, l)
+            for p, l in zip(predictions, labels)
+        )
+    else:
+        correct = sum(
+            normalize_answer(p, task_type) == normalize_answer(l, task_type)
+            for p, l in zip(predictions, labels)
+        )
     return correct / len(predictions)
 
 
@@ -172,6 +255,7 @@ def compute_accuracy_with_ci(
     predictions: list[str],
     labels: list[str],
     confidence: float = 0.95,
+    task_type: str = "yes_no",
 ) -> tuple[float, float]:
     """
     Compute accuracy with Wilson score confidence interval.
@@ -180,11 +264,12 @@ def compute_accuracy_with_ci(
         predictions: Predicted answers.
         labels: Ground truth answers.
         confidence: Confidence level (default 0.95).
+        task_type: Task type for answer normalization.
 
     Returns:
         Tuple of (accuracy, margin_of_error).
     """
-    acc = compute_accuracy(predictions, labels)
+    acc = compute_accuracy(predictions, labels, task_type=task_type)
     n = len(predictions)
 
     if n == 0:
@@ -202,6 +287,7 @@ def compute_accuracy_with_ci(
 def compute_per_round_accuracy(
     all_rounds_predictions: list[list[str]],
     labels: list[str],
+    task_type: str = "yes_no",
 ) -> list[float]:
     """
     Compute accuracy at each deliberation round.
@@ -209,12 +295,13 @@ def compute_per_round_accuracy(
     Args:
         all_rounds_predictions: predictions[round][sample_idx].
         labels: Ground truth answers.
+        task_type: Task type for answer normalization.
 
     Returns:
         List of accuracy values, one per round.
     """
     return [
-        compute_accuracy(round_preds, labels)
+        compute_accuracy(round_preds, labels, task_type=task_type)
         for round_preds in all_rounds_predictions
     ]
 

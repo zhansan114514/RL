@@ -41,9 +41,10 @@ DATASET_REGISTRY = {
         "config_name": "ARC-Challenge",
     },
     "math": {
-        "hf_id": "hendrycks/math",
+        "hf_id": "EleutherAI/hendrycks_math",
         "task_type": "math",
         "splits": ["train", "test"],
+        "config_name": None,  # Load all subconfigs and merge
     },
     "gsm8k": {
         "hf_id": "openai/gsm8k",
@@ -93,7 +94,11 @@ def load_dataset(
     if cache_dir:
         kwargs["cache_dir"] = cache_dir
 
-    raw: DatasetDict = hf_load_dataset(**kwargs)
+    # Special handling for MATH dataset: load all subconfigs and merge
+    if name == "math":
+        raw = _load_math_all(config["hf_id"], cache_dir)
+    else:
+        raw: DatasetDict = hf_load_dataset(**kwargs)
 
     # Handle BBH special splitting
     if name == "bbh":
@@ -112,6 +117,34 @@ def load_dataset(
             )
 
     return result
+
+
+def _load_math_all(
+    hf_id: str,
+    cache_dir: Optional[str] = None,
+) -> DatasetDict:
+    """Load all MATH subconfigs and merge into a single DatasetDict."""
+    from datasets import concatenate_datasets, Dataset
+
+    subconfigs = [
+        "algebra", "counting_and_probability", "geometry",
+        "intermediate_algebra", "number_theory", "prealgebra", "precalculus",
+    ]
+
+    merged = {}
+    for split in ["train", "test"]:
+        parts = []
+        for cfg in subconfigs:
+            try:
+                ds = hf_load_dataset(hf_id, cfg, split=split, cache_dir=cache_dir)
+                parts.append(ds)
+            except Exception:
+                pass
+        if parts:
+            merged[split] = concatenate_datasets(parts)
+            logger.info(f"  MATH {split}: {len(merged[split])} samples from {len(parts)} subconfigs")
+
+    return DatasetDict(merged)
 
 
 def _load_bbh(
