@@ -2,6 +2,7 @@
 Deliberation engine: natural and guided multi-round Actor-Critic deliberation.
 
 Implements the core iterative discussion loop from the ACC-Collab paper.
+Optimized: batches actor and critic calls within each round for vLLM throughput.
 """
 
 from __future__ import annotations
@@ -86,6 +87,100 @@ def deliberate(
         previous_responses.append(critic_response)
 
     return trajectory
+
+
+def deliberate_batch(
+    actor_model,
+    critic_model,
+    samples: list[dict],
+    dataset_name: str,
+    num_rounds: int = 5,
+    max_tokens: int = 256,
+    temperature: float = 0.7,
+) -> list[list[dict]]:
+    """
+    Batched deliberation: process multiple samples in parallel for vLLM throughput.
+
+    Instead of sample-by-sample sequential generation, batches all actor prompts
+    across samples into a single vLLM call, then all critic prompts, for each round.
+    This dramatically improves GPU utilization with vLLM's continuous batching.
+
+    For N samples, this reduces from 2*N*T serial calls to 2*T batched calls.
+
+    Args:
+        actor_model: VLLMInference for the actor.
+        critic_model: VLLMInference for the critic.
+        samples: List of standardized sample dicts.
+        dataset_name: Dataset name for prompt selection.
+        num_rounds: Number of rounds per sample.
+        max_tokens: Max tokens per generation.
+        temperature: Sampling temperature.
+
+    Returns:
+        List of trajectories, one per sample (same as calling deliberate() N times).
+    """
+    n = len(samples)
+    if n == 0:
+        return []
+    # Single sample: fall back to non-batched (no overhead)
+    if n == 1:
+        return [deliberate(actor_model, critic_model, samples[0], dataset_name,
+                           num_rounds, max_tokens, temperature)]
+
+    # Per-sample state
+    all_trajectories: list[list[dict]] = [[] for _ in range(n)]
+    all_previous: list[list[str]] = [[] for _ in range(n)]
+
+    for t in range(num_rounds):
+        # --- Build all actor prompts for this round ---
+        actor_prompts = []
+        for i, sample in enumerate(samples):
+            if t == 0:
+                prompt = format_prompt(dataset_name, PromptType.SINGLE_SHOT, sample)
+            else:
+                prompt = format_prompt(
+                    dataset_name, PromptType.DELIBERATION_ACTOR, sample,
+                    responses=all_previous[i],
+                )
+            actor_prompts.append(prompt)
+
+        # Batch actor inference: all samples at once
+        actor_responses = actor_model.generate(
+            actor_prompts, max_tokens=max_tokens, temperature=temperature,
+        )
+
+        # --- Build all critic prompts for this round ---
+        critic_prompts = []
+        for i, sample in enumerate(samples):
+            prompt = format_prompt(
+                dataset_name, PromptType.DELIBERATION_CRITIC, sample,
+                actor_response=actor_responses[i],
+            )
+            critic_prompts.append(prompt)
+
+        # Batch critic inference: all samples at once
+        critic_responses = critic_model.generate(
+            critic_prompts, max_tokens=max_tokens, temperature=temperature,
+        )
+
+        # Record rounds
+        for i, sample in enumerate(samples):
+            task_type = sample.get("task_type", "yes_no")
+            actor_answer = extract_answer(actor_responses[i], task_type)
+
+            all_trajectories[i].append({
+                "round": t,
+                "actor_prompt": actor_prompts[i],
+                "actor_response": actor_responses[i],
+                "actor_answer": actor_answer,
+                "critic_prompt": critic_prompts[i],
+                "critic_response": critic_responses[i],
+            })
+
+            all_previous[i].append(actor_responses[i])
+            all_previous[i].append(critic_responses[i])
+
+    return all_trajectories
 
 
 def guided_deliberate_round(

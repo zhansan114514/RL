@@ -7,9 +7,8 @@ Usage:
     cfg = ConfigManager.initialize(model="gemma2_2b", dataset="boolq")
 
     # Anywhere in the codebase:
-    from src.utils.config import get_config, require_config
-    max_len = get_config("inference.max_model_len", 4096)
-    model_name = require_config("model.name")
+    max_len = cfg.get("inference.max_model_len", 4096)
+    model_name = cfg.require("model.name")
 """
 
 from __future__ import annotations
@@ -226,19 +225,7 @@ class ConfigKeyError(Exception):
     pass
 
 
-# ---- Module-level convenience functions ----
-
-def get_config(key: str, default: Any = None) -> Any:
-    """Shortcut: get a config value without importing ConfigManager."""
-    return ConfigManager.instance().get(key, default)
-
-
-def require_config(key: str) -> Any:
-    """Shortcut: require a config value."""
-    return ConfigManager.instance().require(key)
-
-
-# ---- Backward-compatible functions ----
+# ---- Backward-compatible function ----
 
 def load_config(
     model: Optional[str] = None,
@@ -267,36 +254,3 @@ def _load_group(group: str, name: str) -> Optional[DictConfig]:
         return cfg
     logger.warning(f"Config not found: {path}")
     return None
-
-
-def config_to_flat_dict(cfg: DictConfig) -> dict:
-    """Convert OmegaConf config to a flat dictionary."""
-    return OmegaConf.to_container(cfg, resolve=True, throw_on_missing=False)
-
-
-def save_config(cfg: DictConfig, path: str) -> None:
-    """Save config to a YAML file."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    OmegaConf.save(cfg, path)
-    logger.info(f"Config saved to: {path}")
-
-
-def get_model_name(cfg=None) -> str:
-    """Extract model name from config (supports both DictConfig and ConfigManager)."""
-    if isinstance(cfg, DictConfig):
-        return cfg.get("model", {}).get("name", "") if cfg.get("model") else ""
-    return ConfigManager.instance().get("model.name", "")
-
-
-def get_model_type(cfg=None) -> str:
-    """Extract model architecture type (supports both DictConfig and ConfigManager)."""
-    if isinstance(cfg, DictConfig):
-        return cfg.get("model", {}).get("type", "gemma2") if cfg.get("model") else "gemma2"
-    return ConfigManager.instance().get("model.type", "gemma2")
-
-
-def get_dataset_info(cfg=None) -> dict:
-    """Extract dataset-related config as a plain dict."""
-    if isinstance(cfg, DictConfig):
-        return OmegaConf.to_container(cfg.get("dataset", {}), resolve=True)
-    return ConfigManager.instance().section("dataset")

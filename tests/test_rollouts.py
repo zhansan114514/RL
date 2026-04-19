@@ -377,9 +377,9 @@ class TestMCRolloutOneStepBehavior:
         )
 
         # Batch generate should be called once for actor prompts (3 sims)
-        # With one-step (remaining_rounds=1), we batch 3 actor + 3 critic calls
+        # One-step roll-out only generates actor responses
         assert actor.generate.call_count >= 1
-        assert critic.generate.call_count >= 1
+        assert critic.generate.call_count == 0  # Critic not used in one-step roll-out
 
     def test_multiple_remaining_rounds_accumulation(self):
         """With remaining_rounds > 1, should accumulate responses correctly."""
@@ -452,9 +452,9 @@ class TestMCRolloutOneStepFixVerification:
             num_simulations=5,
         )
 
-        # Batch generate called once for actor (5 prompts) and once for critic (5 prompts)
+        # Batch generate called once for actor (5 prompts); critic not needed in one-step roll-out
         assert actor.generate.call_count == 1
-        assert critic.generate.call_count == 1
+        assert critic.generate.call_count == 0
 
     def test_one_step_includes_current_in_history(self):
         """One-step roll-out should include current response in simulation history."""

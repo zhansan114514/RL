@@ -8,11 +8,6 @@ from pathlib import Path
 from src.utils.config import (
     load_config,
     _load_group,
-    config_to_flat_dict,
-    save_config,
-    get_model_name,
-    get_model_type,
-    get_dataset_info,
 )
 
 
@@ -111,131 +106,6 @@ class TestLoadGroup:
         assert result is None
 
 
-class TestConfigToFlatDict:
-    """Test config to flat dictionary conversion."""
-
-    def test_simple_config(self):
-        """Simple nested config should flatten correctly."""
-        from omegaconf import OmegaConf
-
-        cfg = OmegaConf.create({
-            "a": 1,
-            "b": {"c": 2, "d": 3}
-        })
-        result = config_to_flat_dict(cfg)
-        assert result["a"] == 1
-        assert result["b"]["c"] == 2
-
-    def test_config_with_missing_values(self):
-        """Should handle configs with missing/None values."""
-        from omegaconf import OmegaConf
-
-        cfg = OmegaConf.create({
-            "a": None,
-            "b": "value"
-        })
-        result = config_to_flat_dict(cfg)
-        assert result["a"] is None
-        assert result["b"] == "value"
-
-
-class TestGetModelName:
-    """Test model name extraction."""
-
-    def test_get_model_name_from_config(self):
-        """Should extract model name from config."""
-        from omegaconf import OmegaConf
-
-        cfg = OmegaConf.create({
-            "model": {"name": "google/gemma-2-2b-it"}
-        })
-        result = get_model_name(cfg)
-        assert result == "google/gemma-2-2b-it"
-
-    def test_get_model_name_empty_config(self):
-        """Should return empty string for missing model."""
-        from omegaconf import OmegaConf
-
-        cfg = OmegaConf.create({})
-        result = get_model_name(cfg)
-        assert result == ""
-
-
-class TestGetModelType:
-    """Test model type extraction."""
-
-    def test_get_model_type(self):
-        """Should extract model type from config."""
-        from omegaconf import OmegaConf
-
-        cfg = OmegaConf.create({
-            "model": {"type": "llama3"}
-        })
-        result = get_model_type(cfg)
-        assert result == "llama3"
-
-    def test_get_model_type_default(self):
-        """Should default to gemma2 when type not specified."""
-        from omegaconf import OmegaConf
-
-        cfg = OmegaConf.create({})
-        result = get_model_type(cfg)
-        assert result == "gemma2"
-
-
-class TestGetDatasetInfo:
-    """Test dataset info extraction."""
-
-    def test_get_dataset_info(self):
-        """Should extract dataset section as dict."""
-        from omegaconf import OmegaConf
-
-        cfg = OmegaConf.create({
-            "dataset": {"name": "boolq", "split": "validation"}
-        })
-        result = get_dataset_info(cfg)
-        assert isinstance(result, dict)
-        assert result["name"] == "boolq"
-
-    def test_get_dataset_info_empty(self):
-        """Should return empty dict for missing dataset."""
-        from omegaconf import OmegaConf
-
-        cfg = OmegaConf.create({"dataset": {}})
-        result = get_dataset_info(cfg)
-        assert result == {}
-
-
-class TestSaveConfig:
-    """Test config saving."""
-
-    @patch("src.utils.config.OmegaConf.save")
-    @patch("os.makedirs")
-    def test_save_creates_directories(self, mock_makedirs, mock_save):
-        """Saving should create parent directories."""
-        from omegaconf import OmegaConf
-
-        cfg = OmegaConf.create({"key": "value"})
-        save_config(cfg, "/tmp/test/config.yaml")
-
-        mock_makedirs.assert_called_once()
-        mock_save.assert_called_once()
-
-    @patch("src.utils.config.OmegaConf.save")
-    @patch("os.makedirs")
-    @patch("os.path.dirname")
-    def test_save_with_existing_dir(self, mock_dirname, mock_makedirs, mock_save):
-        """Should handle existing directories gracefully."""
-        from omegaconf import OmegaConf
-
-        mock_dirname.return_value = "/existing/path"
-        cfg = OmegaConf.create({"key": "value"})
-        save_config(cfg, "/existing/path/config.yaml")
-
-        # makedirs should still be called with exist_ok=True
-        mock_makedirs.assert_called_once()
-
-
 class TestConfigEdgeCases:
     """Test edge cases and malformed inputs."""
 
@@ -260,17 +130,3 @@ class TestConfigEdgeCases:
         # Should handle empty overrides
         result = OmegaConf.merge(cfg, OmegaConf.create())
         assert result.key == "value"
-
-    def test_config_with_nested_none_values(self):
-        """Should handle deeply nested None values."""
-        from omegaconf import OmegaConf
-
-        cfg = OmegaConf.create({
-            "a": {
-                "b": {
-                    "c": None
-                }
-            }
-        })
-        result = config_to_flat_dict(cfg)
-        assert result["a"]["b"]["c"] is None

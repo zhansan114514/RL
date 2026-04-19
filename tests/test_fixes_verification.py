@@ -192,9 +192,8 @@ class TestFix3TrajectoryIfElifStructure:
     """Fix #3: Preference pairs should use if/elif, not two independent ifs."""
 
     @patch('src.algorithms.trajectory.deliberate')
-    @patch('src.algorithms.trajectory.estimate_final_accuracy')
     @patch('src.algorithms.trajectory._make_guided_prompt')
-    def test_only_one_pair_per_round_when_both_deltas_high(self, mock_guided, mock_estimate, mock_deliberate):
+    def test_only_one_pair_per_round_when_both_deltas_high(self, mock_guided, mock_deliberate):
         """When both delta_y and delta_not_y exceed threshold, only one pair should be created."""
         from src.algorithms.trajectory import generate_trajectories
 
@@ -204,24 +203,21 @@ class TestFix3TrajectoryIfElifStructure:
         ]
         mock_guided.return_value = "Guided prompt"
 
-        # Make both deltas exceed threshold
-        # delta_y = v_guided_correct - v_natural
-        # delta_not_y = v_natural - v_guided_wrong
-        call_count = [0]
-        def side_effect_estimate(*args, **kwargs):
-            call_count[0] += 1
-            # Order for each round: v_natural, v_guided_correct, v_guided_wrong
-            # With 2 rounds (t=1 only): 3 calls
-            idx = call_count[0] - 1
-            values = [0.5, 1.0, 0.0]  # v_natural=0.5, v_guided_correct=1.0, v_guided_wrong=0.0
-            return values[idx % len(values)]
-
-        mock_estimate.side_effect = side_effect_estimate
-
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate.return_value = ["Guided actor"] * 4
-        critic.generate.return_value = ["Guided critic"] * 4
+        # actor.generate is called twice:
+        # 1. guided actor (2 prompts) -> 2 responses
+        # 2. merged MC roll-out (3*5=15 prompts) -> 15 responses
+        # critic.generate is called once:
+        # 1. guided critic (2 prompts) -> 2 responses
+        # MC roll-out: 5 "No" + 5 "Yes" + 5 "No"
+        # v_natural=0/5=0.0, v_guided_correct=5/5=1.0, v_guided_wrong=0/5=0.0
+        # delta_y = 1.0 >= 0.3 -> "towards" pair
+        actor.generate.side_effect = [
+            ["Guided actor z_y", "Guided actor z_not_y"],  # guided actor
+            ["No."] * 5 + ["The answer is Yes."] * 5 + ["No."] * 5,  # MC roll-out
+        ]
+        critic.generate.return_value = ["Guided critic"] * 2
 
         sample = {
             "question": "Test?",
@@ -242,9 +238,8 @@ class TestFix3TrajectoryIfElifStructure:
         assert pairs[0]["direction"] == "towards", "First matching condition (towards) should be used"
 
     @patch('src.algorithms.trajectory.deliberate')
-    @patch('src.algorithms.trajectory.estimate_final_accuracy')
     @patch('src.algorithms.trajectory._make_guided_prompt')
-    def test_elif_branch_creates_away_pair_when_if_fails(self, mock_guided, mock_estimate, mock_deliberate):
+    def test_elif_branch_creates_away_pair_when_if_fails(self, mock_guided, mock_deliberate):
         """When delta_y < threshold but delta_not_y >= threshold, should create 'away' pair."""
         from src.algorithms.trajectory import generate_trajectories
 
@@ -254,22 +249,18 @@ class TestFix3TrajectoryIfElifStructure:
         ]
         mock_guided.return_value = "Guided prompt"
 
-        call_count = [0]
-        def side_effect_estimate(*args, **kwargs):
-            call_count[0] += 1
-            idx = call_count[0] - 1
-            # v_natural=0.5, v_guided_correct=0.6, v_guided_wrong=0.0
-            # delta_y = 0.6 - 0.5 = 0.1 < threshold
-            # delta_not_y = 0.5 - 0.0 = 0.5 >= threshold
-            values = [0.5, 0.6, 0.0]
-            return values[idx % len(values)]
-
-        mock_estimate.side_effect = side_effect_estimate
-
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate.return_value = ["Guided actor"] * 4
-        critic.generate.return_value = ["Guided critic"] * 4
+        # actor.generate called twice: guided actor (2), MC roll-out (15)
+        # MC roll-out: v_natural: 3/5=0.6, v_guided_correct: 4/5=0.8, v_guided_wrong: 0/5=0.0
+        # delta_y = 0.8-0.6 = 0.2 < 0.3, delta_not_y = 0.6-0.0 = 0.6 >= 0.3 -> "away"
+        actor.generate.side_effect = [
+            ["Guided actor z_y", "Guided actor z_not_y"],  # guided actor
+            ["The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "No.", "No.",
+             "The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "No.",
+             "No.", "No.", "No.", "No.", "No."],
+        ]
+        critic.generate.return_value = ["Guided critic"] * 2
 
         sample = {
             "question": "Test?",
@@ -459,12 +450,11 @@ class TestFix5RolloutSimResponsesInterleaved:
             remaining_rounds=1,
         )
 
-        # Should call batch generate once for actor and once for critic
+        # Should call batch generate once for actor (one-step roll-out only needs actor)
         assert actor.generate.call_count == 1
-        assert critic.generate.call_count == 1
+        assert critic.generate.call_count == 0  # Critic not needed in one-step roll-out
         # Actor should receive 3 prompts (one per simulation)
         assert len(actor.generate.call_args[0][0]) == 3
-        assert len(critic.generate.call_args[0][0]) == 3
 
     def test_interleaved_order_preserved(self):
         """Responses should maintain actor, critic, actor, critic order."""

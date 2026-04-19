@@ -13,7 +13,7 @@ import logging
 import os
 import traceback
 
-from src.algorithms.trajectory import generate_trajectories
+from src.algorithms.trajectory import generate_trajectories, generate_trajectories_batch
 from src.trajectory.preference import build_preference_dataset, convert_to_hf_dataset
 from src.training.dpo_trainer import train_dpo
 
@@ -80,8 +80,13 @@ def generate_trajectory_data(
     cache_dir: str | None = None,
     agent: str = "critic",
     iteration: int = 0,
+    batch_size: int = 4,
 ) -> list[dict]:
     """Generate deliberation trajectory pairs for all samples.
+
+    Uses batched deliberation and merged MC roll-outs for higher vLLM
+    throughput. When batch_size > 1, samples are processed in mini-batches
+    that share a single vLLM forward pass per generation step.
 
     This function is separated from DPO training so that vLLM models
     can be cleaned up before loading training models, avoiding GPU OOM.
@@ -100,10 +105,36 @@ def generate_trajectory_data(
         cache_dir: If set, persist trajectory pairs to disk as JSONL.
         agent: Which agent is being trained ("actor" or "critic").
         iteration: Current alternating-training iteration.
+        batch_size: Number of samples to process in parallel (0 = auto).
 
     Returns:
         List of trajectory pairs (preference data).
     """
+    if not dataset:
+        return []
+
+    # Use batched pipeline when we have multiple samples
+    if len(dataset) > 1 and batch_size != 1:
+        effective_batch = batch_size if batch_size > 0 else min(len(dataset), 8)
+        logger.info(
+            f"  Batched trajectory generation: {len(dataset)} samples, "
+            f"batch_size={effective_batch}"
+        )
+        try:
+            return generate_trajectories_batch(
+                actor_model, critic_model, dataset, dataset_name,
+                num_rounds=num_rounds,
+                reward_threshold=reward_threshold,
+                num_simulations=num_simulations,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                seed=seed,
+                batch_size=effective_batch,
+            )
+        except Exception as e:
+            logger.warning(f"  Batched generation failed ({e}), falling back to sequential")
+
+    # Fallback: sequential per-sample generation
     pairs = []
     for i, sample in enumerate(dataset):
         logger.info(f"  Generating trajectories: {i+1}/{len(dataset)}")

@@ -1,12 +1,11 @@
 """
 Multi-agent deliberation engine for Diverse Actor-Critic Society.
 
-Implements the single-GPU sequential deliberation from the experiment plan:
-  1. All Actors generate responses (sequential LoRA load/unload)
-  2. All Critics evaluate each Actor response
+Implements the single-GPU deliberation with batched inference:
+  1. All Actors generate responses (batched into single vLLM call)
+  2. All Critics evaluate each Actor response (batched per actor)
   3. Router combines feedback (softmax confidence → Top-K → weighted concat)
-  4. Actors receive routed feedback → next round revision
-  5. Majority vote for consensus answer
+  4. Majority vote for consensus answer
 
 Crash recovery: each model call persisted to disk, skip on restart.
 """
@@ -143,7 +142,7 @@ def _unload_lora_adapter(engine: Any, lora_request_id: Optional[str]) -> None:
 
 
 # ============================================================
-# Multi-agent deliberation (single GPU)
+# Multi-agent deliberation (single GPU, batched inference)
 # ============================================================
 
 def multi_agent_deliberate_single_gpu(
@@ -160,11 +159,11 @@ def multi_agent_deliberate_single_gpu(
     lora_paths: Optional[dict[str, str]] = None,
 ) -> MultiDeliberationResult:
     """
-    Multi-agent deliberation on a single GPU (sequential execution).
+    Multi-agent deliberation on a single GPU with batched inference.
 
     For each round:
-    1. All Actors generate responses (sequentially with LoRA switching)
-    2. All Critics evaluate each Actor (sequentially with LoRA switching)
+    1. All Actors generate responses (batched into 1 vLLM call)
+    2. All Critics evaluate each Actor (batched: M critics × 1 actor = 1 call)
     3. Router combines Critic feedback
     4. Consensus via majority vote
 
@@ -204,87 +203,94 @@ def multi_agent_deliberate_single_gpu(
             routed_feedbacks={},
         )
 
-        # ---- Step 1: All Actors generate responses ----
-        for actor in actors:
+        # ---- Step 1: Batch all Actor responses into 1 vLLM call ----
+        # Check crash recovery first
+        uncached_actors = []
+        uncached_indices = []
+        for ai, actor in enumerate(actors):
             ckpt_path = ckpt_dir / f"round_{round_num}" / f"actor_{actor.name}.json" if ckpt_dir else None
-
-            # Check crash recovery
             cached = _load_json(ckpt_path) if ckpt_path else None
             if cached and "actor_response" in cached:
                 actor_response = cached["actor_response"]
+                actor_answer = extract_answer(actor_response, task_type)
+                round_data.actor_responses[actor.name] = actor_response
+                round_data.actor_answers[actor.name] = actor_answer
+                actor_histories[actor.name].append(actor_response)
                 logger.info(f"[Recovery] Loaded cached response for {actor.name} round {round_num}")
             else:
-                # Load LoRA adapter if available
-                actor_lora_id = _load_lora_adapter(
-                    inference_engine, lora_paths.get(actor.name, actor.lora_path or "")
+                uncached_actors.append((ai, actor))
+                uncached_indices.append(ai)
+
+        if uncached_actors:
+            # Build all actor prompts
+            actor_prompts = []
+            for _, actor in uncached_actors:
+                prompt = _build_actor_prompt(
+                    actor, sample, dataset_name, round_num,
+                    actor_histories[actor.name],
                 )
+                actor_prompts.append(prompt)
 
-                try:
-                    actor_response = _generate_actor_response(
-                        engine=inference_engine,
-                        actor=actor,
-                        sample=sample,
-                        dataset_name=dataset_name,
-                        round_num=round_num,
-                        previous_responses=actor_histories[actor.name],
-                        max_tokens=max_tokens,
-                        temperature=temperature,
-                    )
-                finally:
-                    # Unload LoRA after generation
-                    _unload_lora_adapter(inference_engine, actor_lora_id)
+            # Single batch call for all actors
+            actor_responses_batch = inference_engine.generate(
+                actor_prompts, max_tokens=max_tokens, temperature=temperature,
+            )
 
-                # Persist
-                if ckpt_path:
-                    _atomic_write_json(ckpt_path, {"actor_response": actor_response})
+            # Store results
+            for (orig_idx, actor), response in zip(uncached_actors, actor_responses_batch):
+                response = response if isinstance(response, str) else str(response)
+                actor_answer = extract_answer(response, task_type)
+                round_data.actor_responses[actor.name] = response
+                round_data.actor_answers[actor.name] = actor_answer
+                actor_histories[actor.name].append(response)
 
-            actor_answer = extract_answer(actor_response, task_type)
-            round_data.actor_responses[actor.name] = actor_response
-            round_data.actor_answers[actor.name] = actor_answer
-            actor_histories[actor.name].append(actor_response)
+                if ckpt_dir:
+                    ckpt_path = ckpt_dir / f"round_{round_num}" / f"actor_{actor.name}.json"
+                    _atomic_write_json(ckpt_path, {"actor_response": response})
 
-        # ---- Step 2: All Critics evaluate each Actor ----
+        # ---- Step 2: Batch all Critic evaluations ----
         for actor in actors:
             actor_response = round_data.actor_responses[actor.name]
             round_data.critic_feedbacks[actor.name] = {}
 
-            critic_feedbacks = []
+            # Check cache for all critics
+            uncached_critics = []
             for critic in critics:
                 ckpt_path = (ckpt_dir / f"round_{round_num}" /
                              f"critic_{critic.name}_for_{actor.name}.json" if ckpt_dir else None)
-
                 cached = _load_json(ckpt_path) if ckpt_path else None
                 if cached and "critic_response" in cached:
-                    critic_response = cached["critic_response"]
+                    round_data.critic_feedbacks[actor.name][critic.name] = cached["critic_response"]
                 else:
-                    # Load Critic's LoRA adapter
-                    critic_lora_id = _load_lora_adapter(
-                        inference_engine, lora_paths.get(critic.name, critic.lora_path or "")
-                    )
+                    uncached_critics.append(critic)
 
-                    try:
-                        critic_response = _generate_critic_feedback(
-                            engine=inference_engine,
-                            critic=critic,
-                            sample=sample,
-                            dataset_name=dataset_name,
-                            actor_response=actor_response,
-                            max_tokens=max_tokens,
-                            temperature=temperature,
-                        )
-                    finally:
-                        _unload_lora_adapter(inference_engine, critic_lora_id)
+            if uncached_critics:
+                # Build all critic prompts for this actor
+                critic_prompts = [
+                    _build_critic_prompt(c, sample, dataset_name, actor_response)
+                    for c in uncached_critics
+                ]
 
-                    if ckpt_path:
-                        _atomic_write_json(ckpt_path, {"critic_response": critic_response})
+                # Single batch call for all critics evaluating this actor
+                critic_responses_batch = inference_engine.generate(
+                    critic_prompts, max_tokens=max_tokens, temperature=temperature,
+                )
 
-                round_data.critic_feedbacks[actor.name][critic.name] = critic_response
+                for critic, response in zip(uncached_critics, critic_responses_batch):
+                    response = response if isinstance(response, str) else str(response)
+                    round_data.critic_feedbacks[actor.name][critic.name] = response
 
-                # Build CriticFeedback for routing
-                fb = build_critic_feedback(critic, critic_response)
-                critic_feedbacks.append(fb)
+                    if ckpt_dir:
+                        ckpt_path = (ckpt_dir / f"round_{round_num}" /
+                                     f"critic_{critic.name}_for_{actor.name}.json")
+                        _atomic_write_json(ckpt_path, {"critic_response": response})
 
             # ---- Step 3: Router combines feedback ----
+            critic_feedbacks = []
+            for critic in critics:
+                resp = round_data.critic_feedbacks[actor.name].get(critic.name, "")
+                fb = build_critic_feedback(critic, resp)
+                critic_feedbacks.append(fb)
             routed = router.route(critic_feedbacks)
             round_data.routed_feedbacks[actor.name] = routed
 
@@ -323,21 +329,19 @@ multi_agent_deliberate = multi_agent_deliberate_single_gpu
 
 
 # ============================================================
-# Helper: Actor response generation
+# Prompt builders (separated for testability and reuse)
 # ============================================================
 
-def _generate_actor_response(
-    engine: Any,
+def _build_actor_prompt(
     actor: AgentConfig,
     sample: dict,
     dataset_name: str,
     round_num: int,
     previous_responses: list[str],
-    max_tokens: int,
-    temperature: float,
 ) -> str:
-    """Generate a single Actor response."""
+    """Build prompt for an Actor response."""
     from src.prompts.templates import get_prompt_template, PromptType
+    from src.prompts.formatter import _format_responses
 
     if round_num == 0:
         prompt_type = PromptType.SINGLE_SHOT
@@ -346,18 +350,16 @@ def _generate_actor_response(
 
     template = get_prompt_template(dataset_name, prompt_type)
 
-    # Build responses text from previous rounds
-    responses_text = ""
+    # Build responses text from previous rounds (consistent with formatter.py)
     if previous_responses:
-        responses_text = "\n".join(
-            f"\nPerson {i+1}: {r}" for i, r in enumerate(previous_responses[-3:])
-        )
+        responses_text = _format_responses(previous_responses)
+    else:
+        responses_text = ""
 
     prompt = template.format(
         question=sample.get("question", ""),
         passage=sample.get("passage", ""),
         responses_text=responses_text,
-        # MC placeholders (empty for non-MC)
         choice_a=sample.get("choices", ["", "", "", ""])[0] if len(sample.get("choices", [])) >= 1 else "",
         choice_b=sample.get("choices", ["", "", "", ""])[1] if len(sample.get("choices", [])) >= 2 else "",
         choice_c=sample.get("choices", ["", "", "", ""])[2] if len(sample.get("choices", [])) >= 3 else "",
@@ -368,20 +370,16 @@ def _generate_actor_response(
     if actor.system_prompt:
         prompt = f"{actor.system_prompt}\n\n{prompt}"
 
-    result = engine.generate_single(prompt, max_tokens=max_tokens, temperature=temperature)
-    return result if isinstance(result, str) else str(result)
+    return prompt
 
 
-def _generate_critic_feedback(
-    engine: Any,
+def _build_critic_prompt(
     critic: AgentConfig,
     sample: dict,
     dataset_name: str,
     actor_response: str,
-    max_tokens: int,
-    temperature: float,
 ) -> str:
-    """Generate Critic feedback for an Actor response."""
+    """Build prompt for a Critic feedback."""
     from src.prompts.templates import get_prompt_template, PromptType
 
     template = get_prompt_template(dataset_name, PromptType.DELIBERATION_CRITIC)
@@ -399,5 +397,36 @@ def _generate_critic_feedback(
     if critic.system_prompt:
         prompt = f"{critic.system_prompt}\n\n{prompt}"
 
+    return prompt
+
+
+# Backward-compatible wrappers (used by society_trainer.py)
+def _generate_actor_response(
+    engine: Any,
+    actor: AgentConfig,
+    sample: dict,
+    dataset_name: str,
+    round_num: int,
+    previous_responses: list[str],
+    max_tokens: int,
+    temperature: float,
+) -> str:
+    """Generate a single Actor response (backward-compatible wrapper)."""
+    prompt = _build_actor_prompt(actor, sample, dataset_name, round_num, previous_responses)
+    result = engine.generate_single(prompt, max_tokens=max_tokens, temperature=temperature)
+    return result if isinstance(result, str) else str(result)
+
+
+def _generate_critic_feedback(
+    engine: Any,
+    critic: AgentConfig,
+    sample: dict,
+    dataset_name: str,
+    actor_response: str,
+    max_tokens: int,
+    temperature: float,
+) -> str:
+    """Generate Critic feedback for an Actor response (backward-compatible wrapper)."""
+    prompt = _build_critic_prompt(critic, sample, dataset_name, actor_response)
     result = engine.generate_single(prompt, max_tokens=max_tokens, temperature=temperature)
     return result if isinstance(result, str) else str(result)
