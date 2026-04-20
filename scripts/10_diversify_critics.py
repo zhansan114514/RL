@@ -119,6 +119,9 @@ def build_critic_preference_pairs(
 
     Chosen: detailed feedback pointing out the specific error type
     Rejected: generic/vague feedback
+
+    Fallback for small datasets: use ALL samples to build critic pairs,
+    even if no wrong answers exist (generate synthetic feedback).
     """
     from src.algorithms.reward import extract_answer
 
@@ -132,7 +135,7 @@ def build_critic_preference_pairs(
 
     logger.info(f"  Found {len(error_samples)} samples for error type '{error_type}'")
 
-    # Also use all samples to build generic critic pairs
+    # Use all samples to build critic pairs (fallback for small datasets)
     all_samples = classified_results
 
     for result in all_samples:
@@ -144,6 +147,7 @@ def build_critic_preference_pairs(
         traj = trajectories[sample_id]
         sample = traj["sample"]
         correct_answer = traj.get("consensus_answer", "")
+        question = sample.get("question", "")
 
         # Collect all responses across rounds
         all_responses = list(traj.get("initial_responses", []))
@@ -161,8 +165,9 @@ def build_critic_preference_pairs(
             else:
                 correct_responses.append(response_text)
 
+        # Build chosen: specific error-focused feedback
+        # Build rejected: vague/generic feedback
         if wrong_responses:
-            # Build chosen: specific error-focused feedback
             chosen = (
                 f"Let me analyze this solution carefully. "
                 f"I notice a potential {error_type} error in the reasoning. "
@@ -170,21 +175,35 @@ def build_critic_preference_pairs(
                 f"Please review the calculation steps and verify the result. "
                 f"[Confidence: 0.9]"
             )
-            # Build rejected: vague/generic feedback
             rejected = (
                 f"This solution looks mostly fine, but there might be some issues. "
                 f"Try checking your work again. [Confidence: 0.3]"
             )
+        else:
+            # No wrong answers - generate synthetic feedback pairs using the question
+            chosen = (
+                f"I've reviewed the solution for this problem. "
+                f"The key {error_type} consideration is to carefully verify each step. "
+                f"The correct answer is {correct_answer}. "
+                f"The reasoning chain should be double-checked for {error_type} issues. "
+                f"[Confidence: 0.85]"
+            )
+            rejected = (
+                f"I'm not sure about this solution. "
+                f"It might be right or wrong. "
+                f"[Confidence: 0.2]"
+            )
 
-            preference_pairs.append({
-                "sample": sample,
-                "chosen": chosen,
-                "rejected": rejected,
-                "metadata": {
-                    "error_type": error_type,
-                    "sample_id": sample_id,
-                },
-            })
+        preference_pairs.append({
+            "sample": sample,
+            "chosen": chosen,
+            "rejected": rejected,
+            "metadata": {
+                "error_type": error_type,
+                "sample_id": sample_id,
+                "had_wrong_response": len(wrong_responses) > 0,
+            },
+        })
 
     logger.info(f"  Built {len(preference_pairs)} preference pairs")
     return preference_pairs

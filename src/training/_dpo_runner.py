@@ -101,6 +101,9 @@ def _run():
         remove_unused_columns=False,
         report_to="wandb" if cfg.get("use_wandb") else "none",
         run_name=cfg.get("wandb_project") if cfg.get("use_wandb") else None,
+        # Precompute reference log-probs to avoid holding two models in GPU memory.
+        # Essential for V100 32GB with LoRA r=256 on 7B models.
+        precompute_ref_log_probs=True,
     )
 
     # Initialize DPO trainer

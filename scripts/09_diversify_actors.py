@@ -117,6 +117,9 @@ def build_preference_pairs_for_style(
 
     Chosen: correct response with matching style
     Rejected: incorrect response OR correct response with different style
+
+    Fallback for small datasets: if style-specific samples are too few,
+    use ALL samples and pick different agent responses as chosen/rejected.
     """
     from src.algorithms.reward import extract_answer
 
@@ -128,7 +131,13 @@ def build_preference_pairs_for_style(
         if r.get("reasoning_style") == thinking_style
     ]
 
-    logger.info(f"  Found {len(style_samples)} samples for style '{thinking_style}'")
+    # Fallback: if too few style-specific samples, use ALL samples
+    use_fallback = len(style_samples) < 2
+    if use_fallback:
+        logger.info(f"  Only {len(style_samples)} samples for style '{thinking_style}', using ALL samples")
+        style_samples = classified_results
+    else:
+        logger.info(f"  Found {len(style_samples)} samples for style '{thinking_style}'")
 
     for result in style_samples:
         sample_id = result["sample_id"]
@@ -138,38 +147,45 @@ def build_preference_pairs_for_style(
 
         traj = trajectories[sample_id]
         sample = traj["sample"]
+        correct_answer = traj.get("consensus_answer", "")
 
         # Get responses from all rounds (initial + debate) for more diversity
         all_responses = list(traj.get("initial_responses", []))
         for round_responses in traj.get("debate_rounds", []):
             all_responses.extend(round_responses)
-        responses = all_responses
 
-        # Find chosen (correct + matching style)
-        # and rejected (incorrect OR different style)
+        if not all_responses:
+            continue
+
+        # Collect correct and incorrect responses
+        correct_responses = []
+        incorrect_responses = []
+        for resp in all_responses:
+            response_text = resp.get("response", "")
+            answer = resp.get("answer")
+            task_type = sample.get("task_type", "math")
+            extracted_answer = extract_answer(response_text, task_type)
+            if extracted_answer == correct_answer:
+                correct_responses.append(response_text)
+            else:
+                incorrect_responses.append(response_text)
+
         chosen_response = None
         rejected_response = None
 
-        for resp in responses:
-            response_text = resp.get("response", "")
-            answer = resp.get("answer")
-            correct_answer = traj.get("consensus_answer", "")
+        if correct_responses and incorrect_responses:
+            # Ideal: correct vs incorrect
+            chosen_response = correct_responses[0]
+            rejected_response = incorrect_responses[0]
+        elif len(correct_responses) >= 2:
+            # All correct: use different agent responses as chosen/rejected
+            chosen_response = correct_responses[0]
+            rejected_response = correct_responses[-1]
+        elif len(incorrect_responses) >= 2:
+            chosen_response = incorrect_responses[0]
+            rejected_response = incorrect_responses[-1]
 
-            # For math tasks, we need to extract answer from response
-            task_type = sample.get("task_type", "math")
-            extracted_answer = extract_answer(response_text, task_type)
-
-            if extracted_answer == correct_answer:
-                # This is a correct answer - could be chosen
-                # We prefer responses that match the thinking style
-                if chosen_response is None:
-                    chosen_response = response_text
-            else:
-                # This is an incorrect answer - could be rejected
-                if rejected_response is None:
-                    rejected_response = response_text
-
-        if chosen_response and rejected_response:
+        if chosen_response and rejected_response and chosen_response != rejected_response:
             preference_pairs.append({
                 "sample": sample,
                 "chosen": chosen_response,
@@ -177,6 +193,7 @@ def build_preference_pairs_for_style(
                 "metadata": {
                     "thinking_style": thinking_style,
                     "sample_id": sample_id,
+                    "fallback": use_fallback,
                 },
             })
 
