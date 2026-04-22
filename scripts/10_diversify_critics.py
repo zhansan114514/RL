@@ -2,12 +2,11 @@
 Diversify Critics by training specialized LoRA adapters for each error type.
 
 For each Critic:
-1. Load first diversified Actor + base model
-2. Run deliberation to generate trajectories
-3. Filter by error type
-4. Build DPO preference pairs (chosen=Critic correct guidance, rejected=Critic invalid guidance)
-5. Train with DPO
-6. Save to cache/society/critics/{agent_id}/
+1. Load base model
+2. Filter classified data by error type
+3. Build DPO preference pairs (chosen=specialty-guided feedback, rejected=generic feedback)
+4. Train with DPO
+5. Save to cache/society/critics/{agent_id}/
 
 Usage:
     python scripts/10_diversify_critics.py \
@@ -98,6 +97,7 @@ def build_critic_preference_pairs(
     dtype: str = "bfloat16",
     gpu_memory_utilization: float = 0.65,
     max_model_len: int = 4096,
+    engine=None,
 ) -> List[Dict[str, Any]]:
     """
     Build DPO preference pairs for Critic training using LLM-generated feedback.
@@ -144,7 +144,7 @@ def build_critic_preference_pairs(
 
         traj = trajectories[sample_id]
         sample = traj["sample"]
-        correct_answer = traj.get("consensus_answer", "")
+        correct_answer = sample.get("answer", "")
         question = sample.get("question", "")
 
         # Collect all responses across rounds
@@ -183,17 +183,19 @@ def build_critic_preference_pairs(
         logger.warning(f"  No wrong-answer candidates found for {error_type}, skipping")
         return []
 
-    # Use LLM to generate feedback pairs
+    # Use provided engine or create a new one
     from src.inference.vllm_server import VLLMInference
 
+    engine_provided = engine is not None
     try:
-        engine = VLLMInference(
-            model_name,
-            cuda_device=device,
-            dtype=dtype,
-            gpu_memory_utilization=gpu_memory_utilization,
-            max_model_len=max_model_len,
-        )
+        if engine is None:
+            engine = VLLMInference(
+                model_name,
+                cuda_device=device,
+                dtype=dtype,
+                gpu_memory_utilization=gpu_memory_utilization,
+                max_model_len=max_model_len,
+            )
 
         for cand in candidates:
             question = cand["question"]
@@ -236,14 +238,15 @@ def build_critic_preference_pairs(
                     },
                 })
 
-        del engine
-        import gc
-        gc.collect()
-        try:
-            import torch
-            torch.cuda.empty_cache()
-        except Exception:
-            pass
+        if not engine_provided:
+            del engine
+            import gc
+            gc.collect()
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
 
     except Exception as e:
         logger.error(f"  Failed to generate LLM feedback: {e}")
@@ -357,43 +360,88 @@ def main():
 
     critic_paths = {}
 
-    for error_type in args.error_types:
-        logger.info(f"\n--- Training Critic: {error_type} ---")
-
-        # Build preference pairs for this error type (using LLM-generated feedback)
-        preference_pairs = build_critic_preference_pairs(
-            classified_results,
-            trajectories,
-            error_type,
-            model_name=args.model_name,
-            device=args.device,
+    # Create a single vLLM engine to reuse across all error types
+    from src.inference.vllm_server import VLLMInference
+    shared_engine = None
+    try:
+        shared_engine = VLLMInference(
+            args.model_name,
+            cuda_device=args.device,
             dtype=args.dtype,
             gpu_memory_utilization=args.gpu_memory_utilization,
+            max_model_len=4096,
         )
+    except Exception as e:
+        logger.warning(f"Failed to create shared vLLM engine, will create per-error-type: {e}")
 
-        if not preference_pairs:
-            logger.warning(f"  No preference pairs for '{error_type}', skipping")
-            continue
+    try:
+        # Phase 1: Use shared engine to generate preference pairs for ALL error types
+        all_pairs = {}
+        for error_type in args.error_types:
+            logger.info(f"\n--- Building pairs for Critic: {error_type} ---")
 
-        # Train DPO
-        checkpoint_path = train_critic_dpo(
-            model_name=args.model_name,
-            preference_pairs=preference_pairs,
-            error_type=error_type,
-            output_dir=output_dir,
-            lora_r=args.lora_r,
-            lora_alpha=args.lora_alpha,
-            learning_rate=args.learning_rate,
-            batch_size=args.batch_size,
-            gradient_accumulation_steps=args.gradient_accumulation_steps,
-            num_epochs=args.num_epochs,
-            max_length=args.max_length,
-            beta=args.beta,
-            seed=args.seed,
-            device=args.device,
-        )
+            preference_pairs = build_critic_preference_pairs(
+                classified_results,
+                trajectories,
+                error_type,
+                model_name=args.model_name,
+                device=args.device,
+                dtype=args.dtype,
+                gpu_memory_utilization=args.gpu_memory_utilization,
+                engine=shared_engine,
+            )
 
-        critic_paths[error_type] = checkpoint_path
+            if preference_pairs:
+                all_pairs[error_type] = preference_pairs
+            else:
+                logger.warning(f"  No preference pairs for '{error_type}', skipping")
+
+        # Clean up shared engine before DPO training (GPU memory intensive)
+        if shared_engine is not None:
+            del shared_engine
+            shared_engine = None
+            import gc
+            gc.collect()
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+        # Phase 2: Train each critic (no engine needed, DPO runs in subprocess)
+        for error_type, preference_pairs in all_pairs.items():
+            logger.info(f"\n--- Training Critic: {error_type} ---")
+
+            checkpoint_path = train_critic_dpo(
+                model_name=args.model_name,
+                preference_pairs=preference_pairs,
+                error_type=error_type,
+                output_dir=output_dir,
+                lora_r=args.lora_r,
+                lora_alpha=args.lora_alpha,
+                learning_rate=args.learning_rate,
+                batch_size=args.batch_size,
+                gradient_accumulation_steps=args.gradient_accumulation_steps,
+                num_epochs=args.num_epochs,
+                max_length=args.max_length,
+                beta=args.beta,
+                seed=args.seed,
+                device=args.device,
+            )
+
+            critic_paths[error_type] = checkpoint_path
+
+    finally:
+        # Clean up shared engine if still alive (e.g. on early exit)
+        if shared_engine is not None:
+            del shared_engine
+            import gc
+            gc.collect()
+            try:
+                import torch
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
 
     # Save critic registry
     logger.info("\n[Step 4] Saving critic registry...")

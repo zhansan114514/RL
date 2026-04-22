@@ -25,8 +25,6 @@ step01_bootstrap:
 step02_classify:
   input_dir: "output/society/bootstrap"
   output_dir: "output/society/classified"
-  use_api: true                 # Use GLM4.5 API for classification
-  cache_dir: "output/society/classifications"
 
 # Phase 3: Actor diversification
 step03_diversify_actors:
@@ -71,12 +69,10 @@ step05_train_society:
 
 # Phase 6: Evaluation
 step06_evaluate:
+  society_dir: "output/society/society"
   output_dir: "output/society/eval"
   num_rounds: 2
   max_tokens: 512
   temperature: 0.7
-  voting_strategy: "majority_vote"
-  router_top_k: 2
-  ablation_configs: ["A1", "A2", "A3", "A4", "A5"]
 
 # Estimated runtime: ~17-22 hours (200 samples, 5 rounds, 1 iteration)

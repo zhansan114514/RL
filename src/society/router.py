@@ -35,6 +35,7 @@ class CriticFeedback:
     error_specialty: ErrorType
     feedback_text: str
     confidence: float  # 0.0 to 1.0
+    answer_correct: Optional[bool] = None  # Critic's judgment on Actor answer correctness
     raw_response: str = ""
 
 
@@ -56,6 +57,11 @@ CONFIDENCE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+ANSWER_CORRECT_PATTERN = re.compile(
+    r'\[Answer_Correct:\s*(yes|no)\]',
+    re.IGNORECASE,
+)
+
 
 def parse_confidence(response: str) -> Optional[float]:
     """Parse [Confidence: 0.X] from Critic response."""
@@ -65,6 +71,14 @@ def parse_confidence(response: str) -> Optional[float]:
             return max(0.0, min(1.0, float(match.group(1))))
         except ValueError:
             return None
+    return None
+
+
+def parse_answer_correct(response: str) -> Optional[bool]:
+    """Parse [Answer_Correct: yes/no] from Critic response."""
+    match = ANSWER_CORRECT_PATTERN.search(response)
+    if match:
+        return match.group(1).lower() == "yes"
     return None
 
 
@@ -123,7 +137,11 @@ class CriticRouter:
         top_indices = np.argsort(weights)[-k:]
         selected = [valid[i] for i in top_indices]
         sel_weights = weights[top_indices]
-        sel_weights = sel_weights / sel_weights.sum()
+        # Renormalize after Top-K so weights sum to 1.0
+        # Note: these are relative weights within the selected subset,
+        # not the original softmax probabilities.
+        weight_sum = sel_weights.sum()
+        sel_weights = sel_weights / weight_sum if weight_sum > 0 else np.ones_like(sel_weights) / len(sel_weights)
 
         # Weighted concatenation
         parts = []
@@ -140,10 +158,12 @@ class CriticRouter:
         )
 
     @staticmethod
-    def _softmax(scores: np.ndarray, temperature: float = 0) -> np.ndarray:
-        """Softmax with temperature scaling."""
-        t = temperature if temperature > 0 else 1.0
-        scaled = scores / t
+    def _softmax(scores: np.ndarray, temperature: float = 1.0) -> np.ndarray:
+        """Softmax with temperature scaling.  temperature must be > 0."""
+        if temperature <= 0:
+            logger.warning(f"Router temperature={temperature} <= 0, clamping to 1.0")
+            temperature = 1.0
+        scaled = scores / temperature
         exp_s = np.exp(scaled - np.max(scaled))
         return exp_s / exp_s.sum()
 
@@ -152,18 +172,23 @@ def build_critic_feedback(
     critic_config: AgentConfig,
     response: str,
 ) -> CriticFeedback:
-    """Build CriticFeedback from raw response, parsing confidence."""
+    """Build CriticFeedback from raw response, parsing confidence and answer correctness."""
     confidence = parse_confidence(response)
     if confidence is None:
         confidence = 0.5
         logger.debug(f"No confidence parsed for {critic_config.name}, default=0.5")
 
-    clean_response = CONFIDENCE_PATTERN.sub("", response).strip()
+    answer_correct = parse_answer_correct(response)
+
+    # Strip both tags from the displayed feedback text
+    clean_response = CONFIDENCE_PATTERN.sub("", response)
+    clean_response = ANSWER_CORRECT_PATTERN.sub("", clean_response).strip()
 
     return CriticFeedback(
         critic_name=critic_config.name,
-        error_specialty=critic_config.error_specialty,
+        error_specialty=critic_config.error_specialty or ErrorType.LOGIC,
         feedback_text=clean_response,
         confidence=confidence,
+        answer_correct=answer_correct,
         raw_response=response,
     )

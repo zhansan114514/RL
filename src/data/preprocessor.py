@@ -6,8 +6,7 @@ import re
 import logging
 from typing import Any, Optional
 
-# Re-export from the canonical reward module (authoritative zeta function)
-from src.algorithms.reward import extract_answer, normalize_answer, math_answers_equal
+from src.algorithms.reward import extract_answer, normalize_answer, math_answers_equal, extract_balanced_braces
 
 logger = logging.getLogger(__name__)
 
@@ -77,11 +76,10 @@ def standardize_sample(
         raw_answer = sample.get("answer", sample.get("solution", ""))
         if isinstance(raw_answer, str):
             # Try to extract from \boxed{...} with balanced brace matching
-            from src.algorithms.reward import _extract_balanced_braces
             boxed_match = re.search(r'\\boxed\{', raw_answer)
             if boxed_match:
                 brace_start = boxed_match.end() - 1
-                content = _extract_balanced_braces(raw_answer, brace_start)
+                content = extract_balanced_braces(raw_answer, brace_start)
                 result["answer"] = content.strip() if content else raw_answer.strip()
             # Try GSM8K "#### number" format
             elif "####" in raw_answer:
@@ -97,6 +95,31 @@ def standardize_sample(
             result["answer"] = str(raw_answer).strip()
 
         result["choices"] = []
+
+    elif task_type == "mixed":
+        # BBH format: could be yes/no, multiple choice, or free-form
+        result["question"] = sample.get("question", sample.get("input", ""))
+        result["passage"] = ""
+
+        # Try to extract choices if present
+        choices = sample.get("choices", [])
+        if isinstance(choices, list) and choices:
+            result["choices"] = choices
+            result["choice_labels"] = [chr(65 + i) for i in range(len(choices))]
+        elif isinstance(choices, dict):
+            choice_texts = choices.get("text", [])
+            result["choices"] = choice_texts
+            result["choice_labels"] = choices.get("label", [chr(65 + i) for i in range(len(choice_texts))])
+
+        # Handle answer
+        answer = sample.get("answer", sample.get("target", ""))
+        if isinstance(answer, str):
+            result["answer"] = answer.strip()
+        elif isinstance(answer, bool):
+            result["answer"] = "yes" if answer else "no"
+            result["choices"] = ["Yes", "No"]
+        else:
+            result["answer"] = str(answer).strip()
 
     return result
 
@@ -135,17 +158,23 @@ def generate_wrong_answer(
         try:
             num = float(correct)
             is_int = '.' not in correct and 'e' not in correct.lower() and num == int(num)
-            strategies = ["negate", "perturb_up", "perturb_down", "add_offset"]
-            strategy = rng.choice(strategies)
-            if strategy == "negate":
-                result = -num
-            elif strategy == "perturb_up":
-                result = round(num * rng.uniform(1.1, 1.5), 2)
-            elif strategy == "perturb_down":
-                result = round(num * rng.uniform(0.5, 0.9), 2)
-            else:  # add_offset
-                offset = rng.choice([-1, 1, 2, -2, 3, -3])
-                result = int(num) + offset if is_int else num + offset
+
+            # For zero, only use strategies that guarantee a non-zero result
+            if abs(num) < 1e-12:
+                offset = rng.choice([1, -1, 2, -2, 3, -3])
+                result = float(offset)
+            else:
+                strategies = ["negate", "perturb_up", "perturb_down", "add_offset"]
+                strategy = rng.choice(strategies)
+                if strategy == "negate":
+                    result = -num
+                elif strategy == "perturb_up":
+                    result = round(num * rng.uniform(1.1, 1.5), 2)
+                elif strategy == "perturb_down":
+                    result = round(num * rng.uniform(0.5, 0.9), 2)
+                else:  # add_offset
+                    offset = rng.choice([-1, 1, 2, -2, 3, -3])
+                    result = int(num) + offset if is_int else num + offset
             # Preserve integer format if original was integer
             if is_int:
                 return str(int(result)) if result == int(result) else str(result)
@@ -158,9 +187,18 @@ def generate_wrong_answer(
         return "no" if correct.lower() == "yes" else "yes"
 
     if choices:
-        wrong_options = [c for c in choices if c.upper() != correct.upper()]
+        # correct is a label like "A"/"B"/"C"/"D"; choices is text like ["Paris", ...]
+        # First try: correct is a label, pick a wrong label
+        correct_upper = correct.upper()
+        if correct_upper in ("A", "B", "C", "D", "E", "F"):
+            correct_idx = ord(correct_upper) - ord("A")
+            wrong_labels = [chr(65 + i) for i in range(len(choices)) if i != correct_idx]
+            if wrong_labels:
+                return rng.choice(wrong_labels)
+        # Fallback: correct is option text, find it and pick another
+        wrong_options = [c for c in choices if c.upper() != correct_upper]
         if wrong_options:
-            return rng.choice(wrong_options).upper()
+            return rng.choice(wrong_options)
 
     # Fallback
     options = ["A", "B", "C", "D"]

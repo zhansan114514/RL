@@ -80,8 +80,11 @@ class DiversitySplit:
                     )
                     style = result.style
                 except ClassificationError as e:
-                    logger.warning(f"Classification failed, using round-robin: {e}")
                     style = list(ReasoningStyle)[i % len(ReasoningStyle)]
+                    logger.warning(
+                        f"Classification failed for sample {i}, "
+                        f"assigned style '{style.value}' via round-robin fallback: {e}"
+                    )
             else:
                 # Round-robin assignment if no responses available
                 style = list(ReasoningStyle)[i % len(ReasoningStyle)]
@@ -137,8 +140,11 @@ class DiversitySplit:
                 )
                 splits[result.error_type].append((sample, response))
             except ClassificationError as e:
-                logger.warning(f"Error classification failed, using round-robin: {e}")
                 error_type = list(ErrorType)[i % len(ErrorType)]
+                logger.warning(
+                    f"Error classification failed for sample {i}, "
+                    f"assigned error type '{error_type.value}' via round-robin fallback: {e}"
+                )
                 splits[error_type].append((sample, response))
 
         if self.balance:

@@ -173,28 +173,29 @@ def train_dpo(
     env["PYTHONPATH"] = project_root + ((":" + existing_pp) if existing_pp else "")
     logger.info(f"DPO training on physical GPU {target_physical} (isolated subprocess)")
 
-    result = subprocess.run(
-        [sys.executable, _runner_script, _config_path],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=3600,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, _runner_script, _config_path],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=3600,
+        )
 
-    if result.stdout:
-        for line in result.stdout.strip().split("\n"):
-            if line.strip():
-                logger.info(f"[DPO worker] {line}")
-    if result.returncode != 0:
-        logger.error(f"DPO subprocess failed (exit {result.returncode}):")
-        if result.stderr:
-            for line in result.stderr.strip().split("\n")[-20:]:
-                logger.error(f"  {line}")
-        raise RuntimeError(f"DPO training failed with exit code {result.returncode}")
-
-    # Cleanup temp files
-    import shutil
-    if _temp_dir and os.path.exists(_temp_dir):
-        shutil.rmtree(_temp_dir, ignore_errors=True)
+        if result.stdout:
+            for line in result.stdout.strip().split("\n"):
+                if line.strip():
+                    logger.info(f"[DPO worker] {line}")
+        if result.returncode != 0:
+            logger.error(f"DPO subprocess failed (exit {result.returncode}):")
+            if result.stderr:
+                for line in result.stderr.strip().split("\n")[-20:]:
+                    logger.error(f"  {line}")
+            raise RuntimeError(f"DPO training failed with exit code {result.returncode}")
+    finally:
+        # Cleanup temp files (always, even on failure)
+        import shutil
+        if _temp_dir and os.path.exists(_temp_dir):
+            shutil.rmtree(_temp_dir, ignore_errors=True)
 
     return output_dir

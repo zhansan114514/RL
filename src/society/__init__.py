@@ -28,6 +28,7 @@ from src.society.router import (
     CriticFeedback,
     RoutedFeedback,
     parse_confidence,
+    parse_answer_correct,
     build_critic_feedback,
 )
 from src.society.multi_deliberation import (
@@ -35,6 +36,7 @@ from src.society.multi_deliberation import (
     multi_agent_deliberate_single_gpu,
     MultiDeliberationResult,
     DeliberationRound,
+    LoRAError,
 )
 from src.society.data_classifier import (
     DataClassifier,
@@ -69,12 +71,14 @@ __all__ = [
     "CriticFeedback",
     "RoutedFeedback",
     "parse_confidence",
+    "parse_answer_correct",
     "build_critic_feedback",
     # Multi-Deliberation
     "multi_agent_deliberate",
     "multi_agent_deliberate_single_gpu",
     "MultiDeliberationResult",
     "DeliberationRound",
+    "LoRAError",
     # Data Classifier
     "DataClassifier",
     "ClassificationError",

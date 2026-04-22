@@ -177,55 +177,128 @@ def _best_actor(
     answers: dict[str, str],
     result: MultiDeliberationResult,
 ) -> tuple[str, float]:
-    """Select answer from highest-confidence Actor."""
+    """Select answer with the strongest agreement across Actors.
+
+    Counts how many Actors agree on each answer and picks the one
+    with the most support.  Ties are broken by Critic confidence:
+    among tied answers, pick the one whose supporting Actor(s) received
+    the highest-average Critic confidence (i.e., the Critics were most
+    certain in their feedback about those Actors).
+    """
     if not answers:
         return "", 0.0
-    # Use the Actor whose answer matches consensus
-    if result.consensus_answer and result.consensus_answer in answers.values():
-        return result.consensus_answer, result.consensus_confidence
-    # Fallback to first actor with reduced confidence
-    first_answer = next(iter(answers.values()))
-    return first_answer, 0.5
+
+    # Count agreement per answer value
+    answer_votes: dict[str, list[str]] = {}  # answer -> [actor_names]
+    for actor_name, answer in answers.items():
+        answer_votes.setdefault(answer, []).append(actor_name)
+
+    # Find the answer(s) with the most votes
+    max_votes = max(len(v) for v in answer_votes.values())
+    top_answers = [a for a, v in answer_votes.items() if len(v) == max_votes]
+
+    if len(top_answers) == 1:
+        best_answer = top_answers[0]
+        confidence = max_votes / len(answers)
+        return best_answer, confidence
+
+    # Tie-break: use average Critic confidence for the tied answers' actors
+    actor_confs = _collect_avg_critic_confidences(result)
+    best_answer = max(top_answers, key=lambda a: sum(actor_confs.get(n, 0.5) for n in answer_votes[a]))
+    confidence = max_votes / len(answers)
+    return best_answer, confidence
+
+
+def _collect_avg_critic_confidences(result: MultiDeliberationResult) -> dict[str, float]:
+    """Collect average Critic confidence per Actor from the last round.
+
+    This is the Critics' self-reported confidence in their feedback,
+    used only as a tie-breaker for _best_actor — not as a primary voting signal.
+    """
+    actor_confs: dict[str, float] = {}
+    if result.rounds:
+        last_round = result.rounds[-1]
+        for actor_name, routed in last_round.routed_feedbacks.items():
+            critic_confs = [fb.confidence for fb in routed.raw_feedbacks
+                           if fb.critic_name in routed.selected_critics]
+            actor_confs[actor_name] = (sum(critic_confs) / len(critic_confs)) if critic_confs else 0.5
+    return actor_confs
+
+
+def _collect_answer_correctness(result: MultiDeliberationResult) -> dict[str, float]:
+    """Collect Critics' answer-correctness judgment per Actor from the last round.
+
+    Each Critic outputs [Answer_Correct: yes/no].  For each Actor, we count
+    the fraction of selected Critics that judged the Actor's answer as correct.
+    This is used by _weighted_vote as the primary voting weight.
+
+    Falls back to Critic confidence (feedback-quality proxy) when
+    answer-correctness tags are absent (backward compat).
+    """
+    actor_scores: dict[str, float] = {}
+    if result.rounds:
+        last_round = result.rounds[-1]
+        for actor_name, routed in last_round.routed_feedbacks.items():
+            selected_fbs = [fb for fb in routed.raw_feedbacks
+                            if fb.critic_name in routed.selected_critics]
+            if not selected_fbs:
+                actor_scores[actor_name] = 0.5
+                continue
+
+            # Prefer answer_correct judgment; fall back to confidence
+            has_judgment = any(fb.answer_correct is not None for fb in selected_fbs)
+            if has_judgment:
+                # Map yes->1.0, no->0.0; skip Critics that didn't judge
+                judgments = []
+                for fb in selected_fbs:
+                    if fb.answer_correct is True:
+                        judgments.append(1.0)
+                    elif fb.answer_correct is False:
+                        judgments.append(0.0)
+                    # Skip None (Critic didn't output the tag)
+                actor_scores[actor_name] = (sum(judgments) / len(judgments)) if judgments else 0.5
+            else:
+                # Backward compat: use confidence as proxy
+                confs = [fb.confidence for fb in selected_fbs]
+                actor_scores[actor_name] = sum(confs) / len(confs)
+    return actor_scores
 
 
 def _weighted_vote(
     answers: dict[str, str],
     result: MultiDeliberationResult,
 ) -> tuple[str, float]:
-    """Weighted voting based on Critic confidence from deliberation rounds.
+    """Weighted voting: each Actor's vote is weighted by Critics' correctness judgment.
 
-    Uses the Critic confidence scores from the routing step to weight
-    Actor answers. Actors whose answers received higher Critic confidence
-    get more weight.
+    This leverages the Critics' [Answer_Correct: yes/no] tags -- Actors whose
+    answers were judged correct by more Critics receive higher voting weight.
+    Falls back to Critic confidence when answer-correctness tags are absent.
     """
     if not answers:
         return "", 0.0
 
-    # Collect confidence scores from the last deliberation round
-    actor_confidences: dict[str, float] = {}
-    if result.rounds:
-        last_round = result.rounds[-1]
-        for actor_name, routed in last_round.routed_feedbacks.items():
-            # Average confidence of selected critics for this actor
-            critic_confs = [fb.confidence for fb in routed.raw_feedbacks
-                           if fb.critic_name in routed.selected_critics]
-            if critic_confs:
-                actor_confidences[actor_name] = sum(critic_confs) / len(critic_confs)
-            else:
-                actor_confidences[actor_name] = 0.5
+    # Collect Critics' correctness judgment per Actor
+    actor_scores = _collect_answer_correctness(result)
 
-    # Weight answers by actor confidence
-    answer_weights: dict[str, float] = {}
+    # Group actors by answer value
+    answer_votes: dict[str, list[str]] = {}
     for actor_name, answer in answers.items():
-        conf = actor_confidences.get(actor_name, 0.5)
-        answer_weights[answer] = answer_weights.get(answer, 0.0) + conf
+        answer_votes.setdefault(answer, []).append(actor_name)
 
-    if not answer_weights:
-        return _majority_vote(answers)
+    # Weight each answer = sum of its actors' correctness scores
+    answer_weights = {
+        answer: sum(actor_scores.get(name, 0.5) for name in actor_names)
+        for answer, actor_names in answer_votes.items()
+    }
 
     total_weight = sum(answer_weights.values())
-    best_answer = max(answer_weights, key=answer_weights.get)
-    confidence = answer_weights[best_answer] / total_weight if total_weight > 0 else 0.0
+    if total_weight == 0:
+        # Fallback to majority vote
+        best_answer = max(answer_votes, key=lambda a: len(answer_votes[a]))
+        return best_answer, len(answer_votes[best_answer]) / len(answers) if answers else 0.0
+
+    best_answer = max(answer_weights, key=lambda a: answer_weights[a])
+    confidence = answer_weights[best_answer] / total_weight
     return best_answer, confidence
 
 

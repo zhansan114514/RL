@@ -130,7 +130,11 @@ def create_agent_registry(
     critic_paths: Dict[str, str],
     base_model: str,
 ) -> "AgentRegistry":
-    """Create AgentRegistry from loaded paths."""
+    """Create AgentRegistry from loaded paths.
+
+    model_path = base model (shared across all agents).
+    lora_path  = per-agent LoRA adapter checkpoint.
+    """
     from src.society.agent_registry import (
         AgentRegistry,
         AgentConfig,
@@ -139,9 +143,9 @@ def create_agent_registry(
         ErrorType,
     )
 
-    registry = AgentRegistry()
+    registry = AgentRegistry(base_model_path=base_model)
 
-    # Register actors
+    # Register actors: model_path=base model, lora_path=LoRA checkpoint
     for style, path in actor_paths.items():
         try:
             reasoning_style = ReasoningStyle(style.upper())
@@ -152,14 +156,15 @@ def create_agent_registry(
             name=f"actor_{style}",
             role=AgentRole.ACTOR,
             reasoning_style=reasoning_style,
-            model_path=path,
+            model_path=base_model,
+            lora_path=path,
             system_prompt="",
             temperature=0.7,
             max_tokens=512,
         )
         registry.register(config)
 
-    # Register critics
+    # Register critics: model_path=base model, lora_path=LoRA checkpoint
     for error_type, path in critic_paths.items():
         try:
             error = ErrorType(error_type.upper())
@@ -170,7 +175,8 @@ def create_agent_registry(
             name=f"critic_{error_type}",
             role=AgentRole.CRITIC,
             error_specialty=error,
-            model_path=path,
+            model_path=base_model,
+            lora_path=path,
             system_prompt="",
             temperature=0.7,
             max_tokens=256,
@@ -224,7 +230,7 @@ def main():
 
     if not actor_paths or not critic_paths:
         logger.error("No actors or critics found. Please run diversification scripts first.")
-        return
+        sys.exit(1)
 
     # Create agent registry
     logger.info("[Step 3] Creating agent registry...")
@@ -277,6 +283,7 @@ def main():
             },
             "metrics": result.metrics,
             "training_config": {
+                "base_model": args.model_name,
                 "num_iterations": args.num_iterations,
                 "num_rounds": args.num_rounds,
                 "lora_r": args.lora_r,

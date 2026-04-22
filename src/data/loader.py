@@ -64,7 +64,7 @@ def load_dataset(
     Load and standardize a benchmark dataset.
 
     Args:
-        name: Dataset name (boolq, mmlu, bbh, sciq, arc).
+        name: Dataset name (boolq, mmlu, bbh, sciq, arc, math, gsm8k).
         split_ratios: Custom split ratios (only for BBH).
         seed: Random seed for reproducibility.
         cache_dir: HuggingFace cache directory.
@@ -129,6 +129,8 @@ def _load_math_all(
     subconfigs = [
         "algebra", "counting_and_probability", "geometry",
         "intermediate_algebra", "number_theory", "prealgebra", "precalculus",
+        "linear_algebra", "abstract_algebra", "college_mathematics",
+        "miscellaneous",
     ]
 
     merged = {}

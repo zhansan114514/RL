@@ -148,7 +148,7 @@ def build_preference_pairs_for_style(
 
         traj = trajectories[sample_id]
         sample = traj["sample"]
-        correct_answer = traj.get("consensus_answer", "")
+        correct_answer = sample.get("answer", "")
 
         # Get responses from all rounds (initial + debate) for more diversity
         all_responses = list(traj.get("initial_responses", []))
@@ -191,8 +191,8 @@ def build_preference_pairs_for_style(
             chosen_response = correct_responses[0]
             rejected_response = correct_responses[-1]
         elif len(incorrect_responses) >= 2:
-            chosen_response = incorrect_responses[0]
-            rejected_response = incorrect_responses[-1]
+            # All incorrect: no meaningful preference signal, skip
+            continue
 
         if chosen_response and rejected_response and chosen_response != rejected_response:
             preference_pairs.append({

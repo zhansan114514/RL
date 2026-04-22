@@ -100,10 +100,13 @@ CRITIC_SPECIALTY_PROMPTS = {
     ),
 }
 
-# Confidence prompt suffix for Critic (used by MoE Router)
+# Confidence prompt suffix for Critic (used by MoE Router + weighted voting)
 CRITIC_CONFIDENCE_SUFFIX = (
-    "\n\nAfter your analysis, output your confidence in your feedback "
-    "on a scale of 0.0 to 1.0 using the format: [Confidence: 0.X]"
+    "\n\nAfter your analysis:\n"
+    "1. Judge whether the solver's final answer is correct: "
+    "[Answer_Correct: yes] or [Answer_Correct: no]\n"
+    "2. Output your confidence in your feedback on a scale of 0.0 to 1.0: "
+    "[Confidence: 0.X]"
 )
 
 

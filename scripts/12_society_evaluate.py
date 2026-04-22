@@ -133,7 +133,7 @@ def compute_diversity(responses: List[str]) -> float:
     """Compute diversity score using unique response ratio."""
     if not responses:
         return 0.0
-    return len(set(responses)) / len(responses) if responses else 0.0
+    return len(set(responses)) / len(responses)
 
 
 def _compute_ci(
@@ -234,7 +234,7 @@ def _build_agent_configs(
     return actor_configs, critic_configs, lora_paths
 
 
-def _build_base_agent_configs():
+def _build_base_agent_configs(model_name: str):
     """Build generic AgentConfigs WITHOUT LoRA for the A1 baseline.
 
     This represents the true ACC-Collab baseline: untrained base model
@@ -246,7 +246,7 @@ def _build_base_agent_configs():
         name="base_actor",
         role=AgentRole.ACTOR,
         reasoning_style=ReasoningStyle.DIRECT,
-        model_path="Qwen/Qwen2.5-7B-Instruct",
+        model_path=model_name,
         lora_path="",  # No LoRA — pure base model
         system_prompt="",
     )
@@ -254,7 +254,7 @@ def _build_base_agent_configs():
         name="base_critic",
         role=AgentRole.CRITIC,
         error_specialty=ErrorType.LOGIC,
-        model_path="Qwen/Qwen2.5-7B-Instruct",
+        model_path=model_name,
         lora_path="",  # No LoRA — pure base model
         system_prompt="",
     )
@@ -392,13 +392,21 @@ def run_all_evaluations(
 
     results: Dict[str, EvalResult] = {}
 
+    # Count total agents that will need LoRA across all ablation configs
+    # (A2-A5 use LoRA-enabled agents, A1 uses base model only)
+    total_agents_with_lora = len(all_actor_names) + len(all_critic_names)
+
     logger.info(f"Loading base model ONCE: {base_model}")
+    logger.info(f"  LoRA agents: {total_agents_with_lora} ({len(all_actor_names)} actors + {len(all_critic_names)} critics)")
     engine = VLLMInference(
         base_model,
         cuda_device=device,
         dtype=dtype,
         gpu_memory_utilization=gpu_memory_utilization,
         max_model_len=4096,
+        enable_lora=True,
+        max_loras=total_agents_with_lora,
+        max_lora_rank=256,
     )
 
     try:
@@ -406,7 +414,7 @@ def run_all_evaluations(
             # A1: 1 Actor + 1 Critic (baseline ACC-Collab)
             # Use base model WITHOUT LoRA — true untrained baseline
             logger.info("[A1] 1 Actor + 1 Critic (baseline, no LoRA)...")
-            a_configs, c_configs, lora = _build_base_agent_configs()
+            a_configs, c_configs, lora = _build_base_agent_configs(base_model)
             results["A1_baseline"] = _run_deliberation_on_samples(
                 engine, a_configs, c_configs, samples, dataset_name,
                 lora, num_rounds, max_tokens, temperature,
@@ -576,7 +584,7 @@ def main():
                 for name, r in ablation_results.items()
             },
             "total_eval_time_seconds": total_time,
-            "sample_details": ablation_results.get("A5_full_system", first_result).sample_details if (ablation_results.get("A5_full_system") or first_result) else [],
+            "sample_details": (ablation_results.get("A5_full_system") or first_result).sample_details if (ablation_results.get("A5_full_system") or first_result) else [],
         }, f, indent=2)
 
     logger.info(f"  Results saved: {results_file}")
@@ -598,7 +606,7 @@ def main():
         logger.info(f"  Eval Time:         {result.eval_time_seconds:.1f}s")
 
     # Print qualitative examples
-    main_result = ablation_results.get("A5_full_system", first_result)
+    main_result = ablation_results.get("A5_full_system") or first_result
     if main_result:
         print_qualitative_examples(main_result, args.num_samples_for_qualitative)
 

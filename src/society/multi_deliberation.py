@@ -130,27 +130,84 @@ def _get_stable_lora_id(lora_path: str) -> int:
     return _LORA_ID_CACHE[lora_path]
 
 
-def _load_lora_adapter(engine: Any, lora_path: str) -> Optional[str]:
-    """Load a LoRA adapter into the vLLM engine.
+class LoRAError(RuntimeError):
+    """Raised when a LoRA adapter cannot be loaded or used."""
+    pass
 
-    Returns the LoRA request ID if successful, None otherwise.
 
-    vLLM supports LoRA via two mechanisms:
-    1. vLLM >= 0.6: LLM.generate() accepts ``lora_request`` param
-    2. Engine-level: ``add_lora`` / ``load_lora_adapter``
+def _resolve_adapter_path(path: str) -> str:
+    """Resolve a LoRA adapter path.
+
+    _dpo_runner.py saves:
+      - LoRA adapter  -> output_dir + "_adapter/"
+      - merged model  -> output_dir/
+
+    Callers typically hold the merged-model path.  This function
+    automatically discovers the adapter directory next to it.
+
+    Raises LoRAError if no valid adapter directory is found.
+    """
+    p = Path(path)
+
+    # Case 1: path already points to a valid adapter directory
+    if (p / "adapter_config.json").exists():
+        return str(p)
+
+    # Case 2: try _adapter suffix (convention from _dpo_runner.py)
+    adapter_path = Path(str(p) + "_adapter")
+    if (adapter_path / "adapter_config.json").exists():
+        logger.info(f"Resolved adapter path: {adapter_path} (from {path})")
+        return str(adapter_path)
+
+    raise LoRAError(
+        f"LoRA adapter not found.  Tried:\n"
+        f"  1. {p}/adapter_config.json\n"
+        f"  2. {adapter_path}/adapter_config.json\n"
+        f"If '{p}' is a merged model directory, the adapter should be at "
+        f"'{adapter_path}'.  Make sure _dpo_runner.py has been run and both "
+        f"directories exist."
+    )
+
+
+def _load_lora_adapter(engine: Any, lora_path: str) -> Any:
+    """Create a LoRARequest for the given adapter path.
+
+    Validates that the adapter directory exists and contains the required
+    files.  Raises LoRAError if the adapter is missing or invalid.
+
+    Returns a LoRARequest object (never None for non-empty paths).
     """
     if not lora_path:
         return None
+
+    # Validate engine supports LoRA
+    if hasattr(engine, 'supports_lora') and not engine.supports_lora:
+        raise LoRAError(
+            f"Agent requires LoRA adapter at '{lora_path}', but the "
+            f"VLLMInference engine was created without enable_lora=True.  "
+            f"Re-create the engine with enable_lora=True, max_loras=<N>, "
+            f"max_lora_rank=256."
+        )
+
+    # Resolve adapter path (handles _adapter suffix convention)
+    resolved_path = _resolve_adapter_path(lora_path)
+
     try:
         from vllm import LoRARequest
-        # Use directory name as a stable identifier
-        lora_name = Path(lora_path).name or "adapter"
-        lora_id = _get_stable_lora_id(lora_path)
-        lora_request = LoRARequest(lora_name, lora_id=lora_id, lora_path=lora_path)
+        lora_name = Path(resolved_path).name or "adapter"
+        lora_id = _get_stable_lora_id(resolved_path)
+        lora_request = LoRARequest(lora_name, lora_id=lora_id, lora_path=resolved_path)
+        logger.info(f"Created LoRARequest: name={lora_name}, id={lora_id}, path={resolved_path}")
         return lora_request
-    except (ImportError, Exception) as e:
-        logger.debug(f"LoRA request creation failed for {lora_path}: {e}")
-    return None
+    except ImportError as e:
+        raise LoRAError(
+            f"vllm.LoRARequest import failed: {e}.  "
+            f"Ensure vllm >= 0.6 is installed for LoRA support."
+        ) from e
+    except Exception as e:
+        raise LoRAError(
+            f"Failed to create LoRARequest for '{resolved_path}': {e}"
+        ) from e
 
 
 # ============================================================
@@ -201,9 +258,41 @@ def multi_agent_deliberate_single_gpu(
     if router is None:
         router = CriticRouter(top_k=2)
 
+    if num_rounds <= 0:
+        logger.warning("num_rounds <= 0, returning empty result")
+        return MultiDeliberationResult(
+            rounds=[],
+            final_answers={},
+            consensus_answer=None,
+            consensus_confidence=0.0,
+            metadata={"num_actors": len(actors), "num_critics": len(critics)},
+        )
+
     task_type = sample.get("task_type", "yes_no")
     ckpt_dir = Path(checkpoint_dir) if checkpoint_dir else None
     lora_paths = lora_paths or {}
+
+    # Check which agents require LoRA and validate engine support
+    agents_needing_lora = []
+    for agent in list(actors) + list(critics):
+        lora_path = lora_paths.get(agent.name, agent.lora_path)
+        if lora_path:
+            agents_needing_lora.append((agent.name, lora_path))
+
+    if agents_needing_lora:
+        engine_supports_lora = (
+            hasattr(inference_engine, 'supports_lora')
+            and inference_engine.supports_lora
+        )
+        if not engine_supports_lora:
+            agent_list = ", ".join(f"{n} ({p})" for n, p in agents_needing_lora)
+            raise LoRAError(
+                f"{len(agents_needing_lora)} agents require LoRA adapters "
+                f"but the inference engine does not have LoRA enabled.\n"
+                f"  Agents: {agent_list}\n"
+                f"  Fix: create VLLMInference with enable_lora=True, "
+                f"max_loras={len(agents_needing_lora)}, max_lora_rank=256"
+            )
 
     # Pre-create LoRA request objects for each agent (once, reuse across rounds)
     lora_requests: dict[str, Any] = {}
@@ -384,8 +473,10 @@ def _generate_with_lora(
 ) -> list[str]:
     """Generate responses with per-agent LoRA adapters.
 
-    If all agents share the same LoRA (or all have no LoRA), batch in one call.
-    If agents have different LoRA adapters, group by LoRA and batch per group.
+    Groups agents by their LoRA request (or None for base model) and batches
+    each group into a single vLLM call.
+
+    Raises LoRAError if a LoRA adapter is required but cannot be used.
     """
     # Group agents by their LoRA request (or None for base model)
     groups: dict[Optional[Any], list[tuple[int, str]]] = {}  # lora_req -> [(idx, prompt)]
@@ -399,20 +490,35 @@ def _generate_with_lora(
         batch_prompts = [p for _, p in items]
         batch_indices = [idx for idx, _ in items]
 
-        try:
-            if lora_req is not None and hasattr(engine, '_llm') and engine._llm is not None:
-                # Use vLLM's native LoRA support
-                from vllm import SamplingParams
-                params = SamplingParams(max_tokens=max_tokens, temperature=temperature)
-                outputs = engine._llm.generate(batch_prompts, params, lora_request=lora_req)
-                batch_results = [c.text for o in outputs for c in o.outputs]
-            else:
-                # Fallback: no LoRA, use standard generate
-                batch_results = engine.generate(
-                    batch_prompts, max_tokens=max_tokens, temperature=temperature,
-                )
-        except Exception as e:
-            logger.warning(f"LoRA generation failed, falling back to base model: {e}")
+        if lora_req is not None:
+            # Use vLLM's LoRA-aware generation
+            try:
+                if hasattr(engine, 'generate_with_lora'):
+                    batch_results = engine.generate_with_lora(
+                        batch_prompts, lora_req,
+                        max_tokens=max_tokens, temperature=temperature,
+                    )
+                elif hasattr(engine, '_llm') and engine._llm is not None:
+                    from vllm import SamplingParams
+                    params = SamplingParams(max_tokens=max_tokens, temperature=temperature, n=1)
+                    outputs = engine._llm.generate(batch_prompts, params, lora_request=lora_req)
+                    batch_results = [c.text for o in outputs for c in o.outputs]
+                else:
+                    raise LoRAError(
+                        f"Engine does not support LoRA generation for adapter "
+                        f"'{lora_req.lora_path}'.  The VLLMInference engine must "
+                        f"be created with enable_lora=True."
+                    )
+            except LoRAError:
+                raise
+            except Exception as e:
+                agent_names = [agents[idx].name for idx in batch_indices]
+                raise LoRAError(
+                    f"LoRA generation failed for agents {agent_names} with "
+                    f"adapter '{getattr(lora_req, 'lora_path', lora_req)}': {e}"
+                ) from e
+        else:
+            # No LoRA: use standard generate
             batch_results = engine.generate(
                 batch_prompts, max_tokens=max_tokens, temperature=temperature,
             )

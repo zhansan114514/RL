@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Optional
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +17,11 @@ class VLLMInference:
     Supports multi-GPU placement via the ``cuda_device`` parameter.
     When set, vLLM's engine child process will be restricted to that
     physical GPU by temporarily overriding ``CUDA_VISIBLE_DEVICES``.
+
+    LoRA support:
+      Set ``enable_lora=True`` to allow dynamic LoRA adapter loading
+      via ``generate_with_lora()``.  The engine will reserve GPU memory
+      for up to ``max_loras`` adapters of rank ``max_lora_rank``.
     """
 
     def __init__(
@@ -28,13 +33,17 @@ class VLLMInference:
         dtype: str = "auto",
         trust_remote_code: bool = True,
         cuda_device: Optional[int] = None,
+        enable_lora: bool = False,
+        max_loras: int = 1,
+        max_lora_rank: int = 256,
     ):
         self.model_name = model_name
         self._llm = None
         self._tokenizer = None
         self._cuda_device = cuda_device
+        self._enable_lora = enable_lora
 
-        self._init_kwargs = {
+        self._init_kwargs: dict = {
             "tensor_parallel_size": tensor_parallel_size,
             "gpu_memory_utilization": gpu_memory_utilization,
             "max_model_len": max_model_len,
@@ -43,6 +52,13 @@ class VLLMInference:
             "enforce_eager": False,
             "disable_log_stats": True,
         }
+        if enable_lora:
+            self._init_kwargs["enable_lora"] = True
+            self._init_kwargs["max_loras"] = max_loras
+            self._init_kwargs["max_lora_rank"] = max_lora_rank
+            logger.info(
+                f"LoRA enabled: max_loras={max_loras}, max_lora_rank={max_lora_rank}"
+            )
 
     def _ensure_loaded(self) -> None:
         """Lazy-load the vLLM engine on first use."""
@@ -118,6 +134,43 @@ class VLLMInference:
 
         params = SamplingParams(**sampling_kwargs)
         outputs = self._llm.generate(prompts, params)
+        return [c.text for o in outputs for c in o.outputs]
+
+    @property
+    def supports_lora(self) -> bool:
+        """Whether this engine was initialized with LoRA support."""
+        return self._enable_lora
+
+    def generate_with_lora(
+        self,
+        prompts: str | list[str],
+        lora_request: Any,
+        max_tokens: int = 256,
+        temperature: float = 0.7,
+        top_p: float = 0.9,
+        n: int = 1,
+        stop: Optional[list[str]] = None,
+    ) -> list[str]:
+        """Generate text using a specific LoRA adapter.
+
+        Raises RuntimeError if LoRA is not enabled on this engine.
+        """
+        if not self._enable_lora:
+            raise RuntimeError(
+                "LoRA is not enabled on this VLLMInference instance. "
+                "Re-create with enable_lora=True to use LoRA adapters."
+            )
+        self._ensure_loaded()
+        from vllm import SamplingParams
+
+        if isinstance(prompts, str):
+            prompts = [prompts]
+
+        params = SamplingParams(
+            max_tokens=max_tokens, temperature=temperature,
+            top_p=top_p, n=n, stop=stop,
+        )
+        outputs = self._llm.generate(prompts, params, lora_request=lora_request)
         return [c.text for o in outputs for c in o.outputs]
 
     def generate_single(

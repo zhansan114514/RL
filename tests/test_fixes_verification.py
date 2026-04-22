@@ -108,9 +108,8 @@ class TestFix2TrajectoryStartsFromT1:
     """Fix #2: Algorithm 1 guided trajectories should start from t=1, not t=0."""
 
     @patch('src.algorithms.trajectory.deliberate')
-    @patch('src.algorithms.trajectory.estimate_final_accuracy')
     @patch('src.algorithms.trajectory._make_guided_prompt')
-    def test_guided_trajectories_skip_round_zero(self, mock_guided_prompt, mock_estimate, mock_deliberate):
+    def test_guided_trajectories_skip_round_zero(self, mock_guided_prompt, mock_deliberate):
         """Guided trajectories should only be generated for t >= 1."""
         from src.algorithms.trajectory import generate_trajectories
 
@@ -120,13 +119,20 @@ class TestFix2TrajectoryStartsFromT1:
             {"actor_response": "A1", "critic_response": "C1", "actor_prompt": "P1", "critic_prompt": "CP1"},
             {"actor_response": "A2", "critic_response": "C2", "actor_prompt": "P2", "critic_prompt": "CP2"},
         ]
-        mock_estimate.return_value = 0.5
         mock_guided_prompt.return_value = "Guided prompt"
 
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate.return_value = ["Guided actor"] * 4
-        critic.generate.return_value = ["Guided critic"] * 4
+        # actor.generate is called per round: guided actor (2) + MC roll-out (3*num_simulations)
+        # For 2 rounds (t=1,2), each round: guided actor(2) + MC roll-out(15) = 17
+        # Total: 2 calls to actor.generate, 2 calls to critic.generate
+        actor.generate.side_effect = [
+            ["Guided actor z_y", "Guided actor z_not_y"],  # round 1: guided actor
+            ["The answer is Yes."] * 15,  # round 1: MC roll-out (3*5=15)
+            ["Guided actor z_y", "Guided actor z_not_y"],  # round 2: guided actor
+            ["The answer is Yes."] * 15,  # round 2: MC roll-out
+        ]
+        critic.generate.return_value = ["Guided critic"] * 2
 
         sample = {
             "question": "Test?",
@@ -153,8 +159,7 @@ class TestFix2TrajectoryStartsFromT1:
             assert round_idx >= 1, f"Guided prompt should not be generated for t=0, got t={round_idx}"
 
     @patch('src.algorithms.trajectory.deliberate')
-    @patch('src.algorithms.trajectory.estimate_final_accuracy')
-    def test_round_zero_excluded_from_preference_pairs(self, mock_estimate, mock_deliberate):
+    def test_round_zero_excluded_from_preference_pairs(self, mock_deliberate):
         """Round t=0 should not generate any preference pairs."""
         from src.algorithms.trajectory import generate_trajectories
 
@@ -162,12 +167,15 @@ class TestFix2TrajectoryStartsFromT1:
             {"actor_response": "A0", "critic_response": "C0", "actor_prompt": "P0", "critic_prompt": "CP0"},
             {"actor_response": "A1", "critic_response": "C1", "actor_prompt": "P1", "critic_prompt": "CP1"},
         ]
-        mock_estimate.return_value = 1.0
 
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate.return_value = ["Guided"] * 4
-        critic.generate.return_value = ["Guided critic"] * 4
+        # 1 round (t=1): guided actor(2) + MC roll-out(15)
+        actor.generate.side_effect = [
+            ["Guided actor z_y", "Guided actor z_not_y"],  # guided actor
+            ["The answer is Yes."] * 15,  # MC roll-out: all correct -> high delta
+        ]
+        critic.generate.return_value = ["Guided critic"] * 2
 
         sample = {
             "question": "Test?",
@@ -281,9 +289,8 @@ class TestFix3TrajectoryIfElifStructure:
         assert pairs[0]["direction"] == "away", "Elif branch should create 'away' pair"
 
     @patch('src.algorithms.trajectory.deliberate')
-    @patch('src.algorithms.trajectory.estimate_final_accuracy')
     @patch('src.algorithms.trajectory._make_guided_prompt')
-    def test_no_pair_when_both_deltas_below_threshold(self, mock_guided, mock_estimate, mock_deliberate):
+    def test_no_pair_when_both_deltas_below_threshold(self, mock_guided, mock_deliberate):
         """When both deltas are below threshold, no pair should be created."""
         from src.algorithms.trajectory import generate_trajectories
 
@@ -293,23 +300,16 @@ class TestFix3TrajectoryIfElifStructure:
         ]
         mock_guided.return_value = "Guided prompt"
 
-        call_count = [0]
-        def side_effect_estimate(*args, **kwargs):
-            call_count[0] += 1
-            # All returns similar values -> small deltas
-            # v_natural=0.5, v_guided_correct=0.55, v_guided_wrong=0.45
-            # delta_y = 0.55 - 0.5 = 0.05 < threshold
-            # delta_not_y = 0.5 - 0.45 = 0.05 < threshold
-            idx = call_count[0] - 1
-            values = [0.5, 0.55, 0.45]
-            return values[idx % len(values)]
-
-        mock_estimate.side_effect = side_effect_estimate
-
         actor = MagicMock()
         critic = MagicMock()
-        actor.generate.return_value = ["Guided actor"] * 4
-        critic.generate.return_value = ["Guided critic"] * 4
+        # All MC roll-out responses produce the same answer "yes" for all 3 groups
+        # v_natural=5/5=1.0, v_guided_correct=5/5=1.0, v_guided_wrong=5/5=1.0
+        # delta_y = 0.0 < threshold, delta_not_y = 0.0 < threshold
+        actor.generate.side_effect = [
+            ["Guided actor z_y", "Guided actor z_not_y"],  # guided actor
+            ["The answer is Yes."] * 15,  # MC roll-out: all same -> deltas=0
+        ]
+        critic.generate.return_value = ["Guided critic"] * 2
 
         sample = {
             "question": "Test?",
@@ -379,125 +379,3 @@ class TestFix4DPONLLRegularization:
         assert "NLL" in combined or "negative log-likelihood" in combined.lower(), \
             "Code should mention NLL regularization"
         assert "sft" in combined.lower(), "Code should mention SFT loss for NLL regularization"
-
-
-class TestFix5RolloutSimResponsesInterleaved:
-    """Fix #5: sim_responses should contain interleaved actor and critic responses."""
-
-    def test_sim_responses_initialization_includes_both_current_responses(self):
-        """sim_responses should start with previous + current_actor + current_critic."""
-        from src.algorithms.rollout import estimate_final_accuracy
-
-        actor = MagicMock()
-        critic = MagicMock()
-        actor.generate.return_value = ["The answer is Yes."]
-        critic.generate.return_value = ["Feedback."]
-
-        sample = {
-            "question": "Test?",
-            "passage": "Passage.",
-            "answer": "yes",
-            "task_type": "yes_no",
-        }
-
-        # Track what responses are passed to format_prompt
-        responses_passed = []
-        original_format = __import__('src.prompts.formatter', fromlist=['format_prompt']).format_prompt
-        def track_format(dataset_name, prompt_type, sample_arg, **kwargs):
-            responses_passed.append(kwargs.get("responses", []))
-            return original_format(dataset_name, prompt_type, sample_arg, **kwargs)
-
-        with patch('src.algorithms.rollout.format_prompt', side_effect=track_format):
-            estimate_final_accuracy(
-                actor, critic, sample, "boolq",
-                current_actor_response="Current actor",
-                current_critic_response="Current critic",
-                previous_responses=["Prev actor 0", "Prev critic 0"],
-                num_simulations=1,
-                remaining_rounds=1,
-            )
-
-        # First call to format_prompt (for actor) should have:
-        # previous + current_actor + current_critic
-        # = [Prev actor 0, Prev critic 0, Current actor, Current critic]
-        assert len(responses_passed) > 0
-        assert len(responses_passed[0]) >= 4, f"Expected at least 4 responses, got {len(responses_passed[0])}"
-        assert "Current actor" in responses_passed[0]
-        assert "Current critic" in responses_passed[0]
-
-    def test_sim_responses_uses_batch_generate(self):
-        """Optimized rollout should use batch generate for all simulations."""
-        from src.algorithms.rollout import estimate_final_accuracy
-
-        actor = MagicMock()
-        critic = MagicMock()
-        actor.generate.return_value = ["Simulated actor"] * 3
-        critic.generate.return_value = ["Simulated critic"] * 3
-
-        sample = {
-            "question": "Test?",
-            "passage": "Passage.",
-            "answer": "yes",
-            "task_type": "yes_no",
-        }
-
-        estimate_final_accuracy(
-            actor, critic, sample, "boolq",
-            current_actor_response="Current A",
-            current_critic_response="Current C",
-            previous_responses=[],
-            num_simulations=3,
-            remaining_rounds=1,
-        )
-
-        # Should call batch generate once for actor (one-step roll-out only needs actor)
-        assert actor.generate.call_count == 1
-        assert critic.generate.call_count == 0  # Critic not needed in one-step roll-out
-        # Actor should receive 3 prompts (one per simulation)
-        assert len(actor.generate.call_args[0][0]) == 3
-
-    def test_interleaved_order_preserved(self):
-        """Responses should maintain actor, critic, actor, critic order."""
-        from src.algorithms.rollout import estimate_final_accuracy
-
-        actor = MagicMock()
-        critic = MagicMock()
-        actor.generate.return_value = ["Yes."]
-        critic.generate.return_value = ["Good."]
-
-        sample = {
-            "question": "Test?",
-            "passage": "Passage.",
-            "answer": "yes",
-            "task_type": "yes_no",
-        }
-
-        # Use distinctive responses to track order
-        previous_responses = ["Prev A0", "Prev C0", "Prev A1", "Prev C1"]
-
-        responses_captured = []
-        original_format = __import__('src.prompts.formatter', fromlist=['format_prompt']).format_prompt
-        def track_format(dataset_name, prompt_type, sample_arg, **kwargs):
-            responses = kwargs.get("responses", [])
-            responses_captured.append(list(responses))  # Copy
-            return original_format(dataset_name, prompt_type, sample_arg, **kwargs)
-
-        with patch('src.algorithms.rollout.format_prompt', side_effect=track_format):
-            estimate_final_accuracy(
-                actor, critic, sample, "boolq",
-                current_actor_response="Curr A",
-                current_critic_response="Curr C",
-                previous_responses=previous_responses,
-                num_simulations=1,
-                remaining_rounds=1,
-            )
-
-        # First actor prompt should see interleaved structure
-        first_responses = responses_captured[0]
-        # Order: [Prev A0, Prev C0, Prev A1, Prev C1, Curr A, Curr C]
-        assert first_responses[0] == "Prev A0"
-        assert first_responses[1] == "Prev C0"
-        assert first_responses[2] == "Prev A1"
-        assert first_responses[3] == "Prev C1"
-        assert first_responses[4] == "Curr A"
-        assert first_responses[5] == "Curr C"

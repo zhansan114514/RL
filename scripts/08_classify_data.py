@@ -144,12 +144,17 @@ Respond with just the error type and confidence (0-1), e.g., "arithmetic 0.8".""
                 response.raise_for_status()
 
                 result = response.json()["choices"][0]["message"]["content"].strip().lower()
-                parts = result.split()
 
-                if len(parts) >= 2:
-                    return parts[0], float(parts[1])
+                # Robust parsing: extract label and confidence separately
+                # Label: first word matching a known category
+                # Confidence: last number that looks like 0.X
+                label = self._extract_label(result)
+                confidence = self._extract_confidence(result)
+
+                if label:
+                    return label, confidence
                 else:
-                    return result, 0.5
+                    return result.split()[0] if result.split() else "direct", 0.5
 
             except Exception as e:
                 logger.warning(f"API call failed (attempt {attempt + 1}/{self.max_retries}): {e}")
@@ -158,6 +163,32 @@ Respond with just the error type and confidence (0-1), e.g., "arithmetic 0.8".""
                 else:
                     logger.error(f"API call failed after {self.max_retries} attempts, using fallback")
                     return "direct", 0.5
+
+    @staticmethod
+    def _extract_label(text: str) -> str:
+        """Extract a known category label from API response text."""
+        known_styles = {"algebraic", "direct", "backtracking"}
+        known_errors = {"arithmetic", "logic", "hallucination", "verification"}
+        words = text.replace(",", " ").replace(".", " ").split()
+        for w in words:
+            w_lower = w.lower().strip()
+            if w_lower in known_styles or w_lower in known_errors:
+                return w_lower
+        return ""
+
+    @staticmethod
+    def _extract_confidence(text: str) -> float:
+        """Extract a confidence score (0-1 float) from API response text."""
+        import re
+        # Look for patterns like 0.85, .9, 0.9
+        matches = re.findall(r'(?<!\d)(0?\.\d+|1\.0+)(?!\d)', text)
+        if matches:
+            try:
+                val = float(matches[-1])
+                return max(0.0, min(1.0, val))
+            except ValueError:
+                pass
+        return 0.5
 
 
 def parse_args():
@@ -181,9 +212,11 @@ def parse_args():
         allowed_datasets=ALLOWED_DATASETS,
     )
 
-    # CLI override for API key
+    # CLI override for API key, with env var fallback
     if cli_args.api_key:
         args.api_key = cli_args.api_key
+    elif not args.api_key:
+        args.api_key = os.environ.get("GLM_API_KEY", "")
 
     return args
 
@@ -233,6 +266,9 @@ def save_checkpoint(output_dir: str, checkpoint_data: Dict[str, Any]):
 
 
 def main():
+    # Import math answer comparison for robust checking (e.g., "42" == "42.0")
+    from src.algorithms.reward import math_answers_equal
+
     args = parse_args()
 
     # Setup directories
@@ -261,6 +297,11 @@ def main():
 
     # Initialize classifier
     logger.info("[Step 3] Initializing classifier...")
+
+    if not args.api_key:
+        logger.error("API key is required. Set via --api_key or GLM_API_KEY environment variable.")
+        sys.exit(1)
+
     classifier = GLMClassifier(
         api_key=args.api_key,
         api_base=args.api_base,
@@ -301,12 +342,25 @@ def main():
         reasoning_styles = []
         error_types = []
 
+        # Determine task type for proper answer comparison
+        task_type = traj.get("sample", {}).get("task_type", "math")
+
         for resp in final_responses:
             response_text = resp.get("response", "")
             answer = resp.get("answer")
-            correct_answer = traj.get("consensus_answer", "")
+            # Use ground truth from sample, not consensus (consensus may be wrong)
+            correct_answer = traj.get("sample", {}).get("answer", "")
 
-            if answer and answer == correct_answer:
+            # Use math_answers_equal for math tasks to handle "42" == "42.0"
+            if answer:
+                if task_type == "math":
+                    is_correct = math_answers_equal(answer, correct_answer)
+                else:
+                    is_correct = answer.upper() == correct_answer.upper()
+            else:
+                is_correct = False
+
+            if is_correct:
                 # Correct response - classify reasoning style
                 style, conf = classifier.classify_reasoning_style(question, response_text)
                 reasoning_styles.append((style, conf))

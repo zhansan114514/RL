@@ -94,7 +94,7 @@ def _extract_mc(text: str) -> Optional[str]:
     return None
 
 
-def _extract_balanced_braces(text: str, start: int) -> Optional[str]:
+def extract_balanced_braces(text: str, start: int) -> Optional[str]:
     """Extract content inside balanced curly braces starting at position start.
 
     Handles nested braces like \\boxed{\\frac{1}{2}}.
@@ -125,7 +125,7 @@ def _extract_math(text: str) -> Optional[str]:
     for prefix in boxed_prefixes:
         for m in re.finditer(prefix, text):
             brace_start = m.end() - 1  # position of the opening '{'
-            content = _extract_balanced_braces(text, brace_start)
+            content = extract_balanced_braces(text, brace_start)
             if content is not None:
                 return content.strip()
 
@@ -280,7 +280,7 @@ def compute_accuracy_with_ci(
     center = (acc + z**2 / (2 * n)) / denom
     spread = z * np.sqrt(acc * (1 - acc) / n + z**2 / (4 * n**2)) / denom
 
-    margin = min(center - (center - spread), (center + spread) - center)
+    margin = spread
     return acc, margin
 
 

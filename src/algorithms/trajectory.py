@@ -12,10 +12,8 @@ from __future__ import annotations
 
 import logging
 import random
-from typing import Optional
 
 from src.algorithms.deliberation import deliberate, deliberate_batch
-from src.algorithms.rollout import estimate_final_accuracy
 from src.algorithms.reward import compute_reward_delta, extract_answer, normalize_answer
 from src.prompts.templates import PromptType
 from src.prompts.formatter import format_prompt
@@ -415,4 +413,5 @@ def _make_guided_prompt(
             dataset_name, prompt_type, sample,
             target_answer=target_answer,
             actor_response=actor_response,
+            responses=previous_responses,
         )

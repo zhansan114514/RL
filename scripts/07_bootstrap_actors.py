@@ -307,6 +307,11 @@ def main():
     trajectories = []
     output_file = os.path.join(output_dir, "trajectories.jsonl")
 
+    # Delete existing file to avoid duplicate trajectories on re-run
+    if os.path.exists(output_file):
+        logger.warning(f"Deleting existing {output_file} to avoid duplicates")
+        os.remove(output_file)
+
     for idx, sample in enumerate(samples):
         if (idx + 1) % 10 == 0:
             logger.info(f"  Progress: {idx + 1}/{len(samples)}")

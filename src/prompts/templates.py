@@ -189,8 +189,10 @@ MMLU_TEMPLATES = {
     ),
 }
 
-# BBH, SCIQ, ARC share the same structure as MMLU (multiple choice / mixed)
-BBH_TEMPLATES = MMLU_TEMPLATES  # BBH uses mixed types, adapted at runtime
+# BBH, SCIQ, ARC share the same structure as MMLU (multiple choice / mixed).
+# BBH contains yes/no and free-form subtasks, but they are handled at runtime
+# via task_type="mixed" in extract_answer(), not via template specialization.
+BBH_TEMPLATES = MMLU_TEMPLATES
 SCIQ_TEMPLATES = MMLU_TEMPLATES
 ARC_TEMPLATES = MMLU_TEMPLATES
 
@@ -331,7 +333,7 @@ def get_prompt_template(
     Get a prompt template for a specific dataset and type.
 
     Args:
-        dataset_name: One of boolq, mmlu, bbh, sciq, arc.
+        dataset_name: One of boolq, mmlu, bbh, sciq, arc, math, gsm8k.
         prompt_type: Type of prompt to retrieve.
 
     Returns:

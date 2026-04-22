@@ -30,6 +30,9 @@ def create_inference_model(
     gpu_memory_utilization: float | None = None,
     max_model_len: int | None = None,
     dtype: str | None = None,
+    enable_lora: bool = False,
+    max_loras: int = 1,
+    max_lora_rank: int = 256,
 ) -> "VLLMInference":
     """
     Create a VLLMInference instance with config-driven defaults.
@@ -43,15 +46,18 @@ def create_inference_model(
         gpu_memory_utilization: Override for GPU memory fraction.
         max_model_len: Override for max model context length.
         dtype: Override for model dtype.
+        enable_lora: Enable dynamic LoRA adapter loading.
+        max_loras: Max concurrent LoRA adapters (only when enable_lora=True).
+        max_lora_rank: Max LoRA rank (only when enable_lora=True).
 
     Returns:
         VLLMInference instance.
     """
     from src.inference.vllm_server import VLLMInference
 
-    gpu_mem = gpu_memory_utilization or _get_config("inference.gpu_memory_utilization", 0.45)
-    max_len = max_model_len or _get_config("inference.max_model_len", 4096)
-    model_dtype = dtype or _get_config("inference.dtype", "auto")
+    gpu_mem = gpu_memory_utilization if gpu_memory_utilization is not None else _get_config("inference.gpu_memory_utilization", 0.45)
+    max_len = max_model_len if max_model_len is not None else _get_config("inference.max_model_len", 4096)
+    model_dtype = dtype if dtype is not None else _get_config("inference.dtype", "auto")
 
     return VLLMInference(
         model_path,
@@ -59,6 +65,9 @@ def create_inference_model(
         cuda_device=cuda_device,
         dtype=model_dtype,
         max_model_len=max_len,
+        enable_lora=enable_lora,
+        max_loras=max_loras,
+        max_lora_rank=max_lora_rank,
     )
 
 
@@ -70,17 +79,24 @@ def create_model_pair(
     gpu_memory_utilization: float | None = None,
     max_model_len: int | None = None,
     dtype: str | None = None,
+    enable_lora: bool = False,
+    max_loras: int = 1,
+    max_lora_rank: int = 256,
 ) -> tuple["VLLMInference", "VLLMInference"]:
     """Create actor + critic inference models as a pair."""
     actor = create_inference_model(
         actor_path, cuda_device=actor_device,
         gpu_memory_utilization=gpu_memory_utilization,
         max_model_len=max_model_len, dtype=dtype,
+        enable_lora=enable_lora, max_loras=max_loras,
+        max_lora_rank=max_lora_rank,
     )
     critic = create_inference_model(
         critic_path, cuda_device=critic_device,
         gpu_memory_utilization=gpu_memory_utilization,
         max_model_len=max_model_len, dtype=dtype,
+        enable_lora=enable_lora, max_loras=max_loras,
+        max_lora_rank=max_lora_rank,
     )
     return actor, critic
 

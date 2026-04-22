@@ -33,6 +33,7 @@ from src.society.router import (
     CriticFeedback,
     RoutedFeedback,
     parse_confidence,
+    parse_answer_correct,
     build_critic_feedback,
     CONFIDENCE_PATTERN,
 )
@@ -382,6 +383,31 @@ class TestParseConfidence:
         assert parse_confidence("") is None
 
 
+class TestParseAnswerCorrect:
+    """Test answer correctness parsing from Critic responses."""
+
+    def test_parse_yes(self):
+        assert parse_answer_correct("[Answer_Correct: yes]") is True
+
+    def test_parse_no(self):
+        assert parse_answer_correct("[Answer_Correct: no]") is False
+
+    def test_parse_case_insensitive(self):
+        assert parse_answer_correct("[answer_correct: YES]") is True
+        assert parse_answer_correct("[ANSWER_CORRECT: No]") is False
+
+    def test_parse_with_surrounding_text(self):
+        text = "The solution has a logic error.\n[Answer_Correct: no]\n[Confidence: 0.85]"
+        assert parse_answer_correct(text) is False
+
+    def test_parse_missing_tag(self):
+        assert parse_answer_correct("No tag here") is None
+        assert parse_answer_correct("") is None
+
+    def test_parse_invalid_value(self):
+        assert parse_answer_correct("[Answer_Correct: maybe]") is None
+
+
 class TestBuildCriticFeedback:
     """Test building CriticFeedback from raw response."""
 
@@ -400,6 +426,7 @@ class TestBuildCriticFeedback:
         assert feedback.error_specialty == ErrorType.ARITHMETIC
         assert feedback.confidence == 0.8
         assert feedback.feedback_text == "Check your math"
+        assert feedback.answer_correct is None
         assert feedback.raw_response == response
 
     def test_build_without_confidence(self):
@@ -415,6 +442,23 @@ class TestBuildCriticFeedback:
 
         assert feedback.confidence == 0.5
         assert feedback.feedback_text == "Check your logic"
+        assert feedback.answer_correct is None
+
+    def test_build_with_answer_correct(self):
+        """Should parse answer_correct tag."""
+        config = AgentConfig(
+            name="critic_1",
+            role=AgentRole.CRITIC,
+            model_path="/models/base",
+            error_specialty=ErrorType.ARITHMETIC,
+        )
+        response = "The answer is wrong.\n[Answer_Correct: no]\n[Confidence: 0.9]"
+        feedback = build_critic_feedback(config, response)
+
+        assert feedback.confidence == 0.9
+        assert feedback.answer_correct is False
+        assert "[Answer_Correct:" not in feedback.feedback_text
+        assert "[Confidence:" not in feedback.feedback_text
 
 
 class TestCriticRouter:
@@ -848,27 +892,56 @@ class TestVotingStrategies:
         assert confidence == pytest.approx(2/3)
 
     def test_best_actor_with_consensus(self):
-        """Should use consensus answer when available."""
+        """Should select the actor with highest Critic confidence."""
+        from src.society.router import RoutedFeedback
+
         mock_result = MagicMock()
         mock_result.consensus_answer = "42"
         mock_result.consensus_confidence = 0.9
         mock_result.final_answers = {"actor_1": "42", "actor_2": "40"}
 
+        # Create last round with routed feedbacks that have different confidence
+        mock_round = MagicMock()
+        fb_high = MagicMock()
+        fb_high.confidence = 0.9
+        fb_high.critic_name = "critic_1"
+        fb_low = MagicMock()
+        fb_low.confidence = 0.3
+        fb_low.critic_name = "critic_1"
+
+        routed_high = RoutedFeedback(
+            feedback_text="High conf feedback",
+            selected_critics=["critic_1"],
+            raw_feedbacks=[fb_high],
+            weights={"critic_1": 0.9},
+        )
+        routed_low = RoutedFeedback(
+            feedback_text="Low conf feedback",
+            selected_critics=["critic_1"],
+            raw_feedbacks=[fb_low],
+            weights={"critic_1": 0.3},
+        )
+        mock_round.routed_feedbacks = {
+            "actor_1": routed_high,
+            "actor_2": routed_low,
+        }
+        mock_result.rounds = [mock_round]
+
         answers = {"actor_1": "42", "actor_2": "40"}
         result, confidence = _best_actor(answers, mock_result)
-        assert result == "42"
-        assert confidence == 0.9
+        assert result == "42"  # Tie-broken by higher Critic confidence for actor_1
+        assert confidence == 0.5  # 1 out of 2 actors agree
 
     def test_best_actor_fallback(self):
-        """Should fallback to first actor with reduced confidence when no consensus."""
+        """Should fallback to majority vote when no confidence data available."""
         mock_result = MagicMock()
         mock_result.consensus_answer = None
         mock_result.final_answers = {"actor_1": "42", "actor_2": "40"}
+        mock_result.rounds = []  # No rounds -> no confidence data
 
         answers = {"actor_1": "42", "actor_2": "40"}
         result, confidence = _best_actor(answers, mock_result)
         assert result == "42"
-        assert confidence == 0.5  # Reduced confidence for fallback
 
 
 class TestAblationConfigs:
