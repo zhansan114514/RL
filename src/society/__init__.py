@@ -43,6 +43,7 @@ from src.society.data_classifier import (
     classify_error_type,
     check_api_available,
 )
+from src.society.diversity_split import DiversitySplit
 from src.society.society_trainer import (
     society_alternating_train,
     SocietyTrainingResult,
@@ -80,6 +81,8 @@ __all__ = [
     "classify_reasoning_style",
     "classify_error_type",
     "check_api_available",
+    # Diversity Split
+    "DiversitySplit",
     # Society Trainer
     "society_alternating_train",
     "SocietyTrainingResult",

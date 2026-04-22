@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from _utils import load_yaml_config, setup_logging
+from _utils import resolve_config, setup_logging
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -175,26 +175,17 @@ def parse_args():
     )
     cli_args = parser.parse_args()
 
-    # Load config
-    cfg = load_yaml_config(cli_args.config)
-    common_cfg = cfg.get("common", {})
-    step_cfg = cfg.get("step02_classify", {})
-
-    merged = dict(STEP_DEFAULTS)
-    for key in COMMON_KEYS:
-        if key in common_cfg and common_cfg[key] is not None:
-            merged[key] = common_cfg[key]
-    for key in STEP_DEFAULTS:
-        if key in step_cfg and step_cfg[key] is not None:
-            merged[key] = step_cfg[key]
+    args = resolve_config(
+        cli_args.config, "step02_classify", STEP_DEFAULTS,
+        common_keys=COMMON_KEYS,
+        allowed_datasets=ALLOWED_DATASETS,
+    )
 
     # CLI override for API key
     if cli_args.api_key:
-        merged["api_key"] = cli_args.api_key
+        args.api_key = cli_args.api_key
 
-    merged["config"] = cli_args.config
-
-    return argparse.Namespace(**merged)
+    return args
 
 
 def load_trajectories(input_dir: str) -> List[Dict]:

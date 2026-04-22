@@ -40,7 +40,7 @@ STEP_DEFAULTS = {
     "cache_dir": "output/society",
     "input_dir": "output/society/classified",
     "output_dir": "output/society/actors",
-    "thinking_styles": ["algebraic", "direct", "backtracking"],
+    "reasoning_styles": ["algebraic", "direct", "backtracking"],
     "lora_r": 256,
     "lora_alpha": 512,
     "learning_rate": 5e-5,
@@ -285,7 +285,7 @@ def main():
     logger.info(f"  Model: {args.model_name}")
     logger.info(f"  Input dir: {input_dir}")
     logger.info(f"  Output dir: {output_dir}")
-    logger.info(f"  Thinking styles: {args.thinking_styles}")
+    logger.info(f"  Reasoning styles: {args.reasoning_styles}")
     logger.info("=" * 60)
 
     # Load classified data
@@ -302,7 +302,7 @@ def main():
 
     actor_paths = {}
 
-    for thinking_style in args.thinking_styles:
+    for thinking_style in args.reasoning_styles:
         logger.info(f"\n--- Training Actor: {thinking_style} ---")
 
         # Build preference pairs for this style

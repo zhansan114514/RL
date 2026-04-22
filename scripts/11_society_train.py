@@ -248,6 +248,7 @@ def main():
         num_simulations=args.num_simulations,
         reward_threshold=args.reward_threshold,
         lora_r=args.lora_r,
+        lora_alpha=args.lora_alpha,
         learning_rate=args.learning_rate,
         batch_size=args.batch_size,
         num_epochs=args.num_epochs,

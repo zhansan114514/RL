@@ -234,6 +234,33 @@ def _build_agent_configs(
     return actor_configs, critic_configs, lora_paths
 
 
+def _build_base_agent_configs():
+    """Build generic AgentConfigs WITHOUT LoRA for the A1 baseline.
+
+    This represents the true ACC-Collab baseline: untrained base model
+    acting as a single Actor and single Critic.
+    """
+    from src.society.agent_registry import AgentConfig, AgentRole, ReasoningStyle, ErrorType
+
+    actor_config = AgentConfig(
+        name="base_actor",
+        role=AgentRole.ACTOR,
+        reasoning_style=ReasoningStyle.DIRECT,
+        model_path="Qwen/Qwen2.5-7B-Instruct",
+        lora_path="",  # No LoRA — pure base model
+        system_prompt="",
+    )
+    critic_config = AgentConfig(
+        name="base_critic",
+        role=AgentRole.CRITIC,
+        error_specialty=ErrorType.LOGIC,
+        model_path="Qwen/Qwen2.5-7B-Instruct",
+        lora_path="",  # No LoRA — pure base model
+        system_prompt="",
+    )
+    return [actor_config], [critic_config], {}
+
+
 def _run_deliberation_on_samples(
     engine,
     actor_configs,
@@ -259,6 +286,8 @@ def _run_deliberation_on_samples(
     all_initial_answers = []
     all_responses = []
     details = []
+    # Track per-round consensus answers for per-round accuracy
+    per_round_answers: Dict[int, List[str]] = {r: [] for r in range(num_rounds)}
 
     for si, sample in enumerate(samples):
         if (si + 1) % 5 == 0 or si == 0:
@@ -280,6 +309,13 @@ def _run_deliberation_on_samples(
         final_answer = result.consensus_answer or ""
         all_final_answers.append(final_answer)
         all_responses.append(final_answer)
+
+        # Collect per-round consensus answers
+        for rnd in result.rounds:
+            if rnd.round_num in per_round_answers:
+                per_round_answers[rnd.round_num].append(
+                    rnd.consensus_answer or final_answer
+                )
 
         # Compute initial answer as majority vote across all actors (not just first)
         initial_answer = final_answer
@@ -307,10 +343,19 @@ def _run_deliberation_on_samples(
     final_acc, ci_margin = _compute_ci(all_final_answers, labels, task_type)
     ci_95 = (max(0, final_acc - ci_margin), min(1, final_acc + ci_margin))
 
+    # Compute true per-round accuracy from consensus answers
+    round_accs = []
+    for r in range(num_rounds):
+        if per_round_answers[r]:
+            acc, _ = _compute_ci(per_round_answers[r], labels[:len(per_round_answers[r])], task_type)
+            round_accs.append(acc)
+    if not round_accs:
+        round_accs = [initial_acc, final_acc]
+
     return EvalResult(
         initial_accuracy=initial_acc,
         final_accuracy=final_acc,
-        per_round_accuracy=[initial_acc, final_acc],
+        per_round_accuracy=round_accs,
         improvement_rate=(final_acc - initial_acc) / initial_acc if initial_acc > 0 else 0.0,
         absolute_improvement=final_acc - initial_acc,
         consensus_accuracy=final_acc,
@@ -359,12 +404,9 @@ def run_all_evaluations(
     try:
         if run_ablations:
             # A1: 1 Actor + 1 Critic (baseline ACC-Collab)
-            logger.info("[A1] 1 Actor + 1 Critic (baseline)...")
-            a_configs, c_configs, lora = _build_agent_configs(
-                registry,
-                actor_names=all_actor_names[:1],
-                critic_names=all_critic_names[:1],
-            )
+            # Use base model WITHOUT LoRA — true untrained baseline
+            logger.info("[A1] 1 Actor + 1 Critic (baseline, no LoRA)...")
+            a_configs, c_configs, lora = _build_base_agent_configs()
             results["A1_baseline"] = _run_deliberation_on_samples(
                 engine, a_configs, c_configs, samples, dataset_name,
                 lora, num_rounds, max_tokens, temperature,

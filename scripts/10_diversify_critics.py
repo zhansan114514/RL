@@ -112,7 +112,7 @@ def build_critic_preference_pairs(
 
     preference_pairs = []
 
-    # Filter samples with this error type
+    # Filter samples with this error type (core of data-level diversification)
     error_samples = [
         r for r in classified_results
         if r.get("error_type") == error_type
@@ -120,12 +120,23 @@ def build_critic_preference_pairs(
 
     logger.info(f"  Found {len(error_samples)} samples for error type '{error_type}'")
 
-    # Use all samples to build critic pairs (fallback for small datasets)
-    all_samples = classified_results
+    # Only use error-type-filtered samples so each Critic specializes on its error domain
+    # Fallback to untyped samples when no explicit labels exist (not to ALL samples)
+    if not error_samples:
+        untyped = [r for r in classified_results if not r.get("error_type")]
+        if untyped:
+            logger.warning(
+                f"  No typed samples for '{error_type}', "
+                f"using {len(untyped)} untyped samples as fallback"
+            )
+            error_samples = untyped
+        else:
+            logger.warning(f"  No samples available for error type '{error_type}'")
+            return []
 
     # Collect candidate responses for LLM feedback generation
     candidates = []
-    for result in all_samples:
+    for result in error_samples:
         sample_id = result["sample_id"]
 
         if sample_id not in trajectories:
@@ -327,7 +338,6 @@ def main():
 
     # Load trajectories
     logger.info("[Step 2] Loading bootstrap trajectories...")
-    from scripts._utils import load_yaml_config
 
     # Load trajectories directly
     bootstrap_dir = os.path.join(args.cache_dir, "bootstrap")
