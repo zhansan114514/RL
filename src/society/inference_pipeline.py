@@ -99,10 +99,6 @@ def society_inference(
 
     # Run multi-agent deliberation
     router = CriticRouter(top_k=router_top_k, uniform_weights=router_uniform)
-    frame = inspect.currentframe()
-    uniform_weights = frame.f_locals.get('router_uniform', False) if frame else False
-
-    router = CriticRouter(top_k=router_top_k, uniform_weights=uniform_weights)
     result = multi_agent_deliberate_single_gpu(
         inference_engine=inference_engine,
         actors=actors,

@@ -534,7 +534,7 @@ def main():
                 for name, r in ablation_results.items()
             },
             "total_eval_time_seconds": total_time,
-            "sample_details": first_result.sample_details if first_result else [],
+            "sample_details": ablation_results.get("A5_full_system", first_result).sample_details if (ablation_results.get("A5_full_system") or first_result) else [],
         }, f, indent=2)
 
     logger.info(f"  Results saved: {results_file}")

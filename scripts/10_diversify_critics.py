@@ -89,27 +89,6 @@ def load_classified_data(input_dir: str) -> Dict[str, Any]:
     return data
 
 
-def load_actor_registry(actor_dir: str) -> Dict[str, str]:
-    """Load actor registry."""
-    registry_file = os.path.join(actor_dir, "actor_registry.json")
-
-    if not os.path.exists(registry_file):
-        raise FileNotFoundError(f"Actor registry not found: {registry_file}")
-
-    with open(registry_file) as f:
-        data = json.load(f)
-
-    # Extract model paths
-    actor_paths = {
-        style: info["model_path"]
-        for style, info in data["actors"].items()
-    }
-
-    logger.info(f"Loaded {len(actor_paths)} actors from registry")
-
-    return actor_paths
-
-
 def build_critic_preference_pairs(
     classified_results: List[Dict],
     trajectories: Dict[str, Any],
@@ -363,18 +342,8 @@ def main():
                     trajectories[traj["sample_id"]] = traj
         logger.info(f"  Loaded {len(trajectories)} trajectories")
 
-    # Load first actor
-    logger.info("[Step 3] Loading first diversified actor...")
-    actor_paths = load_actor_registry(args.actor_dir)
-
-    # Get first available actor
-    first_actor_style = next(iter(actor_paths))
-    first_actor_path = actor_paths[first_actor_style]
-
-    logger.info(f"  Using actor: {first_actor_style} -> {first_actor_path}")
-
     # Train each critic
-    logger.info("[Step 4] Training specialized critics...")
+    logger.info("[Step 3] Training specialized critics...")
 
     critic_paths = {}
 
@@ -417,7 +386,7 @@ def main():
         critic_paths[error_type] = checkpoint_path
 
     # Save critic registry
-    logger.info("\n[Step 6] Saving critic registry...")
+    logger.info("\n[Step 4] Saving critic registry...")
 
     registry_file = os.path.join(output_dir, "critic_registry.json")
     with open(registry_file, "w") as f:

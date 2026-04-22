@@ -63,9 +63,10 @@ def generate_trajectories(
             positive, negative, round, delta, sample_idx
     """
     rng = random.Random(seed)
+    task_type = sample.get("task_type", "yes_no")
 
     correct_answer = sample.get("answer", "")
-    wrong_answer = generate_wrong_answer(correct_answer, sample.get("choices"), rng=rng)
+    wrong_answer = generate_wrong_answer(correct_answer, sample.get("choices"), task_type=task_type, rng=rng)
 
     preference_pairs = []
 
@@ -151,14 +152,13 @@ def generate_trajectories(
         )
 
         # Parse results back into 3 groups
-        task_type = sample.get("task_type", "yes_no")
-        correct_norm = normalize_answer(correct_answer)
+        correct_norm = normalize_answer(correct_answer, task_type=task_type)
 
         def _count_correct(responses_slice):
             count = 0
             for resp in responses_slice:
                 ans = extract_answer(resp, task_type)
-                if normalize_answer(ans or "") == correct_norm:
+                if normalize_answer(ans or "", task_type=task_type) == correct_norm:
                     count += 1
             return count / len(responses_slice) if responses_slice else 0.0
 
@@ -260,8 +260,9 @@ def generate_trajectories_batch(
         for i, (sample, natural_trajectory) in enumerate(zip(batch, trajectories)):
             rng = random.Random(seed + batch_start + i)
             correct_answer = sample.get("answer", "")
+            task_type = sample.get("task_type", "yes_no")
             wrong_answer = generate_wrong_answer(
-                correct_answer, sample.get("choices"), rng=rng,
+                correct_answer, sample.get("choices"), task_type=task_type, rng=rng,
             )
 
             for t in range(1, len(natural_trajectory)):
@@ -331,14 +332,13 @@ def generate_trajectories_batch(
                     temperature=temperature,
                 )
 
-                task_type = sample.get("task_type", "yes_no")
-                correct_norm = normalize_answer(correct_answer)
+                correct_norm = normalize_answer(correct_answer, task_type=task_type)
 
                 def _count_correct(responses_slice):
                     count = 0
                     for resp in responses_slice:
                         ans = extract_answer(resp, task_type)
-                        if normalize_answer(ans or "") == correct_norm:
+                        if normalize_answer(ans or "", task_type=task_type) == correct_norm:
                             count += 1
                     return count / len(responses_slice) if responses_slice else 0.0
 

@@ -34,14 +34,14 @@ from src.society.multi_deliberation import (
     multi_agent_deliberate,
     multi_agent_deliberate_single_gpu,
     MultiDeliberationResult,
+    DeliberationRound,
 )
 from src.society.data_classifier import (
     DataClassifier,
+    ClassificationError,
     classify_reasoning_style,
     classify_error_type,
-)
-from src.society.diversity_split import (
-    DiversitySplit,
+    check_api_available,
 )
 from src.society.society_trainer import (
     society_alternating_train,
@@ -50,6 +50,8 @@ from src.society.society_trainer import (
 from src.society.inference_pipeline import (
     society_inference,
     InferenceResult,
+    run_ablation,
+    ABLATION_CONFIGS,
 )
 
 __all__ = [
@@ -71,16 +73,19 @@ __all__ = [
     "multi_agent_deliberate",
     "multi_agent_deliberate_single_gpu",
     "MultiDeliberationResult",
+    "DeliberationRound",
     # Data Classifier
     "DataClassifier",
+    "ClassificationError",
     "classify_reasoning_style",
     "classify_error_type",
-    # Diversity Split
-    "DiversitySplit",
+    "check_api_available",
     # Society Trainer
     "society_alternating_train",
     "SocietyTrainingResult",
     # Inference Pipeline
     "society_inference",
     "InferenceResult",
+    "run_ablation",
+    "ABLATION_CONFIGS",
 ]

@@ -1,8 +1,9 @@
 """
 Data classifier for categorizing reasoning styles and error types.
 
-Uses GLM4.5 API for accurate classification with local caching and
-fallback to heuristic rules when API is unavailable.
+Uses GLM API for accurate classification with local caching.
+Raises ClassificationError when API is required but unavailable,
+instead of silently falling back to unreliable heuristics.
 
 From experiment plan:
 - Reasoning styles (for correct responses): ALGEBRAIC, DIRECT, BACKTRACKING
@@ -21,6 +22,15 @@ from typing import Optional
 from src.society.agent_registry import ReasoningStyle, ErrorType
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# Exceptions
+# ============================================================
+
+class ClassificationError(Exception):
+    """Raised when classification fails (API unavailable, parse error, etc.)."""
+    pass
 
 
 # ============================================================
@@ -83,6 +93,55 @@ Respond with only the category name."""
 
 
 # ============================================================
+# API availability check
+# ============================================================
+
+def check_api_available(
+    api_url: str = DEFAULT_API_URL,
+    api_key: str = DEFAULT_API_KEY,
+) -> tuple[bool, str]:
+    """Check if the GLM API is reachable and the key is configured.
+
+    Returns:
+        (available, reason) tuple.  `available` is True when the API
+        can be used for classification.  `reason` describes the problem
+        when unavailable.
+    """
+    if not api_key:
+        return False, "GLM_API_KEY environment variable is not set"
+    try:
+        import requests
+    except ImportError:
+        return False, "requests package is not installed"
+
+    try:
+        resp = requests.post(
+            api_url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": DEFAULT_API_MODEL,
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+            },
+            timeout=15,
+        )
+        # Accept both 200 (success) and 4xx (auth/rate-limit but server is reachable)
+        # A connection error would have thrown before this point.
+        if resp.status_code == 401:
+            return False, f"API key is invalid (HTTP 401)"
+        return True, ""
+    except requests.exceptions.ConnectionError as e:
+        return False, f"Cannot connect to API: {e}"
+    except requests.exceptions.Timeout:
+        return False, "API connection timed out"
+    except Exception as e:
+        return False, f"API check failed: {e}"
+
+
+# ============================================================
 # API call with retry
 # ============================================================
 
@@ -91,14 +150,24 @@ def _call_api(
     api_url: str = DEFAULT_API_URL,
     api_key: str = DEFAULT_API_KEY,
     model: str = DEFAULT_API_MODEL,
-) -> Optional[str]:
-    """Call GLM API for classification (OpenAI-compatible endpoint)."""
+) -> str:
+    """Call GLM API for classification (OpenAI-compatible endpoint).
+
+    Raises ClassificationError on any failure instead of silently
+    returning None.
+    """
     if not api_key:
-        logger.warning("GLM_API_KEY not set, falling back to heuristic classification")
-        return None
+        raise ClassificationError(
+            "GLM_API_KEY not set. Set it via: export GLM_API_KEY=your_key"
+        )
     try:
         import requests
+    except ImportError:
+        raise ClassificationError(
+            "requests package not installed. Install via: pip install requests"
+        )
 
+    try:
         response = requests.post(
             api_url,
             headers={
@@ -116,12 +185,16 @@ def _call_api(
         response.raise_for_status()
         result = response.json()["choices"][0]["message"]["content"].strip()
         return result
-    except ImportError:
-        logger.warning("requests package not installed, falling back to heuristic")
-        return None
+    except requests.exceptions.ConnectionError as e:
+        raise ClassificationError(f"Cannot connect to API: {e}") from e
+    except requests.exceptions.Timeout:
+        raise ClassificationError("API request timed out")
+    except requests.exceptions.HTTPError as e:
+        raise ClassificationError(f"API HTTP error: {e}") from e
+    except (KeyError, IndexError) as e:
+        raise ClassificationError(f"Unexpected API response format: {e}") from e
     except Exception as e:
-        logger.warning(f"API call failed: {e}, falling back to heuristic")
-        return None
+        raise ClassificationError(f"API call failed: {e}") from e
 
 
 # ============================================================
@@ -195,12 +268,14 @@ def classify_reasoning_style(
     """
     Classify the reasoning style of a correct response.
 
-    Uses GLM4.5 API with local caching, falls back to heuristic.
+    Uses GLM API with local caching.
+    Raises ClassificationError if use_api=True but API is unavailable
+    and no cached result exists.
     """
     sample_hash = _compute_sample_hash(question, response)
     cache_path = Path(cache_dir) / f"style_{sample_hash}.json"
 
-    # Check cache
+    # Check cache first (always succeeds regardless of API)
     cached = _load_cache(cache_path)
     if cached:
         return ReasoningStyleResult(
@@ -229,9 +304,15 @@ def classify_reasoning_style(
                 style=style, confidence=0.9, raw_response=api_response or ""
             )
 
-    # Heuristic fallback
-    style = _heuristic_style_classify(response)
-    return ReasoningStyleResult(style=style, confidence=0.5, raw_response="(heuristic)")
+        # API responded but we couldn't parse it
+        raise ClassificationError(
+            f"Could not parse reasoning style from API response: {api_response!r}"
+        )
+
+    raise ClassificationError(
+        "API classification is required (use_api=False is not supported). "
+        "Set GLM_API_KEY to enable API-based classification."
+    )
 
 
 def classify_error_type(
@@ -245,12 +326,14 @@ def classify_error_type(
     """
     Classify the error type of an incorrect response.
 
-    Uses GLM4.5 API with local caching, falls back to heuristic.
+    Uses GLM API with local caching.
+    Raises ClassificationError if use_api=True but API is unavailable
+    and no cached result exists.
     """
     sample_hash = _compute_sample_hash(question, response)
     cache_path = Path(cache_dir) / f"error_{sample_hash}.json"
 
-    # Check cache
+    # Check cache first
     cached = _load_cache(cache_path)
     if cached:
         return ErrorTypeResult(
@@ -280,43 +363,14 @@ def classify_error_type(
                 error_type=error_type, confidence=0.9, raw_response=api_response or ""
             )
 
-    # Heuristic fallback
-    error_type = _heuristic_error_classify(response)
-    return ErrorTypeResult(error_type=error_type, confidence=0.5, raw_response="(heuristic)")
+        raise ClassificationError(
+            f"Could not parse error type from API response: {api_response!r}"
+        )
 
-
-# ============================================================
-# Heuristic fallbacks
-# ============================================================
-
-def _heuristic_style_classify(response: str) -> ReasoningStyle:
-    """Heuristic reasoning style classification."""
-    lower = response.lower()
-    algebraic_kw = ["let x", "let y", "equation", "variable", "substitut",
-                     "system of equations", "algebraic", "symbolic"]
-    backtracking_kw = ["verify", "check", "incorrect", "wrong", "let me try",
-                        "actually", "instead", "revise", "retry"]
-
-    a_score = sum(1 for kw in algebraic_kw if kw in lower)
-    b_score = sum(1 for kw in backtracking_kw if kw in lower)
-
-    if a_score > b_score and a_score > 0:
-        return ReasoningStyle.ALGEBRAIC
-    elif b_score > 0:
-        return ReasoningStyle.BACKTRACKING
-    return ReasoningStyle.DIRECT
-
-
-def _heuristic_error_classify(response: str) -> ErrorType:
-    """Heuristic error type classification."""
-    lower = response.lower()
-    if any(kw in lower for kw in ["fabricat", "invent", "wrong theorem", "unsupported"]):
-        return ErrorType.HALLUCINATION
-    if any(kw in lower for kw in ["logical fallacy", "non sequitur", "wrong approach"]):
-        return ErrorType.LOGIC
-    if any(kw in lower for kw in ["check", "verify", "self-check", "should have"]):
-        return ErrorType.VERIFICATION
-    return ErrorType.ARITHMETIC
+    raise ClassificationError(
+        "API classification is required (use_api=False is not supported). "
+        "Set GLM_API_KEY to enable API-based classification."
+    )
 
 
 # ============================================================

@@ -116,6 +116,20 @@ def _load_json(path: Path) -> Optional[dict]:
 # LoRA management
 # ============================================================
 
+# Stable LoRA ID assignment: deterministic mapping from path to integer
+_LORA_ID_COUNTER: int = 0
+_LORA_ID_CACHE: dict[str, int] = {}
+
+
+def _get_stable_lora_id(lora_path: str) -> int:
+    """Get a stable, unique integer ID for a LoRA path."""
+    global _LORA_ID_COUNTER, _LORA_ID_CACHE
+    if lora_path not in _LORA_ID_CACHE:
+        _LORA_ID_COUNTER += 1
+        _LORA_ID_CACHE[lora_path] = _LORA_ID_COUNTER
+    return _LORA_ID_CACHE[lora_path]
+
+
 def _load_lora_adapter(engine: Any, lora_path: str) -> Optional[str]:
     """Load a LoRA adapter into the vLLM engine.
 
@@ -129,10 +143,10 @@ def _load_lora_adapter(engine: Any, lora_path: str) -> Optional[str]:
         return None
     try:
         from vllm import LoRARequest
-        import os
-        # Use directory name as a stable lora_id
+        # Use directory name as a stable identifier
         lora_name = Path(lora_path).name or "adapter"
-        lora_request = LoRARequest(lora_name, lora_id=hash(lora_name) % 10000, lora_path=lora_path)
+        lora_id = _get_stable_lora_id(lora_path)
+        lora_request = LoRARequest(lora_name, lora_id=lora_id, lora_path=lora_path)
         return lora_request
     except (ImportError, Exception) as e:
         logger.debug(f"LoRA request creation failed for {lora_path}: {e}")

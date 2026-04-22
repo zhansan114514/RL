@@ -19,15 +19,13 @@ import gc
 import json
 import logging
 import os
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
 from src.society.agent_registry import AgentRegistry, AgentConfig, AgentRole, ReasoningStyle, ErrorType
-from src.society.diversity_split import DiversitySplit
 from src.society.data_classifier import classify_error_type, classify_reasoning_style
-from src.algorithms.reward import extract_answer, math_answers_equal
+from src.algorithms.reward import extract_answer, math_answers_equal, normalize_answer
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +161,7 @@ def society_alternating_train(
                 critic=critic,
                 dataset=dataset,
                 dataset_name=dataset_name,
+                registry=registry,
                 device=device,
                 dtype=dtype,
                 gpu_memory_utilization=gpu_memory_utilization,
@@ -388,6 +387,7 @@ def _build_critic_preference_pairs(
     critic: AgentConfig,
     dataset: list[dict],
     dataset_name: str,
+    registry: AgentRegistry,
     device: int,
     dtype: str,
     gpu_memory_utilization: float,
@@ -408,7 +408,7 @@ def _build_critic_preference_pairs(
 
     preference_pairs = []
     specialty = critic.error_specialty
-    model_name = "Qwen/Qwen2.5-7B-Instruct"
+    model_name = registry.base_model_path or "Qwen/Qwen2.5-7B-Instruct"
 
     # Collect samples with errors matching this critic's specialty
     error_samples = []
@@ -431,7 +431,6 @@ def _build_critic_preference_pairs(
                 if task_type == "math":
                     is_correct = math_answers_equal(actor_answer or "", correct_answer)
                 else:
-                    from src.algorithms.reward import normalize_answer
                     is_correct = normalize_answer(actor_answer, task_type) == normalize_answer(correct_answer, task_type)
 
                 if not is_correct:
@@ -570,7 +569,6 @@ def _build_all_actor_preference_pairs(
                 if task_type == "math":
                     is_correct = math_answers_equal(extracted_answer or "", correct_answer)
                 else:
-                    from src.algorithms.reward import normalize_answer
                     is_correct = normalize_answer(extracted_answer or "", task_type) == normalize_answer(correct_answer, task_type)
 
                 if is_correct:

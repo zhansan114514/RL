@@ -17,7 +17,7 @@ from typing import Optional
 import numpy as np
 
 from src.society.agent_registry import ReasoningStyle, ErrorType
-from src.society.data_classifier import classify_reasoning_style, classify_error_type
+from src.society.data_classifier import classify_reasoning_style, classify_error_type, ClassificationError
 
 logger = logging.getLogger(__name__)
 
@@ -70,14 +70,18 @@ class DiversitySplit:
             answer = answers[i] if answers and i < len(answers) else sample.get("answer", "")
 
             if response:
-                result = classify_reasoning_style(
-                    response=response,
-                    question=question,
-                    correct_answer=answer,
-                    use_api=self.use_api,
-                    cache_dir=self.cache_dir,
-                )
-                style = result.style
+                try:
+                    result = classify_reasoning_style(
+                        response=response,
+                        question=question,
+                        correct_answer=answer,
+                        use_api=self.use_api,
+                        cache_dir=self.cache_dir,
+                    )
+                    style = result.style
+                except ClassificationError as e:
+                    logger.warning(f"Classification failed, using round-robin: {e}")
+                    style = list(ReasoningStyle)[i % len(ReasoningStyle)]
             else:
                 # Round-robin assignment if no responses available
                 style = list(ReasoningStyle)[i % len(ReasoningStyle)]
@@ -122,15 +126,20 @@ class DiversitySplit:
             correct = correct_answers[i] if correct_answers and i < len(correct_answers) else sample.get("answer", "")
             extracted = extracted_answers[i] if extracted_answers and i < len(extracted_answers) else ""
 
-            result = classify_error_type(
-                response=response,
-                question=question,
-                extracted_answer=extracted,
-                correct_answer=correct,
-                use_api=self.use_api,
-                cache_dir=self.cache_dir,
-            )
-            splits[result.error_type].append((sample, response))
+            try:
+                result = classify_error_type(
+                    response=response,
+                    question=question,
+                    extracted_answer=extracted,
+                    correct_answer=correct,
+                    use_api=self.use_api,
+                    cache_dir=self.cache_dir,
+                )
+                splits[result.error_type].append((sample, response))
+            except ClassificationError as e:
+                logger.warning(f"Error classification failed, using round-robin: {e}")
+                error_type = list(ErrorType)[i % len(ErrorType)]
+                splits[error_type].append((sample, response))
 
         if self.balance:
             splits = self._balance_splits(splits)

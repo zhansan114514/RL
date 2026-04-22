@@ -55,7 +55,8 @@ def estimate_final_accuracy(
     Returns:
         Estimated accuracy (float in [0, 1]).
     """
-    correct_answer = normalize_answer(sample.get("answer", ""))
+    task_type = sample.get("task_type", "yes_no")
+    correct_answer = normalize_answer(sample.get("answer", ""), task_type=task_type)
     if not correct_answer:
         return 0.0
 
@@ -78,11 +79,10 @@ def estimate_final_accuracy(
     )
 
     # Count correct answers from actor responses
-    task_type = sample.get("task_type", "yes_no")
     correct_count = 0
     for sim_actor_resp in sim_actor_resps:
         final_answer = extract_answer(sim_actor_resp, task_type)
-        if normalize_answer(final_answer or "") == correct_answer:
+        if normalize_answer(final_answer or "", task_type=task_type) == correct_answer:
             correct_count += 1
 
     return correct_count / num_simulations

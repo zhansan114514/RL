@@ -4,7 +4,7 @@ Comprehensive tests for Phase 0 Society module.
 Tests cover:
 1. agent_registry.py - AgentRegistry, AgentConfig, enums
 2. router.py - CriticRouter, parse_confidence, build_critic_feedback
-3. data_classifier.py - DataClassifier, API/heuristic classification
+3. data_classifier.py - DataClassifier, API classification, ClassificationError
 4. diversity_split.py - DiversitySplit, style/error type splitting
 5. inference_pipeline.py - InferencePipeline, voting strategies, ABLATION_CONFIGS
 6. Phase 0.1 integration - MATH/GSM answer extraction
@@ -38,10 +38,10 @@ from src.society.router import (
 )
 from src.society.data_classifier import (
     DataClassifier,
+    ClassificationError,
     classify_reasoning_style,
     classify_error_type,
-    _heuristic_style_classify,
-    _heuristic_error_classify,
+    check_api_available,
     _parse_style_response,
     _parse_error_response,
     _compute_sample_hash,
@@ -524,53 +524,67 @@ class TestCriticRouter:
 # 3. data_classifier.py Tests
 # ============================================================
 
-class TestHeuristicStyleClassify:
-    """Test heuristic reasoning style classification."""
+class TestClassificationError:
+    """Test that ClassificationError is raised when API is unavailable."""
 
-    def test_algebraic_keywords(self):
-        """Should classify as ALGEBRAIC for algebraic keywords."""
-        response = "Let x = 5 and solve the equation for y"
-        assert _heuristic_style_classify(response) == ReasoningStyle.ALGEBRAIC
+    def test_style_raises_when_no_api_key(self):
+        """Should raise ClassificationError when GLM_API_KEY is not set."""
+        with patch("src.society.data_classifier.DEFAULT_API_KEY", ""):
+            with patch("src.society.data_classifier._compute_sample_hash", return_value="unique_hash"):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    with pytest.raises(ClassificationError, match="GLM_API_KEY"):
+                        classify_reasoning_style(
+                            response="Some response",
+                            question="Some question",
+                            use_api=True,
+                            cache_dir=tmpdir,
+                        )
 
-    def test_backtracking_keywords(self):
-        """Should classify as BACKTRACKING for verification keywords."""
-        response = "Let me try this approach. Wait, that's incorrect. Let me verify."
-        assert _heuristic_style_classify(response) == ReasoningStyle.BACKTRACKING
+    def test_error_type_raises_when_no_api_key(self):
+        """Should raise ClassificationError when GLM_API_KEY is not set."""
+        with patch("src.society.data_classifier.DEFAULT_API_KEY", ""):
+            with patch("src.society.data_classifier._compute_sample_hash", return_value="unique_hash"):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    with pytest.raises(ClassificationError, match="GLM_API_KEY"):
+                        classify_error_type(
+                            response="Some response",
+                            question="Some question",
+                            use_api=True,
+                            cache_dir=tmpdir,
+                        )
 
-    def test_direct_default(self):
-        """Should default to DIRECT for no special keywords."""
-        response = "First add 5, then multiply by 3"
-        assert _heuristic_style_classify(response) == ReasoningStyle.DIRECT
+    def test_style_raises_on_unparseable_api_response(self):
+        """Should raise ClassificationError when API response cannot be parsed."""
+        with patch("src.society.data_classifier._call_api", return_value="UNKNOWN_STYLE"):
+            with patch("src.society.data_classifier._compute_sample_hash", return_value="unique_hash"):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    with pytest.raises(ClassificationError, match="Could not parse"):
+                        classify_reasoning_style(
+                            response="Some response",
+                            question="Some question",
+                            use_api=True,
+                            cache_dir=tmpdir,
+                        )
 
-    def test_algebraic_vs_backtracking_priority(self):
-        """BACKTRACKING wins when both have equal keyword counts."""
-        response = "Let x = 5. Now let me verify this is correct."
-        # "verify" is in backtracking keywords, making it win
-        assert _heuristic_style_classify(response) == ReasoningStyle.BACKTRACKING
+    def test_api_failure_raises(self):
+        """Should raise ClassificationError when API call fails."""
+        with patch("src.society.data_classifier._call_api", side_effect=ClassificationError("Connection refused")):
+            with patch("src.society.data_classifier._compute_sample_hash", return_value="unique_hash"):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    with pytest.raises(ClassificationError):
+                        classify_reasoning_style(
+                            response="Some response",
+                            question="Some question",
+                            use_api=True,
+                            cache_dir=tmpdir,
+                        )
 
-
-class TestHeuristicErrorClassify:
-    """Test heuristic error type classification."""
-
-    def test_hallucination_keywords(self):
-        """Should detect hallucination errors."""
-        response = "The solver fabricated the number 42 which isn't in the problem"
-        assert _heuristic_error_classify(response) == ErrorType.HALLUCINATION
-
-    def test_logic_keywords(self):
-        """Should detect logical errors."""
-        response = "This is a logical fallacy and non sequitur"
-        assert _heuristic_error_classify(response) == ErrorType.LOGIC
-
-    def test_verification_keywords(self):
-        """Should detect verification failures."""
-        response = "The solver should have self-checked but didn't verify"
-        assert _heuristic_error_classify(response) == ErrorType.VERIFICATION
-
-    def test_arithmetic_default(self):
-        """Should default to ARITHMETIC."""
-        response = "The calculation was wrong"
-        assert _heuristic_error_classify(response) == ErrorType.ARITHMETIC
+    def test_check_api_available_no_key(self):
+        """check_api_available should return False when no key is set."""
+        with patch("src.society.data_classifier.DEFAULT_API_KEY", ""):
+            available, reason = check_api_available()
+            assert available is False
+            assert "GLM_API_KEY" in reason
 
 
 class TestParseStyleResponse:
@@ -681,26 +695,25 @@ class TestDataClassifier:
                 result = classifier.classify_reasoning_style(
                     response="Any response",
                     question="Any question",
-                    use_api=False,
+                    use_api=True,
                     cache_dir=tmpdir,
                 )
                 assert result.style == ReasoningStyle.BACKTRACKING
                 assert result.confidence == 0.85
 
-    def test_classify_api_failure_fallback(self):
-        """Should fallback to heuristic when API fails."""
+    def test_classify_api_failure_raises(self):
+        """Should raise ClassificationError when API returns None."""
         with patch("src.society.data_classifier._call_api", return_value=None):
-            with tempfile.TemporaryDirectory() as tmpdir:
-                classifier = DataClassifier()
-                result = classifier.classify_reasoning_style(
-                    response="Let x = 5",
-                    question="Solve",
-                    use_api=True,
-                    cache_dir=tmpdir,
-                )
-                # Should use heuristic
-                assert result.style == ReasoningStyle.ALGEBRAIC
-                assert result.confidence == 0.5
+            with patch("src.society.data_classifier._compute_sample_hash", return_value="unique_hash"):
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    classifier = DataClassifier()
+                    with pytest.raises(ClassificationError):
+                        classifier.classify_reasoning_style(
+                            response="Let x = 5",
+                            question="Solve",
+                            use_api=True,
+                            cache_dir=tmpdir,
+                        )
 
 
 # ============================================================
@@ -712,7 +725,7 @@ class TestDiversitySplit:
 
     def test_split_by_reasoning_style(self):
         """Should split samples by reasoning style."""
-        splitter = DiversitySplit(use_api=False)
+        splitter = DiversitySplit()
         samples = [
             {"question": f"Q{i}", "answer": "A"}
             for i in range(10)
@@ -730,27 +743,27 @@ class TestDiversitySplit:
             "Let z = 2",  # ALGEBRAIC
         ]
 
-        splits = splitter.split_by_reasoning_style(samples, responses)
+        # Mock API to return deterministic classifications
+        api_responses = [
+            "ALGEBRAIC", "BACKTRACKING", "DIRECT", "ALGEBRAIC",
+            "BACKTRACKING", "DIRECT", "ALGEBRAIC", "BACKTRACKING",
+            "DIRECT", "ALGEBRAIC",
+        ]
+        with patch("src.society.data_classifier._call_api", side_effect=api_responses):
+            splits = splitter.split_by_reasoning_style(samples, responses)
 
         assert ReasoningStyle.ALGEBRAIC in splits
         assert ReasoningStyle.DIRECT in splits
         assert ReasoningStyle.BACKTRACKING in splits
 
-        # Actual heuristic classification results:
-        # "verify" keyword -> BACKTRACKING (responses 2, 5, 8)
-        # "Let" keyword -> ALGEBRAIC (responses 1, 4, 10)
-        # "equation" keyword -> ALGEBRAIC (response 7)
-        # "Direct/Step/Simple" -> DIRECT (responses 3, 6, 9)
-        # But response 7 has "equation" so ALGEBRAIC
-        # So: ALGEBRAIC=4, BACKTRACKING=3, DIRECT=3
-        # However due to balancing, all get min count = 3
+        # 4 ALGEBRAIC, 3 BACKTRACKING, 3 DIRECT -> balanced to 3 each
         assert len(splits[ReasoningStyle.ALGEBRAIC]) == 3
         assert len(splits[ReasoningStyle.BACKTRACKING]) == 3
         assert len(splits[ReasoningStyle.DIRECT]) == 3
 
     def test_split_by_error_type(self):
         """Should split by error type."""
-        splitter = DiversitySplit(use_api=False, balance=False)
+        splitter = DiversitySplit(balance=False)
         samples = [
             {"question": f"Q{i}", "answer": "42"}
             for i in range(5)
@@ -763,38 +776,42 @@ class TestDiversitySplit:
             "Wrong arithmetic",
         ]
 
-        splits = splitter.split_by_error_type(samples, responses)
+        api_responses = [
+            "HALLUCINATION", "LOGIC", "ARITHMETIC", "VERIFICATION", "ARITHMETIC",
+        ]
+        with patch("src.society.data_classifier._call_api", side_effect=api_responses):
+            splits = splitter.split_by_error_type(samples, responses)
 
         # All error types should have some samples
-        # fabricated->HALLUCINATION, fallacy->LOGIC, verified->VERIFICATION
-        # The others default to ARITHMETIC
-        # With balance=False, all 5 should be distributed
         total = sum(len(v) for v in splits.values())
         assert total == 5
 
     def test_split_balancing(self):
         """Should balance splits when enabled."""
-        splitter = DiversitySplit(balance=True, use_api=False)
+        splitter = DiversitySplit(balance=True)
         samples = [{"question": f"Q{i}", "answer": "A"} for i in range(100)]
         responses = ["Let x = 5"] * 80 + ["Verify this"] * 20
 
-        splits = splitter.split_by_reasoning_style(samples, responses)
+        # 80 ALGEBRAIC + 20 BACKTRACKING -> balanced to 20 each
+        api_responses = ["ALGEBRAIC"] * 80 + ["BACKTRACKING"] * 20
+        with patch("src.society.data_classifier._call_api", side_effect=api_responses):
+            splits = splitter.split_by_reasoning_style(samples, responses)
 
-        # With balancing, should downsample to 20
+        # With balancing, should downsample ALGEBRAIC to 20
         assert len(splits[ReasoningStyle.ALGEBRAIC]) <= 80
 
     def test_split_no_responses(self):
         """Should round-robin assign when no responses."""
-        splitter = DiversitySplit(use_api=False)
+        splitter = DiversitySplit()
         samples = [
             {"question": f"Q{i}", "answer": "A"}
             for i in range(10)
         ]
 
+        # No responses -> round-robin, no API calls needed
         splits = splitter.split_by_reasoning_style(samples, responses=None)
 
         # Should distribute across all styles via round-robin
-        # 10 samples / 3 styles = 3, 3, 4 or similar
         total = sum(len(v) for v in splits.values())
         assert total == 9  # Due to how the split works, one sample gets filtered
 
@@ -1031,7 +1048,7 @@ class TestSocietyIntegration:
 
     def test_classification_and_splitting_pipeline(self):
         """Test classify then split pipeline."""
-        splitter = DiversitySplit(use_api=False)
+        splitter = DiversitySplit()
 
         samples = [
             {"question": "Solve x + 5 = 10", "answer": "5"},
@@ -1040,13 +1057,14 @@ class TestSocietyIntegration:
         ]
 
         responses = [
-            "Let x = 5, solve equation",  # ALGEBRAIC
-            "2 * 3 = 6 directly",  # DIRECT
-            "Let me check: verify is correct",  # BACKTRACKING
+            "Let x = 5, solve equation",
+            "2 * 3 = 6 directly",
+            "Let me check: verify is correct",
         ]
 
-        # Split by style
-        splits = splitter.split_by_reasoning_style(samples, responses)
+        # Mock API to return deterministic styles
+        with patch("src.society.data_classifier._call_api", side_effect=["ALGEBRAIC", "DIRECT", "BACKTRACKING"]):
+            splits = splitter.split_by_reasoning_style(samples, responses)
 
         # Verify all styles have samples
         assert len(splits[ReasoningStyle.ALGEBRAIC]) >= 1
