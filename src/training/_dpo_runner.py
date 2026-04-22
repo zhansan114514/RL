@@ -14,6 +14,26 @@ import logging
 import os
 import sys
 
+# Patch ctypes.CDLL to inject missing NVML symbols for older NVIDIA drivers.
+# PyTorch 2.10 calls nvmlDeviceGetNvLinkRemoteDeviceType via dlopen("libnvidia-ml.so.1"),
+# but this symbol doesn't exist in driver 450.x, causing RuntimeError.
+# We intercept the CDLL call and add the missing symbol as a no-op stub.
+import ctypes
+_orig_cdll_init = ctypes.CDLL.__init__
+
+def _patched_cdll_init(self, name, *args, **kwargs):
+    _orig_cdll_init(self, name, *args, **kwargs)
+    if name and "libnvidia-ml" in str(name):
+        try:
+            self.nvmlDeviceGetNvLinkRemoteDeviceType
+        except AttributeError:
+            # Stub: returns NVML_ERROR_FUNCTION_NOT_FOUND (13)
+            _STUB = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p)
+            setattr(self, "nvmlDeviceGetNvLinkRemoteDeviceType",
+                    _STUB(lambda dev, link, dtype: 13))
+
+ctypes.CDLL.__init__ = _patched_cdll_init
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 

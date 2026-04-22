@@ -161,11 +161,12 @@ def train_dpo(
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = target_physical
     # Bypass NVML driver compatibility issues on older drivers (V100 etc.)
-    # The stub library provides the missing nvmlDeviceGetNvLinkRemoteDeviceType symbol.
-    _stub_path = os.path.join(os.path.dirname(__file__), "libnvml_stub.so")
-    if os.path.exists(_stub_path):
+    # The dlsym interceptor provides the missing nvmlDeviceGetNvLinkRemoteDeviceType
+    # symbol by intercepting dlsym() calls at the C level.
+    _fix_path = os.path.join(os.path.dirname(__file__), "libdlsym_fix.so")
+    if os.path.exists(_fix_path):
         existing_preload = env.get("LD_PRELOAD", "")
-        env["LD_PRELOAD"] = _stub_path + ((":" + existing_preload) if existing_preload else "")
+        env["LD_PRELOAD"] = _fix_path + ((":" + existing_preload) if existing_preload else "")
     # Ensure src package is importable in the subprocess
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     existing_pp = env.get("PYTHONPATH", "")

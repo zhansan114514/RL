@@ -8,7 +8,7 @@ common:
   cache_dir: "output/society"
   seed: 42
   max_samples: 300
-  device: 1
+  device: 10
   dtype: "auto"
   gpu_memory_utilization: 0.85
   use_wandb: false
@@ -36,26 +36,28 @@ step03_diversify_actors:
   input_dir: "output/society/classified"
   output_dir: "output/society/actors"
   reasoning_styles: ["algebraic", "direct", "backtracking"]
-  lora_r: 256
-  lora_alpha: 512
+  lora_r: 128
+  lora_alpha: 256
   learning_rate: 5.0e-5
   beta: 0.1
-  batch_size: 2
+  batch_size: 1
+  gradient_accumulation_steps: 8
   num_epochs: 1
-  max_length: 2048
+  max_length: 1024
 
 # Phase 4: Critic diversification
 step04_diversify_critics:
   input_dir: "output/society/classified"
   output_dir: "output/society/critics"
   error_types: ["arithmetic", "logic", "hallucination", "verification"]
-  lora_r: 256
-  lora_alpha: 512
+  lora_r: 128
+  lora_alpha: 256
   learning_rate: 5.0e-5
   beta: 0.1
-  batch_size: 2
+  batch_size: 1
+  gradient_accumulation_steps: 8
   num_epochs: 1
-  max_length: 2048
+  max_length: 1024
 
 # Phase 5: Society alternating training
 step05_train_society:
@@ -63,13 +65,14 @@ step05_train_society:
   num_rounds: 2
   num_simulations: 3
   reward_threshold: 0.0
-  lora_r: 256
-  lora_alpha: 512
+  lora_r: 128
+  lora_alpha: 256
   learning_rate: 5.0e-5
   beta: 0.1
-  batch_size: 2
+  batch_size: 1
+  gradient_accumulation_steps: 8
   num_epochs: 1
-  max_length: 2048
+  max_length: 1024
   checkpoint_dir: "output/society/checkpoints"
 
 # Phase 6: Evaluation
