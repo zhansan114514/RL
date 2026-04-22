@@ -69,6 +69,7 @@ def society_alternating_train(
     dtype: str = "bfloat16",
     gpu_memory_utilization: float = 0.85,
     max_model_len: int = 4096,
+    max_samples: int = 200,
 ) -> SocietyTrainingResult:
     """
     Train N Actors + M Critics in alternating fashion.
@@ -138,23 +139,6 @@ def society_alternating_train(
         # ---- Phase A: Train all Critics (fix Actors) ----
         logger.info(f"Phase A: Training {len(critics)} Critics (Actors frozen)")
 
-        # Generate trajectories with guided vs natural Critic feedback
-        # using ALL actors for diverse reference responses
-        logger.info("  Generating deliberation trajectories for Critic training...")
-        critic_trajectories, shared_engine = _generate_critic_trajectories(
-            actors=actors,
-            registry=registry,
-            dataset=dataset,
-            dataset_name=dataset_name,
-            num_rounds=num_rounds,
-            device=device,
-            dtype=dtype,
-            gpu_memory_utilization=gpu_memory_utilization,
-            max_model_len=max_model_len,
-            seed=seed,
-        )
-        logger.info(f"  Generated {len(critic_trajectories)} trajectories for all critics")
-
         for critic in critics:
             critic_iter_dir = f"{output_base_dir}/critics/{critic.name}/iter_{iteration}"
             Path(critic_iter_dir).mkdir(parents=True, exist_ok=True)
@@ -164,19 +148,22 @@ def society_alternating_train(
                 f"(specialty: {critic.error_specialty.value})"
             )
 
-            # Build LLM-generated preference pairs for this critic
-            preference_pairs = _build_critic_preference_pairs(
-                trajectories=critic_trajectories,
+            # Generate preference pairs using Algorithm 1 from trajectory.py
+            preference_pairs = _generate_critic_pairs_algorithm1(
+                actors=actors,
                 critic=critic,
                 dataset=dataset,
                 dataset_name=dataset_name,
                 registry=registry,
+                num_rounds=num_rounds,
+                num_simulations=num_simulations,
+                reward_threshold=reward_threshold,
+                max_samples=max_samples,
+                seed=seed,
                 device=device,
                 dtype=dtype,
                 gpu_memory_utilization=gpu_memory_utilization,
                 max_model_len=max_model_len,
-                seed=seed,
-                engine=shared_engine,  # Reuse shared engine from trajectory generation
             )
 
             if not preference_pairs:
@@ -211,27 +198,10 @@ def society_alternating_train(
                 "path": checkpoint_path or "",
             }
 
-        # Cleanup shared critic engine before Phase B
-        if shared_engine is not None:
-            del shared_engine
-            shared_engine = None
-            _cleanup_gpu()
+        _cleanup_gpu()
 
         # ---- Phase B: Train all Actors (fix Critics) ----
         logger.info(f"Phase B: Training {len(actors)} Actors (Critics frozen)")
-
-        # Build preference pairs for ALL actors with a SINGLE vLLM instance
-        all_actor_pairs = _build_all_actor_preference_pairs(
-            actors=actors,
-            dataset=dataset,
-            dataset_name=dataset_name,
-            registry=registry,
-            device=device,
-            dtype=dtype,
-            gpu_memory_utilization=gpu_memory_utilization,
-            max_model_len=max_model_len,
-            seed=seed,
-        )
 
         for actor in actors:
             actor_iter_dir = f"{output_base_dir}/actors/{actor.name}/iter_{iteration}"
@@ -242,7 +212,23 @@ def society_alternating_train(
                 f"(style: {actor.reasoning_style.value})"
             )
 
-            preference_pairs = all_actor_pairs.get(actor.name, [])
+            # Generate preference pairs using Algorithm 1 from trajectory.py
+            preference_pairs = _generate_actor_pairs_algorithm1(
+                actor=actor,
+                critics=critics,
+                dataset=dataset,
+                dataset_name=dataset_name,
+                registry=registry,
+                num_rounds=num_rounds,
+                num_simulations=num_simulations,
+                reward_threshold=reward_threshold,
+                max_samples=max_samples,
+                seed=seed,
+                device=device,
+                dtype=dtype,
+                gpu_memory_utilization=gpu_memory_utilization,
+                max_model_len=max_model_len,
+            )
 
             if not preference_pairs:
                 logger.warning(f"  No preference pairs for {actor.name}, skipping")
@@ -305,321 +291,131 @@ def society_alternating_train(
 
 
 # ============================================================
-# Trajectory generation helpers
+# LoRA Model Adapter — bridges shared VLLMInference + LoRA to
+# the interface expected by trajectory.py's generate_trajectories()
 # ============================================================
 
-def _cleanup_gpu():
-    """Force cleanup GPU memory after vLLM unload."""
-    gc.collect()
-    try:
-        import torch
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            torch.cuda.synchronize()
-    except Exception:
-        pass
+class _LoRAModelAdapter:
+    """Wraps a shared VLLMInference engine with an optional LoRA adapter.
 
-
-def _generate_critic_trajectories(
-    actors: list[AgentConfig],
-    registry: AgentRegistry,
-    dataset: list[dict],
-    dataset_name: str,
-    num_rounds: int,
-    device: int,
-    dtype: str,
-    gpu_memory_utilization: float,
-    max_model_len: int,
-    seed: int,
-) -> tuple[list[dict], Any]:
-    """Generate deliberation trajectories for Critic training data.
-
-    Loads the base model ONCE, runs deliberation with specialized actors
-    and a temporary generic critic (base model without LoRA), and collects
-    trajectories. The generic critic provides basic feedback so actors
-    engage in genuine deliberation rather than generating in isolation.
-
-    Returns:
-        Tuple of (trajectories, engine). The engine is kept alive for reuse
-        by downstream preference pair generation.
+    Provides the ``generate()`` and ``generate_single()`` interface that
+    ``generate_trajectories`` (trajectory.py) and ``deliberate()``
+    (deliberation.py) expect, while routing generation calls through
+    the single shared engine with per-agent LoRA requests.
     """
-    from src.inference.vllm_server import VLLMInference
-    from src.society.multi_deliberation import multi_agent_deliberate_single_gpu
 
-    trajectories = []
-    model_name = registry.base_model_path or "Qwen/Qwen2.5-7B-Instruct"
-    engine = None
+    def __init__(self, engine: Any, lora_request: Any = None):
+        self._engine = engine
+        self._lora_request = lora_request
 
-    # Create a temporary generic critic using the base model (no LoRA)
-    temp_critic = AgentConfig(
-        name="temp_critic",
-        role=AgentRole.CRITIC,
-        error_specialty=ErrorType.LOGIC,
-        model_path=model_name,
-        lora_path=None,  # No LoRA — use base model as generic critic
-        system_prompt=(
-            "You are a critical reviewer. Analyze the given solution, "
-            "identify any errors in reasoning or calculation, and provide "
-            "constructive feedback to help reach the correct answer."
-        ),
-        temperature=0.7,
-        max_tokens=256,
-    )
-
-    # Determine if any actor has a LoRA path so we can enable LoRA on the engine
-    actors_with_lora = [a for a in actors if a.lora_path]
-    enable_lora = len(actors_with_lora) > 0
-    max_loras = len(actors_with_lora) if enable_lora else 1
-
-    try:
-        engine = VLLMInference(
-            model_name,
-            cuda_device=device,
-            dtype=dtype,
-            gpu_memory_utilization=gpu_memory_utilization,
-            max_model_len=max_model_len,
-            enable_lora=enable_lora,
-            max_loras=max_loras,
-            max_lora_rank=256,
+    def generate(self, prompts, max_tokens=256, temperature=0.7, **kwargs):
+        if self._lora_request is not None:
+            return self._generate_with_lora(prompts, max_tokens, temperature)
+        return self._engine.generate(
+            prompts, max_tokens=max_tokens, temperature=temperature, **kwargs,
         )
 
-        # Use a subset for trajectory generation (was 50, too small for 7 agents)
-        max_traj = min(len(dataset), 200)
-        for i, sample in enumerate(dataset[:max_traj]):
-            if (i + 1) % 10 == 0:
-                logger.info(f"  Generating trajectory {i + 1}/{max_traj}")
+    def generate_single(self, prompt, max_tokens=256, temperature=0.7, **kwargs):
+        results = self.generate(
+            [prompt], max_tokens=max_tokens, temperature=temperature, **kwargs,
+        )
+        return results[0] if results else ""
 
-            result = multi_agent_deliberate_single_gpu(
-                inference_engine=engine,
-                actors=actors,
-                critics=[temp_critic],  # Use generic base-model critic
-                sample=sample,
-                dataset_name=dataset_name,
-                num_rounds=min(num_rounds, 2),
-                max_tokens=512,
-                temperature=0.7,
+    def _generate_with_lora(self, prompts, max_tokens, temperature):
+        if hasattr(self._engine, "generate_with_lora"):
+            return self._engine.generate_with_lora(
+                prompts, self._lora_request,
+                max_tokens=max_tokens, temperature=temperature,
             )
-
-            trajectories.append({
-                "sample": sample,
-                "actor_responses": result.final_answers,
-                "rounds": [
-                    {
-                        "actor_response": r.actor_responses,
-                        "actor_answers": r.actor_answers,
-                    }
-                    for r in result.rounds
-                ],
-            })
-
-        # Keep engine alive — caller is responsible for cleanup
-
-    except Exception as e:
-        logger.error(f"Failed to generate trajectories: {e}")
-        if engine is not None:
-            del engine
-            engine = None
-        _cleanup_gpu()
-
-    return trajectories, engine
+        # Fallback: vLLM LoRA API directly
+        if hasattr(self._engine, "_llm") and self._engine._llm is not None:
+            from vllm import SamplingParams
+            params = SamplingParams(max_tokens=max_tokens, temperature=temperature, n=1)
+            outputs = self._engine._llm.generate(
+                prompts, params, lora_request=self._lora_request,
+            )
+            return [c.text for o in outputs for c in o.outputs]
+        raise RuntimeError(
+            "Engine does not support LoRA generation. "
+            "Create VLLMInference with enable_lora=True."
+        )
 
 
-def _build_critic_preference_pairs(
-    trajectories: list[dict],
+def _build_lora_adapters(
+    engine: Any,
+    agents: list[AgentConfig],
+) -> dict[str, _LoRAModelAdapter]:
+    """Create _LoRAModelAdapter for each agent (uses base model if no LoRA)."""
+    from src.society.multi_deliberation import _load_lora_adapter
+
+    adapters: dict[str, _LoRAModelAdapter] = {}
+    for agent in agents:
+        lora_req = None
+        if agent.lora_path:
+            try:
+                lora_req = _load_lora_adapter(engine, agent.lora_path)
+            except Exception as e:
+                logger.warning(
+                    f"Could not load LoRA for {agent.name}: {e}. "
+                    f"Using base model."
+                )
+        adapters[agent.name] = _LoRAModelAdapter(engine, lora_req)
+    return adapters
+
+
+# ============================================================
+# Phase A: Critic preference pairs via Algorithm 1
+# ============================================================
+
+def _generate_critic_pairs_algorithm1(
+    actors: list[AgentConfig],
     critic: AgentConfig,
     dataset: list[dict],
     dataset_name: str,
     registry: AgentRegistry,
+    num_rounds: int,
+    num_simulations: int,
+    reward_threshold: float,
+    max_samples: int,
+    seed: int,
     device: int,
     dtype: str,
     gpu_memory_utilization: float,
     max_model_len: int,
-    seed: int,
-    engine: Any = None,
 ) -> list[dict]:
-    """Build DPO preference pairs for a specific Critic using LLM-generated feedback.
+    """Generate Critic DPO preference pairs using Algorithm 1 from trajectory.py.
 
-    Key improvement: filters error samples by this critic's specialty via
-    GLM API classification. Only errors matching the critic's error_specialty
-    are used, ensuring true data-level diversification.
+    Pairs the target critic with a reference actor (first with LoRA, or first
+    overall) and calls ``generate_trajectories`` for each sample to obtain:
+      - Natural deliberation trajectory
+      - Guided-toward-correct trajectory
+      - Guided-toward-wrong trajectory
+      - MC roll-out reward estimation
+      - Preference pairs filtered by reward delta >= epsilon
 
-    Uses guided (chosen) vs generic (rejected) feedback following the
-    ACC-Collab paper's approach.
-    """
-    from src.society.multi_deliberation import _build_critic_prompt
+    The critic preference pairs use:
+      chosen  = positive_critic (guided toward correct answer)
+      rejected = negative_critic (natural / guided toward wrong answer)
 
-    preference_pairs = []
-    specialty = critic.error_specialty
-    model_name = registry.base_model_path or "Qwen/Qwen2.5-7B-Instruct"
-
-    # Collect all wrong-answer samples from trajectories
-    all_error_samples = []
-    for traj in trajectories:
-        sample = traj.get("sample", {})
-        correct_answer = sample.get("answer", "")
-        task_type = sample.get("task_type", "math")
-
-        for round_data in traj.get("rounds", []):
-            actor_responses = round_data.get("actor_responses", {})
-            actor_answers = round_data.get("actor_answers", {})
-
-            for actor_name, actor_response in actor_responses.items():
-                actor_answer = actor_answers.get(actor_name)
-                if actor_answer is None:
-                    continue
-
-                # Check if wrong answer
-                is_correct = False
-                if task_type == "math":
-                    is_correct = math_answers_equal(actor_answer or "", correct_answer)
-                else:
-                    is_correct = normalize_answer(actor_answer, task_type) == normalize_answer(correct_answer, task_type)
-
-                if not is_correct:
-                    all_error_samples.append({
-                        "sample": sample,
-                        "actor_response": actor_response,
-                        "actor_answer": actor_answer,
-                        "correct_answer": correct_answer,
-                        "task_type": task_type,
-                    })
-
-    if not all_error_samples:
-        logger.warning(f"  No error samples found for {critic.name}")
-        return []
-
-    # Use DiversitySplit for error-type classification + balancing
-    splitter = DiversitySplit(balance=True, seed=seed, use_api=True)
-    error_splits = splitter.split_by_error_type(
-        samples=[es["sample"] for es in all_error_samples],
-        responses=[es["actor_response"] for es in all_error_samples],
-        correct_answers=[es["correct_answer"] for es in all_error_samples],
-        extracted_answers=[es["actor_answer"] or "" for es in all_error_samples],
-    )
-
-    # Extract balanced samples for this critic's specialty
-    specialty_items = error_splits.get(specialty, [])
-    filtered_samples = []
-    for sample, _response in specialty_items:
-        # Find matching error sample by sample identity
-        for es in all_error_samples:
-            if es["sample"] is sample or (
-                es["sample"].get("question") == sample.get("question")
-                and es["actor_response"] == _response
-            ):
-                filtered_samples.append(es)
-                break
-
-    logger.info(
-        f"  Filtered {len(filtered_samples)}/{len(all_error_samples)} error samples "
-        f"for specialty '{specialty.value}' (balanced via DiversitySplit)"
-    )
-
-    if not filtered_samples:
-        logger.warning(
-            f"  No samples matched specialty '{specialty.value}'. "
-            f"Skipping this Critic to preserve data-level diversification "
-            f"(using all errors would break specialization)."
-        )
-        return []
-
-    # Use LLM to generate guided (chosen) vs generic (rejected) feedback
-    engine_provided = engine is not None
-    try:
-        if not engine_provided:
-            from src.inference.vllm_server import VLLMInference
-            engine = VLLMInference(
-                model_name,
-                cuda_device=device,
-                dtype=dtype,
-                gpu_memory_utilization=gpu_memory_utilization,
-                max_model_len=max_model_len,
-                # Critic preference pair generation uses base model only,
-                # no LoRA needed — the feedback is generated by prompting.
-            )
-
-        for es in filtered_samples:
-            sample = es["sample"]
-            actor_response = es["actor_response"]
-
-            # Chosen: guided feedback with specialty-specific prompt
-            guided_prompt = (
-                f"You are reviewing a solution and have identified a {specialty.value} error.\n"
-                f"Problem: {sample.get('question', '')}\n"
-                f"Student's solution: {actor_response}\n"
-                f"Correct answer: {es['correct_answer']}\n\n"
-                f"Provide specific, actionable feedback that identifies the {specialty.value} error "
-                f"and guides toward the correct solution. "
-                f"After your analysis, output your confidence on a scale of 0.0 to 1.0 "
-                f"using the format: [Confidence: 0.X]"
-            )
-            chosen = engine.generate_single(guided_prompt, max_tokens=256, temperature=0.3)
-
-            # Rejected: generic feedback without specialty guidance
-            generic_prompt = (
-                f"Review this solution briefly.\n"
-                f"Problem: {sample.get('question', '')}\n"
-                f"Solution: {actor_response}\n\n"
-                f"Provide brief feedback. "
-                f"After your analysis, output your confidence on a scale of 0.0 to 1.0 "
-                f"using the format: [Confidence: 0.X]"
-            )
-            rejected = engine.generate_single(generic_prompt, max_tokens=256, temperature=0.7)
-
-            if chosen and rejected and chosen.strip() != rejected.strip():
-                preference_pairs.append({
-                    "sample": sample,
-                    "chosen": chosen,
-                    "rejected": rejected,
-                    "metadata": {
-                        "error_type": specialty.value,
-                        "actor_answer": es["actor_answer"],
-                        "correct_answer": es["correct_answer"],
-                    },
-                })
-
-        if not engine_provided:
-            del engine
-            _cleanup_gpu()
-
-    except Exception as e:
-        logger.error(f"Failed to generate LLM feedback pairs: {e}")
-        if not engine_provided and engine is not None:
-            del engine
-        _cleanup_gpu()
-
-    return preference_pairs
-
-
-def _build_all_actor_preference_pairs(
-    actors: list[AgentConfig],
-    dataset: list[dict],
-    dataset_name: str,
-    registry: AgentRegistry,
-    device: int,
-    dtype: str,
-    gpu_memory_utilization: float,
-    max_model_len: int,
-    seed: int,
-) -> dict[str, list[dict]]:
-    """Build DPO preference pairs for ALL Actors with a SINGLE vLLM instance.
-
-    Phase 1: Batch-generate all Actor responses (all actors × all samples).
-    Phase 2: Classify styles, filter to actor-matching styles, balance via DiversitySplit.
-    Phase 3: Generate rejected responses only for balanced chosen samples.
-
-    This follows the ACC-Collab paper's Algorithm 1 approach.
+    Error-type filtering via DiversitySplit ensures data-level diversification.
     """
     from src.inference.vllm_server import VLLMInference
-    from src.society.multi_deliberation import _build_actor_prompt
+    from src.algorithms.trajectory import generate_trajectories
 
-    all_pairs: dict[str, list[dict]] = {actor.name: [] for actor in actors}
     model_name = registry.base_model_path or "Qwen/Qwen2.5-7B-Instruct"
-    engine = None
+    specialty = critic.error_specialty
 
-    # Actor preference pair generation doesn't load actor LoRA adapters;
-    # it generates fresh responses from the base model and then filters
-    # by style.  No LoRA needed here.
+    # Pick reference actor (prefer one with LoRA)
+    ref_actor = next((a for a in actors if a.lora_path), actors[0])
+
+    # Determine LoRA requirements
+    all_agents = [ref_actor, critic]
+    enable_lora = any(a.lora_path for a in all_agents)
+    max_loras = sum(1 for a in all_agents if a.lora_path) if enable_lora else 0
+
+    n_samples = min(len(dataset), max_samples)
+    preference_pairs: list[dict] = []
+
     try:
         engine = VLLMInference(
             model_name,
@@ -627,117 +423,256 @@ def _build_all_actor_preference_pairs(
             dtype=dtype,
             gpu_memory_utilization=gpu_memory_utilization,
             max_model_len=max_model_len,
+            enable_lora=enable_lora or None,
+            max_loras=max(max_loras, 1),
+            max_lora_rank=256,
         )
 
-        max_samples = min(len(dataset), 200)
+        adapters = _build_lora_adapters(engine, all_agents)
+        actor_adapter = adapters[ref_actor.name]
+        critic_adapter = adapters[critic.name]
 
-        # Phase 1: Batch-generate all actor responses
-        # Each entry: (sample, actor, response, task_type)
-        correct_entries: list[tuple[dict, AgentConfig, str, str]] = []
+        # Step 1: Run Algorithm 1 for each sample
+        raw_pairs: list[dict] = []
+        for i, sample in enumerate(dataset[:n_samples]):
+            if (i + 1) % 10 == 0:
+                logger.info(
+                    f"  [{critic.name}] Algorithm 1: sample {i + 1}/{n_samples}"
+                )
 
-        for si, sample in enumerate(dataset[:max_samples]):
-            if (si + 1) % 10 == 0:
-                logger.info(f"  Generating actor responses {si + 1}/{max_samples}")
-
-            correct_answer = sample.get("answer", "")
             task_type = sample.get("task_type", "math")
-
-            # Build prompts for ALL actors, then batch in one generate() call
-            prompts = [
-                _build_actor_prompt(actor, sample, dataset_name, 0, [])
-                for actor in actors
-            ]
-            responses = engine.generate(prompts, max_tokens=512, temperature=0.7)
-
-            for actor, response in zip(actors, responses):
-                response = response if isinstance(response, str) else str(response)
-                extracted_answer = extract_answer(response, task_type)
-
-                if task_type == "math":
-                    is_correct = math_answers_equal(extracted_answer or "", correct_answer)
-                else:
-                    is_correct = normalize_answer(extracted_answer or "", task_type) == normalize_answer(correct_answer, task_type)
-
-                if is_correct:
-                    correct_entries.append((sample, actor, response, task_type))
-
-        logger.info(f"  Collected {len(correct_entries)} correct responses across all actors")
-
-        # Phase 2: Classify styles and filter per actor, then balance
-        # Group by actor first
-        actor_entries: dict[str, list[tuple[dict, str, str]]] = {a.name: [] for a in actors}
-        for sample, actor, response, task_type in correct_entries:
-            question = sample.get("question", "")
             correct_answer = sample.get("answer", "")
-            style_result = None
-            try:
-                style_result = classify_reasoning_style(
-                    response=response,
-                    question=question,
-                    correct_answer=correct_answer,
-                    use_api=True,
-                )
-            except ClassificationError:
-                pass
 
-            if style_result is not None and style_result.style == actor.reasoning_style:
-                actor_entries[actor.name].append((sample, response, task_type))
+            algo_pairs = generate_trajectories(
+                actor_model=actor_adapter,
+                critic_model=critic_adapter,
+                sample=sample,
+                dataset_name=dataset_name,
+                num_rounds=num_rounds,
+                num_simulations=num_simulations,
+                reward_threshold=reward_threshold,
+                seed=seed + i,
+            )
 
-        # Balance: downsample actors with more samples to match the actor with fewest
-        non_empty = {k: v for k, v in actor_entries.items() if v}
-        if non_empty:
-            target = min(len(v) for v in non_empty.values())
-            rng = _get_rng(seed)
-            for name in actor_entries:
-                entries = actor_entries[name]
-                if len(entries) > target:
-                    indices = rng.choice(len(entries), size=target, replace=False)
-                    actor_entries[name] = [entries[i] for i in indices]
-                    logger.info(f"  Balanced {name}: {len(entries)} -> {target}")
+            # Extract critic preference pairs from Algorithm 1 results
+            for pair in algo_pairs:
+                # pair has: positive, negative (actor), positive_critic, negative_critic
+                # For critic DPO: chosen = guided-correct feedback, rejected = natural/wrong feedback
+                negative_actor = pair["negative"]
+                negative_answer = extract_answer(negative_actor, task_type)
 
-        # Phase 3: Generate rejected responses for balanced chosen samples
-        for actor in actors:
-            for sample, response, task_type in actor_entries[actor.name]:
-                question = sample.get("question", "")
-                correct_answer = sample.get("answer", "")
+                # Only keep pairs where the actor's response was wrong (error scenario)
+                if task_type == "math":
+                    is_wrong = not math_answers_equal(
+                        negative_answer or "", correct_answer,
+                    )
+                else:
+                    is_wrong = normalize_answer(
+                        negative_answer or "", task_type,
+                    ) != normalize_answer(correct_answer, task_type)
 
-                wrong_prompt = (
-                    f"{actor.system_prompt}\n\n"
-                    f"Solve this problem, but make a common mistake in your reasoning.\n"
-                    f"Problem: {question}\n"
-                )
-                rejected = engine.generate_single(wrong_prompt, max_tokens=512, temperature=0.9)
+                if is_wrong:
+                    raw_pairs.append({
+                        "sample": sample,
+                        "chosen": pair["positive_critic"],
+                        "rejected": pair["negative_critic"],
+                        "actor_response": negative_actor,
+                        "actor_answer": negative_answer,
+                        "correct_answer": correct_answer,
+                        "task_type": task_type,
+                        "delta": pair["delta"],
+                        "direction": pair["direction"],
+                    })
 
-                if rejected and rejected.strip() != response.strip():
-                    rejected_answer = extract_answer(rejected, task_type)
-                    if task_type == "math":
-                        rejected_is_correct = math_answers_equal(rejected_answer or "", correct_answer)
-                    else:
-                        rejected_is_correct = normalize_answer(rejected_answer or "", task_type) == normalize_answer(correct_answer, task_type)
+        logger.info(
+            f"  [{critic.name}] Algorithm 1 produced {len(raw_pairs)} raw critic pairs"
+        )
 
-                    if not rejected_is_correct:
-                        all_pairs[actor.name].append({
-                            "sample": sample,
-                            "chosen": response,
-                            "rejected": rejected,
+        # Step 2: Filter by error type via DiversitySplit
+        if raw_pairs:
+            splitter = DiversitySplit(balance=True, seed=seed, use_api=True)
+            error_splits = splitter.split_by_error_type(
+                samples=[p["sample"] for p in raw_pairs],
+                responses=[p["actor_response"] for p in raw_pairs],
+                correct_answers=[p["correct_answer"] for p in raw_pairs],
+                extracted_answers=[p["actor_answer"] or "" for p in raw_pairs],
+            )
+
+            specialty_items = error_splits.get(specialty, [])
+            for sample, _response in specialty_items:
+                for p in raw_pairs:
+                    if (
+                        p["sample"].get("question") == sample.get("question")
+                        and p["actor_response"] == _response
+                    ):
+                        preference_pairs.append({
+                            "sample": p["sample"],
+                            "chosen": p["chosen"],
+                            "rejected": p["rejected"],
                             "metadata": {
-                                "style": actor.reasoning_style.value,
+                                "error_type": specialty.value,
+                                "delta": p["delta"],
+                                "direction": p["direction"],
                             },
                         })
+                        break
+
+        logger.info(
+            f"  [{critic.name}] {len(preference_pairs)}/{len(raw_pairs)} pairs "
+            f"matched specialty '{specialty.value}'"
+        )
 
         del engine
         _cleanup_gpu()
 
     except Exception as e:
-        logger.error(f"Failed to build actor preference pairs: {e}")
-        if engine is not None:
-            del engine
+        logger.error(f"Failed to generate critic pairs for {critic.name}: {e}")
         _cleanup_gpu()
 
-    for actor in actors:
-        logger.info(f"  Actor {actor.name}: {len(all_pairs[actor.name])} preference pairs")
+    return preference_pairs
 
-    return all_pairs
+
+# ============================================================
+# Phase B: Actor preference pairs via Algorithm 1
+# ============================================================
+
+def _generate_actor_pairs_algorithm1(
+    actor: AgentConfig,
+    critics: list[AgentConfig],
+    dataset: list[dict],
+    dataset_name: str,
+    registry: AgentRegistry,
+    num_rounds: int,
+    num_simulations: int,
+    reward_threshold: float,
+    max_samples: int,
+    seed: int,
+    device: int,
+    dtype: str,
+    gpu_memory_utilization: float,
+    max_model_len: int,
+) -> list[dict]:
+    """Generate Actor DPO preference pairs using Algorithm 1 from trajectory.py.
+
+    Pairs the target actor with a reference critic (first with LoRA, or first
+    overall) and calls ``generate_trajectories`` for each sample to obtain
+    full Algorithm 1 preference pairs with MC roll-out reward estimation.
+
+    The actor preference pairs use:
+      chosen  = positive (guided-toward-correct actor response)
+      rejected = negative (natural / guided-toward-wrong actor response)
+
+    Reasoning-style filtering ensures data-level diversification.
+    """
+    from src.inference.vllm_server import VLLMInference
+    from src.algorithms.trajectory import generate_trajectories
+
+    model_name = registry.base_model_path or "Qwen/Qwen2.5-7B-Instruct"
+
+    # Pick reference critic (prefer one with LoRA)
+    ref_critic = next((c for c in critics if c.lora_path), critics[0])
+
+    # Determine LoRA requirements
+    all_agents = [actor, ref_critic]
+    enable_lora = any(a.lora_path for a in all_agents)
+    max_loras = sum(1 for a in all_agents if a.lora_path) if enable_lora else 0
+
+    n_samples = min(len(dataset), max_samples)
+    preference_pairs: list[dict] = []
+
+    try:
+        engine = VLLMInference(
+            model_name,
+            cuda_device=device,
+            dtype=dtype,
+            gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=max_model_len,
+            enable_lora=enable_lora or None,
+            max_loras=max(max_loras, 1),
+            max_lora_rank=256,
+        )
+
+        adapters = _build_lora_adapters(engine, all_agents)
+        actor_adapter = adapters[actor.name]
+        critic_adapter = adapters[ref_critic.name]
+
+        # Step 1: Run Algorithm 1 for each sample
+        raw_pairs: list[dict] = []
+        for i, sample in enumerate(dataset[:n_samples]):
+            if (i + 1) % 10 == 0:
+                logger.info(
+                    f"  [{actor.name}] Algorithm 1: sample {i + 1}/{n_samples}"
+                )
+
+            algo_pairs = generate_trajectories(
+                actor_model=actor_adapter,
+                critic_model=critic_adapter,
+                sample=sample,
+                dataset_name=dataset_name,
+                num_rounds=num_rounds,
+                num_simulations=num_simulations,
+                reward_threshold=reward_threshold,
+                seed=seed + i,
+            )
+
+            # Extract actor preference pairs from Algorithm 1 results
+            for pair in algo_pairs:
+                raw_pairs.append({
+                    "sample": sample,
+                    "chosen": pair["positive"],
+                    "rejected": pair["negative"],
+                    "delta": pair["delta"],
+                    "direction": pair["direction"],
+                })
+
+        logger.info(
+            f"  [{actor.name}] Algorithm 1 produced {len(raw_pairs)} raw actor pairs"
+        )
+
+        # Step 2: Filter by reasoning style
+        if raw_pairs:
+            for p in raw_pairs:
+                sample = p["sample"]
+                question = sample.get("question", "")
+                correct_answer = sample.get("answer", "")
+                chosen = p["chosen"]
+
+                style_result = None
+                try:
+                    style_result = classify_reasoning_style(
+                        response=chosen,
+                        question=question,
+                        correct_answer=correct_answer,
+                        use_api=True,
+                    )
+                except ClassificationError:
+                    pass
+
+                if style_result is not None and style_result.style == actor.reasoning_style:
+                    preference_pairs.append({
+                        "sample": sample,
+                        "chosen": chosen,
+                        "rejected": p["rejected"],
+                        "metadata": {
+                            "style": actor.reasoning_style.value,
+                            "delta": p["delta"],
+                            "direction": p["direction"],
+                        },
+                    })
+
+        logger.info(
+            f"  [{actor.name}] {len(preference_pairs)}/{len(raw_pairs)} pairs "
+            f"matched style '{actor.reasoning_style.value}'"
+        )
+
+        del engine
+        _cleanup_gpu()
+
+    except Exception as e:
+        logger.error(f"Failed to generate actor pairs for {actor.name}: {e}")
+        _cleanup_gpu()
+
+    return preference_pairs
 
 
 # ============================================================

@@ -4,7 +4,7 @@ Tests for the 5 critical fixes to ACC-Collab implementation.
 These tests verify the following fixes:
 1. deliberation.py: previous_responses contains both actor and critic responses (interleaved)
 2. trajectory.py: guided trajectories start from t=1 (skip t=0)
-3. trajectory.py: preference pairs use if/elif instead of if/if
+3. trajectory.py: preference pairs use independent ifs (both towards and away pairs can be generated per round)
 4. dpo_trainer.py: DPO includes NLL regularization via loss_type=[loss_type, "sft"]
 5. rollout.py: sim_responses contains interleaved actor and critic responses
 """
@@ -196,13 +196,13 @@ class TestFix2TrajectoryStartsFromT1:
             assert pair["round"] >= 1, f"Round should be >= 1, got {pair['round']}"
 
 
-class TestFix3TrajectoryIfElifStructure:
-    """Fix #3: Preference pairs should use if/elif, not two independent ifs."""
+class TestFix3TrajectoryIfStructure:
+    """Fix #3: Preference pairs use independent ifs to collect all valid pairs."""
 
     @patch('src.algorithms.trajectory.deliberate')
     @patch('src.algorithms.trajectory._make_guided_prompt')
-    def test_only_one_pair_per_round_when_both_deltas_high(self, mock_guided, mock_deliberate):
-        """When both delta_y and delta_not_y exceed threshold, only one pair should be created."""
+    def test_two_pairs_per_round_when_both_deltas_high(self, mock_guided, mock_deliberate):
+        """When both delta_y and delta_not_y exceed threshold, both pairs should be created."""
         from src.algorithms.trajectory import generate_trajectories
 
         mock_deliberate.return_value = [
@@ -213,17 +213,12 @@ class TestFix3TrajectoryIfElifStructure:
 
         actor = MagicMock()
         critic = MagicMock()
-        # actor.generate is called twice:
-        # 1. guided actor (2 prompts) -> 2 responses
-        # 2. merged MC roll-out (3*5=15 prompts) -> 15 responses
-        # critic.generate is called once:
-        # 1. guided critic (2 prompts) -> 2 responses
-        # MC roll-out: 5 "No" + 5 "Yes" + 5 "No"
-        # v_natural=0/5=0.0, v_guided_correct=5/5=1.0, v_guided_wrong=0/5=0.0
+        # MC roll-out: v_natural=0/5=0.0, v_guided_correct=5/5=1.0, v_guided_wrong=0/5=0.0
         # delta_y = 1.0 >= 0.3 -> "towards" pair
+        # delta_not_y = 0.0 < 0.3 -> no "away" pair
         actor.generate.side_effect = [
-            ["Guided actor z_y", "Guided actor z_not_y"],  # guided actor
-            ["No."] * 5 + ["The answer is Yes."] * 5 + ["No."] * 5,  # MC roll-out
+            ["Guided actor z_y", "Guided actor z_not_y"],
+            ["No."] * 5 + ["The answer is Yes."] * 5 + ["No."] * 5,
         ]
         critic.generate.return_value = ["Guided critic"] * 2
 
@@ -241,13 +236,57 @@ class TestFix3TrajectoryIfElifStructure:
             reward_threshold=0.3,
         )
 
-        # Should only create ONE pair per round (the "towards" one from if, not the "away" from elif)
-        assert len(pairs) == 1, f"Expected 1 pair with if/elif structure, got {len(pairs)}"
-        assert pairs[0]["direction"] == "towards", "First matching condition (towards) should be used"
+        # delta_y=1.0 >= 0.3 -> towards, delta_not_y=0.0 < 0.3 -> no away
+        assert len(pairs) == 1, f"Expected 1 pair, got {len(pairs)}"
+        assert pairs[0]["direction"] == "towards"
 
     @patch('src.algorithms.trajectory.deliberate')
     @patch('src.algorithms.trajectory._make_guided_prompt')
-    def test_elif_branch_creates_away_pair_when_if_fails(self, mock_guided, mock_deliberate):
+    def test_both_pairs_when_both_deltas_exceed_threshold(self, mock_guided, mock_deliberate):
+        """When both deltas exceed threshold, both 'towards' and 'away' pairs are created."""
+        from src.algorithms.trajectory import generate_trajectories
+
+        mock_deliberate.return_value = [
+            {"actor_response": "A0", "critic_response": "C0", "actor_prompt": "P0", "critic_prompt": "CP0"},
+            {"actor_response": "A1", "critic_response": "C1", "actor_prompt": "P1", "critic_prompt": "CP1"},
+        ]
+        mock_guided.return_value = "Guided prompt"
+
+        actor = MagicMock()
+        critic = MagicMock()
+        # v_natural=3/5=0.6, v_guided_correct=5/5=1.0, v_guided_wrong=0/5=0.0
+        # delta_y = 0.4 >= 0.3 -> "towards" pair
+        # delta_not_y = 0.6 >= 0.3 -> "away" pair
+        actor.generate.side_effect = [
+            ["Guided actor z_y", "Guided actor z_not_y"],
+            ["The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "No.", "No.",
+             "The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "The answer is Yes.",
+             "No.", "No.", "No.", "No.", "No."],
+        ]
+        critic.generate.return_value = ["Guided critic"] * 2
+
+        sample = {
+            "question": "Test?",
+            "passage": "Passage.",
+            "answer": "yes",
+            "task_type": "yes_no",
+            "choices": None,
+        }
+
+        pairs = generate_trajectories(
+            actor, critic, sample, "boolq",
+            num_rounds=2,
+            reward_threshold=0.3,
+        )
+
+        # Both deltas >= 0.3, so both pairs are created
+        assert len(pairs) == 2, f"Expected 2 pairs with if/if structure, got {len(pairs)}"
+        directions = {p["direction"] for p in pairs}
+        assert directions == {"towards", "away"}, f"Expected both directions, got {directions}"
+
+    @patch('src.algorithms.trajectory.deliberate')
+    @patch('src.algorithms.trajectory._make_guided_prompt')
+    def test_away_pair_when_only_delta_not_y_exceeds(self, mock_guided, mock_deliberate):
         """When delta_y < threshold but delta_not_y >= threshold, should create 'away' pair."""
         from src.algorithms.trajectory import generate_trajectories
 
@@ -259,11 +298,10 @@ class TestFix3TrajectoryIfElifStructure:
 
         actor = MagicMock()
         critic = MagicMock()
-        # actor.generate called twice: guided actor (2), MC roll-out (15)
-        # MC roll-out: v_natural: 3/5=0.6, v_guided_correct: 4/5=0.8, v_guided_wrong: 0/5=0.0
+        # v_natural: 3/5=0.6, v_guided_correct: 4/5=0.8, v_guided_wrong: 0/5=0.0
         # delta_y = 0.8-0.6 = 0.2 < 0.3, delta_not_y = 0.6-0.0 = 0.6 >= 0.3 -> "away"
         actor.generate.side_effect = [
-            ["Guided actor z_y", "Guided actor z_not_y"],  # guided actor
+            ["Guided actor z_y", "Guided actor z_not_y"],
             ["The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "No.", "No.",
              "The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "No.",
              "No.", "No.", "No.", "No.", "No."],
@@ -284,9 +322,8 @@ class TestFix3TrajectoryIfElifStructure:
             reward_threshold=0.3,
         )
 
-        # Should create ONE pair (the "away" one from elif)
         assert len(pairs) == 1, f"Expected 1 pair, got {len(pairs)}"
-        assert pairs[0]["direction"] == "away", "Elif branch should create 'away' pair"
+        assert pairs[0]["direction"] == "away", "Should create 'away' pair"
 
     @patch('src.algorithms.trajectory.deliberate')
     @patch('src.algorithms.trajectory._make_guided_prompt')
@@ -302,12 +339,11 @@ class TestFix3TrajectoryIfElifStructure:
 
         actor = MagicMock()
         critic = MagicMock()
-        # All MC roll-out responses produce the same answer "yes" for all 3 groups
         # v_natural=5/5=1.0, v_guided_correct=5/5=1.0, v_guided_wrong=5/5=1.0
-        # delta_y = 0.0 < threshold, delta_not_y = 0.0 < threshold
+        # delta_y = 0.0, delta_not_y = 0.0
         actor.generate.side_effect = [
-            ["Guided actor z_y", "Guided actor z_not_y"],  # guided actor
-            ["The answer is Yes."] * 15,  # MC roll-out: all same -> deltas=0
+            ["Guided actor z_y", "Guided actor z_not_y"],
+            ["The answer is Yes."] * 15,
         ]
         critic.generate.return_value = ["Guided critic"] * 2
 
@@ -325,7 +361,6 @@ class TestFix3TrajectoryIfElifStructure:
             reward_threshold=0.3,
         )
 
-        # Should create NO pairs
         assert len(pairs) == 0, f"Expected 0 pairs when both deltas < threshold, got {len(pairs)}"
 
 

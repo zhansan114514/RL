@@ -132,9 +132,9 @@ class CriticRouter:
             confidences = np.array([f.confidence for f in valid])
             weights = self._softmax(confidences, temperature=self.temperature)
 
-        # Top-K selection
+        # Top-K selection (descending order: highest weight first)
         k = min(self.top_k, len(valid))
-        top_indices = np.argsort(weights)[-k:]
+        top_indices = np.argsort(weights)[-k:][::-1]
         selected = [valid[i] for i in top_indices]
         sel_weights = weights[top_indices]
         # Renormalize after Top-K so weights sum to 1.0
@@ -184,9 +184,17 @@ def build_critic_feedback(
     clean_response = CONFIDENCE_PATTERN.sub("", response)
     clean_response = ANSWER_CORRECT_PATTERN.sub("", clean_response).strip()
 
+    error_specialty = critic_config.error_specialty
+    if error_specialty is None:
+        logger.warning(
+            f"Critic '{critic_config.name}' has no error_specialty set, "
+            f"defaulting to LOGIC. This may cause incorrect routing."
+        )
+        error_specialty = ErrorType.LOGIC
+
     return CriticFeedback(
         critic_name=critic_config.name,
-        error_specialty=critic_config.error_specialty or ErrorType.LOGIC,
+        error_specialty=error_specialty,
         feedback_text=clean_response,
         confidence=confidence,
         answer_correct=answer_correct,

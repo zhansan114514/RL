@@ -168,7 +168,7 @@ def generate_trajectories(
         delta_y = compute_reward_delta(v_guided_correct, v_natural)
         delta_not_y = compute_reward_delta(v_natural, v_guided_wrong)
 
-        # Build preference pairs (Algorithm 1: only one pair per round via elif)
+        # Build preference pairs (Algorithm 1: collect all pairs where delta >= epsilon)
         if delta_y >= reward_threshold:
             preference_pairs.append({
                 "actor_prompt": actor_prompt,
@@ -182,7 +182,7 @@ def generate_trajectories(
                 "direction": "towards",
                 "agent": "actor",
             })
-        elif delta_not_y >= reward_threshold:
+        if delta_not_y >= reward_threshold:
             preference_pairs.append({
                 "actor_prompt": actor_prompt,
                 "critic_prompt": critic_prompt,
@@ -366,7 +366,7 @@ def generate_trajectories_batch(
                         "direction": "towards",
                         "agent": "actor",
                     })
-                elif delta_not_y >= reward_threshold:
+                if delta_not_y >= reward_threshold:
                     all_pairs.append({
                         "actor_prompt": actor_prompt,
                         "critic_prompt": critic_prompt,

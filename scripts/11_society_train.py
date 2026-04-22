@@ -265,6 +265,7 @@ def main():
         device=args.device,
         dtype=args.dtype,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        max_samples=len(train_data),
     )
 
     # Save final registry

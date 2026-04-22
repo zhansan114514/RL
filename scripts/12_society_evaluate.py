@@ -337,7 +337,7 @@ def _run_deliberation_on_samples(
         })
 
     labels = [s.get("answer", "") for s in samples]
-    task_type = samples[0].get("task_type", "math") if samples else "math"
+    task_type = samples[0].get("task_type", "yes_no") if samples else "yes_no"
 
     initial_acc, _ = _compute_ci(all_initial_answers, labels, task_type)
     final_acc, ci_margin = _compute_ci(all_final_answers, labels, task_type)

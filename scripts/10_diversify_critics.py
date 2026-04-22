@@ -121,18 +121,13 @@ def build_critic_preference_pairs(
     logger.info(f"  Found {len(error_samples)} samples for error type '{error_type}'")
 
     # Only use error-type-filtered samples so each Critic specializes on its error domain
-    # Fallback to untyped samples when no explicit labels exist (not to ALL samples)
     if not error_samples:
-        untyped = [r for r in classified_results if not r.get("error_type")]
-        if untyped:
-            logger.warning(
-                f"  No typed samples for '{error_type}', "
-                f"using {len(untyped)} untyped samples as fallback"
-            )
-            error_samples = untyped
-        else:
-            logger.warning(f"  No samples available for error type '{error_type}'")
-            return []
+        logger.warning(
+            f"  No typed samples for error type '{error_type}'. "
+            f"Skipping this Critic to preserve data-level diversification "
+            f"(using all errors would break specialization)."
+        )
+        return []
 
     # Collect candidate responses for LLM feedback generation
     candidates = []

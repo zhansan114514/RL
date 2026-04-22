@@ -307,16 +307,28 @@ def main():
     trajectories = []
     output_file = os.path.join(output_dir, "trajectories.jsonl")
 
-    # Delete existing file to avoid duplicate trajectories on re-run
+    # Crash recovery: load existing trajectories and skip already-processed samples
+    existing_sample_ids = set()
     if os.path.exists(output_file):
-        logger.warning(f"Deleting existing {output_file} to avoid duplicates")
-        os.remove(output_file)
+        logger.info(f"Found existing {output_file}, resuming from checkpoint...")
+        with open(output_file, "r") as f:
+            for line in f:
+                try:
+                    entry = json.loads(line.strip())
+                    existing_sample_ids.add(entry["sample_id"])
+                except (json.JSONDecodeError, KeyError):
+                    continue
+        logger.info(f"  Found {len(existing_sample_ids)} existing trajectories, skipping them")
 
     for idx, sample in enumerate(samples):
         if (idx + 1) % 10 == 0:
             logger.info(f"  Progress: {idx + 1}/{len(samples)}")
 
         sample_id = f"{args.dataset}_{idx}"
+
+        # Skip already-processed samples (crash recovery)
+        if sample_id in existing_sample_ids:
+            continue
 
         # Generate initial responses
         initial_responses = generate_initial_responses(

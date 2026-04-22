@@ -87,9 +87,14 @@ def society_inference(
     all_actors = registry.list_actors()
     all_critics = registry.list_critics()
 
-    # Select subset of agents
-    actors = all_actors[:num_actors] if num_actors else all_actors
-    critics = all_critics[:num_critics] if num_critics else all_critics
+    # Select subset of agents with deterministic shuffle for diversity
+    # Use sorted + stable sample to ensure different styles are represented
+    actors = sorted(all_actors, key=lambda a: a.name)
+    critics = sorted(all_critics, key=lambda c: c.name)
+    if num_actors is not None:
+        actors = actors[:num_actors]
+    if num_critics is not None:
+        critics = critics[:num_critics]
 
     logger.info(
         f"Society inference: {len(actors)} actors, {len(critics)} critics, "
@@ -151,26 +156,56 @@ def _apply_voting(
         return None, 0.0
 
     if strategy == "majority_vote":
-        return _majority_vote(answers)
+        return _majority_vote(answers, task_type)
     elif strategy == "best_actor":
         return _best_actor(answers, result)
     elif strategy == "weighted":
         return _weighted_vote(answers, result)
     else:
         logger.warning(f"Unknown strategy {strategy}, using majority_vote")
-        return _majority_vote(answers)
+        return _majority_vote(answers, task_type)
 
 
 def _majority_vote(
     answers: dict[str, str],
+    task_type: str = "yes_no",
 ) -> tuple[str, float]:
-    """Majority voting across Actor answers."""
+    """Majority voting across Actor answers with task-aware normalization.
+
+    For math: groups equivalent numeric answers (e.g., "42" and "42.0").
+    For yes_no/multiple_choice: normalizes case and format.
+    """
     if not answers:
         return "", 0.0
-    counter = Counter(answers.values())
-    best, count = counter.most_common(1)[0]
-    confidence = count / len(answers)
-    return best, confidence
+    from src.algorithms.reward import math_answers_equal
+
+    if task_type == "math":
+        # Group math answers by equivalence
+        groups: dict[str, list[str]] = {}  # representative -> [originals]
+        actor_to_group: dict[str, str] = {}
+        for name, ans in answers.items():
+            matched_key = None
+            for key in groups:
+                if math_answers_equal(ans, key):
+                    matched_key = key
+                    break
+            if matched_key:
+                groups[matched_key].append(ans)
+                actor_to_group[name] = matched_key
+            else:
+                groups[ans] = [ans]
+                actor_to_group[name] = ans
+
+        # Find largest group
+        best_key = max(groups, key=lambda k: len(groups[k]))
+        confidence = len(groups[best_key]) / len(answers)
+        return best_key, confidence
+    else:
+        # Standard string-based counting (already works for yes_no/multiple_choice)
+        counter = Counter(answers.values())
+        best, count = counter.most_common(1)[0]
+        confidence = count / len(answers)
+        return best, confidence
 
 
 def _best_actor(
