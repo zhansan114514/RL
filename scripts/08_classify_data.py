@@ -157,7 +157,7 @@ Respond with just the error type and confidence (0-1), e.g., "arithmetic 0.8".""
                     time.sleep(self.retry_delay)
                 else:
                     logger.error(f"API call failed after {self.max_retries} attempts, using fallback")
-                    return "analytical", 0.5
+                    return "direct", 0.5
 
 
 def parse_args():

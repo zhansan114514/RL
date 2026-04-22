@@ -47,9 +47,9 @@ class ErrorTypeResult:
 # API configuration (from experiment plan)
 # ============================================================
 
-DEFAULT_API_URL = "https://open.bigmodel.cn/api/anthropic"
+DEFAULT_API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 DEFAULT_API_KEY = os.environ.get("GLM_API_KEY", "")
-DEFAULT_API_MODEL = "glm-4.5"
+DEFAULT_API_MODEL = "glm-4-flash"
 
 # Classification prompts (from experiment plan)
 REASONING_STYLE_PROMPT = """Given a math problem and a correct solution, classify the reasoning style:
@@ -92,25 +92,32 @@ def _call_api(
     api_key: str = DEFAULT_API_KEY,
     model: str = DEFAULT_API_MODEL,
 ) -> Optional[str]:
-    """Call GLM4.5 API for classification."""
+    """Call GLM API for classification (OpenAI-compatible endpoint)."""
     if not api_key:
         logger.warning("GLM_API_KEY not set, falling back to heuristic classification")
         return None
     try:
-        import anthropic
+        import requests
 
-        client = anthropic.Anthropic(
-            api_key=api_key,
-            base_url=api_url,
+        response = requests.post(
+            api_url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1,
+                "max_tokens": 64,
+            },
+            timeout=30,
         )
-        response = client.messages.create(
-            model=model,
-            max_tokens=64,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return response.content[0].text.strip()
+        response.raise_for_status()
+        result = response.json()["choices"][0]["message"]["content"].strip()
+        return result
     except ImportError:
-        logger.warning("anthropic package not installed, falling back to heuristic")
+        logger.warning("requests package not installed, falling back to heuristic")
         return None
     except Exception as e:
         logger.warning(f"API call failed: {e}, falling back to heuristic")

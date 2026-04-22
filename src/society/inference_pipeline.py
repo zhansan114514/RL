@@ -53,6 +53,7 @@ def society_inference(
     temperature: float = 0.7,
     voting_strategy: str = "majority_vote",
     router_top_k: int = 2,
+    router_uniform: bool = False,
     checkpoint_dir: Optional[str] = None,
 ) -> InferenceResult:
     """
@@ -61,9 +62,9 @@ def society_inference(
     Supports ablation experiments:
     - A1: num_actors=1, num_critics=1 (baseline ACC-Collab)
     - A2: num_actors=3, num_critics=1 (Actor diversity only)
-    - A3: num_actors=1, num_critics=4 (Critic specialization only)
-    - A4: num_actors=3, num_critics=4, router_top_k=4 (no routing)
-    - A5: num_actors=3, num_critics=4, router_top_k=2 (full system)
+    - A3: num_actors=1, num_critics=4, router_top_k=2 (Critic specialization only)
+    - A4: num_actors=3, num_critics=4, router_top_k=4, router_uniform=True (no routing)
+    - A5: num_actors=3, num_critics=4, router_top_k=2, router_uniform=False (full system)
 
     Args:
         registry: AgentRegistry with all agents.
@@ -77,6 +78,7 @@ def society_inference(
         temperature: Sampling temperature.
         voting_strategy: "majority_vote", "best_actor", or "weighted".
         router_top_k: Top-K Critics for router (use len(critics) for uniform).
+        router_uniform: If True, use equal weights instead of softmax confidence.
         checkpoint_dir: Optional crash recovery directory.
 
     Returns:
@@ -91,11 +93,16 @@ def society_inference(
 
     logger.info(
         f"Society inference: {len(actors)} actors, {len(critics)} critics, "
-        f"strategy={voting_strategy}, router_top_k={router_top_k}"
+        f"strategy={voting_strategy}, router_top_k={router_top_k}, "
+        f"uniform={router_uniform}"
     )
 
     # Run multi-agent deliberation
-    router = CriticRouter(top_k=router_top_k)
+    router = CriticRouter(top_k=router_top_k, uniform_weights=router_uniform)
+    frame = inspect.currentframe()
+    uniform_weights = frame.f_locals.get('router_uniform', False) if frame else False
+
+    router = CriticRouter(top_k=router_top_k, uniform_weights=uniform_weights)
     result = multi_agent_deliberate_single_gpu(
         inference_engine=inference_engine,
         actors=actors,
@@ -231,15 +238,15 @@ def _weighted_vote(
 # ============================================================
 
 ABLATION_CONFIGS = {
-    "A1": {"num_actors": 1, "num_critics": 1, "router_top_k": 1,
+    "A1": {"num_actors": 1, "num_critics": 1, "router_top_k": 1, "router_uniform": False,
             "description": "1 Actor + 1 Critic (baseline ACC-Collab)"},
-    "A2": {"num_actors": 3, "num_critics": 1, "router_top_k": 1,
+    "A2": {"num_actors": 3, "num_critics": 1, "router_top_k": 1, "router_uniform": False,
             "description": "3 Actors + 1 Critic (Actor diversity only)"},
-    "A3": {"num_actors": 1, "num_critics": 4, "router_top_k": 2,
+    "A3": {"num_actors": 1, "num_critics": 4, "router_top_k": 2, "router_uniform": False,
             "description": "1 Actor + 4 Critics + Router (Critic specialization only)"},
-    "A4": {"num_actors": 3, "num_critics": 4, "router_top_k": 4,
+    "A4": {"num_actors": 3, "num_critics": 4, "router_top_k": 4, "router_uniform": True,
             "description": "3 Actors + 4 Critics, uniform weights (no routing)"},
-    "A5": {"num_actors": 3, "num_critics": 4, "router_top_k": 2,
+    "A5": {"num_actors": 3, "num_critics": 4, "router_top_k": 2, "router_uniform": False,
             "description": "3 Actors + 4 Critics + Router (full system)"},
 }
 
@@ -287,6 +294,7 @@ def run_ablation(
                 num_critics=config["num_critics"],
                 num_rounds=num_rounds,
                 router_top_k=config["router_top_k"],
+                router_uniform=config.get("router_uniform", False),
                 voting_strategy="majority_vote",
                 checkpoint_dir=checkpoint_dir,
             )

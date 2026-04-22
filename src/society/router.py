@@ -90,11 +90,13 @@ class CriticRouter:
         temperature: float = 1.0,
         min_confidence: float = 0.1,
         fallback_to_uniform: bool = True,
+        uniform_weights: bool = False,
     ):
         self.top_k = top_k
         self.temperature = temperature
         self.min_confidence = min_confidence
         self.fallback_to_uniform = fallback_to_uniform
+        self.uniform_weights = uniform_weights
 
     def route(self, feedbacks: list[CriticFeedback]) -> RoutedFeedback:
         """Route feedbacks to produce aggregated weighted feedback."""
@@ -109,9 +111,12 @@ class CriticRouter:
             else:
                 return RoutedFeedback("", [], [], feedbacks)
 
-        # Softmax on confidence
-        confidences = np.array([f.confidence for f in valid])
-        weights = self._softmax(confidences, temperature=self.temperature)
+        # Softmax on confidence (or uniform if uniform_weights=True)
+        if self.uniform_weights:
+            weights = np.ones(len(valid)) / len(valid)
+        else:
+            confidences = np.array([f.confidence for f in valid])
+            weights = self._softmax(confidences, temperature=self.temperature)
 
         # Top-K selection
         k = min(self.top_k, len(valid))

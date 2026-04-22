@@ -244,9 +244,15 @@ def _run_deliberation_on_samples(
     num_rounds: int,
     max_tokens: int,
     temperature: float,
+    router_top_k: int = 2,
+    router_uniform: bool = False,
 ) -> EvalResult:
     """Run deliberation on samples with a shared vLLM engine. No model loading."""
     from src.society.multi_deliberation import multi_agent_deliberate_single_gpu
+    from src.society.router import CriticRouter
+
+    # Create router with the specified configuration
+    router = CriticRouter(top_k=router_top_k, uniform_weights=router_uniform)
 
     start_time = time.time()
     all_final_answers = []
@@ -268,18 +274,23 @@ def _run_deliberation_on_samples(
             num_rounds=num_rounds,
             max_tokens=max_tokens,
             temperature=temperature,
+            router=router,
         )
 
         final_answer = result.consensus_answer or ""
         all_final_answers.append(final_answer)
         all_responses.append(final_answer)
 
+        # Compute initial answer as majority vote across all actors (not just first)
         initial_answer = final_answer
         if result.rounds:
             first_round = result.rounds[0]
-            first_actor_name = list(first_round.actor_answers.keys())[0] if first_round.actor_answers else None
-            if first_actor_name:
-                initial_answer = first_round.actor_answers.get(first_actor_name) or final_answer
+            init_answers = [a for a in first_round.actor_answers.values() if a is not None]
+            if init_answers:
+                counter = Counter(init_answers)
+                initial_answer = counter.most_common(1)[0][0]
+            else:
+                initial_answer = final_answer
         all_initial_answers.append(initial_answer)
 
         details.append({
@@ -357,10 +368,11 @@ def run_all_evaluations(
             results["A1_baseline"] = _run_deliberation_on_samples(
                 engine, a_configs, c_configs, samples, dataset_name,
                 lora, num_rounds, max_tokens, temperature,
+                router_top_k=1,
             )
             logger.info(f"  A1: initial={results['A1_baseline'].initial_accuracy:.3f} final={results['A1_baseline'].final_accuracy:.3f}")
 
-            # A2: 3 Actors + 1 Critic
+            # A2: 3 Actors + 1 Critic (Actor diversity only)
             logger.info("[A2] 3 Actors + 1 Critic (Actor diversity)...")
             a_configs, c_configs, lora = _build_agent_configs(
                 registry,
@@ -370,10 +382,11 @@ def run_all_evaluations(
             results["A2_actor_diversity"] = _run_deliberation_on_samples(
                 engine, a_configs, c_configs, samples, dataset_name,
                 lora, num_rounds, max_tokens, temperature,
+                router_top_k=1,
             )
             logger.info(f"  A2: initial={results['A2_actor_diversity'].initial_accuracy:.3f} final={results['A2_actor_diversity'].final_accuracy:.3f}")
 
-            # A3: 1 Actor + 4 Critics + Router
+            # A3: 1 Actor + 4 Critics + Router (Critic specialization only)
             logger.info("[A3] 1 Actor + 4 Critics (Critic specialization)...")
             a_configs, c_configs, lora = _build_agent_configs(
                 registry,
@@ -383,11 +396,14 @@ def run_all_evaluations(
             results["A3_critic_specialization"] = _run_deliberation_on_samples(
                 engine, a_configs, c_configs, samples, dataset_name,
                 lora, num_rounds, max_tokens, temperature,
+                router_top_k=2,
             )
             logger.info(f"  A3: initial={results['A3_critic_specialization'].initial_accuracy:.3f} final={results['A3_critic_specialization'].final_accuracy:.3f}")
 
-            # A4: 3 Actors + 4 Critics, no routing
-            logger.info("[A4] 3 Actors + 4 Critics (no routing)...")
+            # A4: 3 Actors + 4 Critics, UNIFORM weights (no routing)
+            # Key difference from A5: uniform_weights=True means all critics
+            # contribute equally (no softmax confidence gating)
+            logger.info("[A4] 3 Actors + 4 Critics (no routing, uniform weights)...")
             a_configs, c_configs, lora = _build_agent_configs(
                 registry,
                 actor_names=all_actor_names[:3],
@@ -396,6 +412,8 @@ def run_all_evaluations(
             results["A4_no_routing"] = _run_deliberation_on_samples(
                 engine, a_configs, c_configs, samples, dataset_name,
                 lora, num_rounds, max_tokens, temperature,
+                router_top_k=4,       # Use ALL critics
+                router_uniform=True,  # Equal weights (no softmax)
             )
             logger.info(f"  A4: initial={results['A4_no_routing'].initial_accuracy:.3f} final={results['A4_no_routing'].final_accuracy:.3f}")
 
@@ -409,6 +427,8 @@ def run_all_evaluations(
             results["A5_full_system"] = _run_deliberation_on_samples(
                 engine, a_configs, c_configs, samples, dataset_name,
                 lora, num_rounds, max_tokens, temperature,
+                router_top_k=2,        # Top-2 confident critics
+                router_uniform=False,  # Softmax confidence weighting
             )
             logger.info(f"  A5: initial={results['A5_full_system'].initial_accuracy:.3f} final={results['A5_full_system'].final_accuracy:.3f}")
         else:
@@ -418,6 +438,7 @@ def run_all_evaluations(
             results["main"] = _run_deliberation_on_samples(
                 engine, a_configs, c_configs, samples, dataset_name,
                 lora, num_rounds, max_tokens, temperature,
+                router_top_k=2,
             )
 
     finally:

@@ -39,7 +39,8 @@ STEP_DEFAULTS = {
     "dataset": "math",
     "cache_dir": "output/society",
     "output_dir": None,
-    "num_agents": 5,
+    "num_responses": 5,          # Match config key name in experiment_h100.yaml
+    "num_agents": 5,             # Alias used internally (fallback)
     "num_debate_rounds": 2,
     "temperature": 0.8,
     "max_tokens": 512,
@@ -214,19 +215,38 @@ def simulate_debate_round(
     return responses
 
 
-def compute_consensus(responses: list[AgentResponse]) -> tuple[str, float]:
-    """Compute consensus answer via majority vote."""
+def compute_consensus(responses: list[AgentResponse], task_type: str = "math") -> tuple[str, float]:
+    """Compute consensus answer via majority vote with math-aware comparison."""
+    from src.algorithms.reward import math_answers_equal, normalize_answer
+
     answers = [r.answer for r in responses if r.answer]
 
     if not answers:
         return "", 0.0
 
-    counter = Counter(answers)
-    most_common = counter.most_common(1)[0]
-    consensus = most_common[0]
-    confidence = most_common[1] / len(answers)
-
-    return consensus, confidence
+    if task_type == "math":
+        # For math, use math_answers_equal for grouping equivalent answers
+        groups: dict[str, list[str]] = {}
+        for ans in answers:
+            matched_key = None
+            for key in groups:
+                if math_answers_equal(ans, key):
+                    matched_key = key
+                    break
+            if matched_key:
+                groups[matched_key].append(ans)
+            else:
+                groups[ans] = [ans]
+        # Find largest group
+        best_key = max(groups, key=lambda k: len(groups[k]))
+        confidence = len(groups[best_key]) / len(answers)
+        return best_key, confidence
+    else:
+        counter = Counter(answers)
+        most_common = counter.most_common(1)[0]
+        consensus = most_common[0]
+        confidence = most_common[1] / len(answers)
+        return consensus, confidence
 
 
 def main():
@@ -238,12 +258,15 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(os.path.join(cache_dir, "logs"), exist_ok=True)
 
+    # num_responses from config takes priority over num_agents
+    num_agents = getattr(args, "num_responses", None) or getattr(args, "num_agents", 5)
+
     logger.info("=" * 60)
     logger.info("Bootstrap Diverse Actors")
     logger.info(f"  Config: {args.config}")
     logger.info(f"  Model: {args.model_name}")
     logger.info(f"  Dataset: {args.dataset}")
-    logger.info(f"  Num agents: {args.num_agents}")
+    logger.info(f"  Num agents: {num_agents}")
     logger.info(f"  Debate rounds: {args.num_debate_rounds}")
     logger.info(f"  Output dir: {output_dir}")
     logger.info("=" * 60)
@@ -256,8 +279,11 @@ def main():
     train_data = data.get("train", [])
     test_data = data.get("test", [])
 
-    # Use test data for bootstrap (unseen data)
-    samples = test_data if test_data else train_data
+    # Use TRAIN data for bootstrap to avoid data leakage.
+    # Bootstrap trajectories are used to build DPO preference pairs for
+    # Actor/Critic diversification (scripts 09/10), so they must NOT
+    # contain test data that will later be used for evaluation.
+    samples = train_data if train_data else test_data
 
     if args.max_samples:
         samples = samples[:args.max_samples]
@@ -292,7 +318,7 @@ def main():
             model,
             sample,
             args.dataset,
-            args.num_agents,
+            num_agents,
             args.temperature,
             args.max_tokens,
             args.seed + idx * 1000,
@@ -318,7 +344,7 @@ def main():
 
         # Compute consensus from final round
         final_responses = debate_rounds[-1] if debate_rounds else initial_responses
-        consensus, confidence = compute_consensus(final_responses)
+        consensus, confidence = compute_consensus(final_responses, sample.get("task_type", "math"))
 
         trajectory = BootstrapTrajectory(
             sample_id=sample_id,
@@ -328,7 +354,7 @@ def main():
             consensus_answer=consensus,
             confidence=confidence,
             metadata={
-                "num_agents": args.num_agents,
+                "num_agents": num_agents,
                 "num_rounds": args.num_debate_rounds,
                 "temperature": args.temperature,
             },

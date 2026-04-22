@@ -4,8 +4,14 @@ Multi-agent deliberation engine for Diverse Actor-Critic Society.
 Implements the single-GPU deliberation with batched inference:
   1. All Actors generate responses (batched into single vLLM call)
   2. All Critics evaluate each Actor response (batched per actor)
-  3. Router combines feedback (softmax confidence → Top-K → weighted concat)
-  4. Majority vote for consensus answer
+  3. Router combines feedback (softmax confidence -> Top-K -> weighted concat)
+  4. Feedback is injected into next-round Actor prompts
+  5. Majority vote for consensus answer
+
+LoRA support:
+  LoRA adapters are loaded dynamically into the vLLM engine via
+  the vLLM LoRA API.  Each agent's ``lora_path`` (if set) is used
+  to load the adapter before that agent's generation calls.
 
 Crash recovery: each model call persisted to disk, skip on restart.
 """
@@ -107,38 +113,30 @@ def _load_json(path: Path) -> Optional[dict]:
 
 
 # ============================================================
-# LoRA management helpers
+# LoRA management
 # ============================================================
 
 def _load_lora_adapter(engine: Any, lora_path: str) -> Optional[str]:
     """Load a LoRA adapter into the vLLM engine.
 
     Returns the LoRA request ID if successful, None otherwise.
+
+    vLLM supports LoRA via two mechanisms:
+    1. vLLM >= 0.6: LLM.generate() accepts ``lora_request`` param
+    2. Engine-level: ``add_lora`` / ``load_lora_adapter``
     """
     if not lora_path:
         return None
     try:
-        # vLLM supports dynamic LoRA loading via load_lora_adapter
-        if hasattr(engine, 'load_lora_adapter'):
-            return engine.load_lora_adapter(lora_path)
-        elif hasattr(engine, '_engine') and hasattr(engine._engine, 'add_lora'):
-            return engine._engine.add_lora(lora_path)
-    except Exception as e:
-        logger.warning(f"Failed to load LoRA adapter from {lora_path}: {e}")
+        from vllm import LoRARequest
+        import os
+        # Use directory name as a stable lora_id
+        lora_name = Path(lora_path).name or "adapter"
+        lora_request = LoRARequest(lora_name, lora_id=hash(lora_name) % 10000, lora_path=lora_path)
+        return lora_request
+    except (ImportError, Exception) as e:
+        logger.debug(f"LoRA request creation failed for {lora_path}: {e}")
     return None
-
-
-def _unload_lora_adapter(engine: Any, lora_request_id: Optional[str]) -> None:
-    """Unload a LoRA adapter from the vLLM engine."""
-    if not lora_request_id:
-        return
-    try:
-        if hasattr(engine, 'unload_lora_adapter'):
-            engine.unload_lora_adapter(lora_request_id)
-        elif hasattr(engine, '_engine') and hasattr(engine._engine, 'remove_lora'):
-            engine._engine.remove_lora(lora_request_id)
-    except Exception as e:
-        logger.warning(f"Failed to unload LoRA adapter {lora_request_id}: {e}")
 
 
 # ============================================================
@@ -163,9 +161,12 @@ def multi_agent_deliberate_single_gpu(
 
     For each round:
     1. All Actors generate responses (batched into 1 vLLM call)
-    2. All Critics evaluate each Actor (batched: M critics × 1 actor = 1 call)
+    2. All Critics evaluate each Actor (batched: M critics x 1 actor = 1 call)
     3. Router combines Critic feedback
-    4. Consensus via majority vote
+    4. Feedback is injected into next-round Actor prompts
+    5. Consensus via majority vote
+
+    LoRA adapters are loaded via LoRARequest objects passed to generate().
 
     Args:
         inference_engine: VLLMInference instance (base model).
@@ -190,6 +191,16 @@ def multi_agent_deliberate_single_gpu(
     ckpt_dir = Path(checkpoint_dir) if checkpoint_dir else None
     lora_paths = lora_paths or {}
 
+    # Pre-create LoRA request objects for each agent (once, reuse across rounds)
+    lora_requests: dict[str, Any] = {}
+    for agent in list(actors) + list(critics):
+        lora_path = lora_paths.get(agent.name, agent.lora_path)
+        if lora_path:
+            lora_req = _load_lora_adapter(inference_engine, lora_path)
+            if lora_req is not None:
+                lora_requests[agent.name] = lora_req
+                logger.info(f"Loaded LoRA for {agent.name}: {lora_path}")
+
     rounds: list[DeliberationRound] = []
     # Track previous responses per actor (for deliberation prompts)
     actor_histories: dict[str, list[str]] = {a.name: [] for a in actors}
@@ -206,8 +217,7 @@ def multi_agent_deliberate_single_gpu(
         # ---- Step 1: Batch all Actor responses into 1 vLLM call ----
         # Check crash recovery first
         uncached_actors = []
-        uncached_indices = []
-        for ai, actor in enumerate(actors):
+        for actor in actors:
             ckpt_path = ckpt_dir / f"round_{round_num}" / f"actor_{actor.name}.json" if ckpt_dir else None
             cached = _load_json(ckpt_path) if ckpt_path else None
             if cached and "actor_response" in cached:
@@ -218,26 +228,30 @@ def multi_agent_deliberate_single_gpu(
                 actor_histories[actor.name].append(actor_response)
                 logger.info(f"[Recovery] Loaded cached response for {actor.name} round {round_num}")
             else:
-                uncached_actors.append((ai, actor))
-                uncached_indices.append(ai)
+                uncached_actors.append(actor)
 
         if uncached_actors:
             # Build all actor prompts
             actor_prompts = []
-            for _, actor in uncached_actors:
+            for actor in uncached_actors:
                 prompt = _build_actor_prompt(
                     actor, sample, dataset_name, round_num,
                     actor_histories[actor.name],
                 )
                 actor_prompts.append(prompt)
 
-            # Single batch call for all actors
-            actor_responses_batch = inference_engine.generate(
-                actor_prompts, max_tokens=max_tokens, temperature=temperature,
+            # Generate with LoRA if available
+            actor_responses_batch = _generate_with_lora(
+                inference_engine,
+                actor_prompts,
+                uncached_actors,
+                lora_requests,
+                max_tokens=max_tokens,
+                temperature=temperature,
             )
 
             # Store results
-            for (orig_idx, actor), response in zip(uncached_actors, actor_responses_batch):
+            for actor, response in zip(uncached_actors, actor_responses_batch):
                 response = response if isinstance(response, str) else str(response)
                 actor_answer = extract_answer(response, task_type)
                 round_data.actor_responses[actor.name] = response
@@ -271,9 +285,14 @@ def multi_agent_deliberate_single_gpu(
                     for c in uncached_critics
                 ]
 
-                # Single batch call for all critics evaluating this actor
-                critic_responses_batch = inference_engine.generate(
-                    critic_prompts, max_tokens=max_tokens, temperature=temperature,
+                # Generate with LoRA if available
+                critic_responses_batch = _generate_with_lora(
+                    inference_engine,
+                    critic_prompts,
+                    uncached_critics,
+                    lora_requests,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
                 )
 
                 for critic, response in zip(uncached_critics, critic_responses_batch):
@@ -294,7 +313,16 @@ def multi_agent_deliberate_single_gpu(
             routed = router.route(critic_feedbacks)
             round_data.routed_feedbacks[actor.name] = routed
 
-        # ---- Step 4: Majority vote for consensus ----
+        # ---- Step 4: Inject routed feedback into actor histories for next round ----
+        # This is critical: Actors must see Critic feedback to improve their answers
+        for actor in actors:
+            routed = round_data.routed_feedbacks.get(actor.name)
+            if routed and routed.feedback_text:
+                actor_histories[actor.name].append(
+                    f"[Critic Feedback]\n{routed.feedback_text}"
+                )
+
+        # ---- Step 5: Majority vote for consensus ----
         answers = [a for a in round_data.actor_answers.values() if a is not None]
         if answers:
             counter = Counter(answers)
@@ -329,6 +357,59 @@ multi_agent_deliberate = multi_agent_deliberate_single_gpu
 
 
 # ============================================================
+# LoRA-aware generation helper
+# ============================================================
+
+def _generate_with_lora(
+    engine: Any,
+    prompts: list[str],
+    agents: list[AgentConfig],
+    lora_requests: dict[str, Any],
+    max_tokens: int = 512,
+    temperature: float = 0.7,
+) -> list[str]:
+    """Generate responses with per-agent LoRA adapters.
+
+    If all agents share the same LoRA (or all have no LoRA), batch in one call.
+    If agents have different LoRA adapters, group by LoRA and batch per group.
+    """
+    # Group agents by their LoRA request (or None for base model)
+    groups: dict[Optional[Any], list[tuple[int, str]]] = {}  # lora_req -> [(idx, prompt)]
+    for i, (prompt, agent) in enumerate(zip(prompts, agents)):
+        lora_req = lora_requests.get(agent.name)
+        groups.setdefault(lora_req, []).append((i, prompt))
+
+    results: list[Optional[str]] = [None] * len(prompts)
+
+    for lora_req, items in groups.items():
+        batch_prompts = [p for _, p in items]
+        batch_indices = [idx for idx, _ in items]
+
+        try:
+            if lora_req is not None and hasattr(engine, '_llm') and engine._llm is not None:
+                # Use vLLM's native LoRA support
+                from vllm import SamplingParams
+                params = SamplingParams(max_tokens=max_tokens, temperature=temperature)
+                outputs = engine._llm.generate(batch_prompts, params, lora_request=lora_req)
+                batch_results = [c.text for o in outputs for c in o.outputs]
+            else:
+                # Fallback: no LoRA, use standard generate
+                batch_results = engine.generate(
+                    batch_prompts, max_tokens=max_tokens, temperature=temperature,
+                )
+        except Exception as e:
+            logger.warning(f"LoRA generation failed, falling back to base model: {e}")
+            batch_results = engine.generate(
+                batch_prompts, max_tokens=max_tokens, temperature=temperature,
+            )
+
+        for idx, result in zip(batch_indices, batch_results):
+            results[idx] = result if isinstance(result, str) else str(result)
+
+    return results
+
+
+# ============================================================
 # Prompt builders (separated for testability and reuse)
 # ============================================================
 
@@ -339,9 +420,12 @@ def _build_actor_prompt(
     round_num: int,
     previous_responses: list[str],
 ) -> str:
-    """Build prompt for an Actor response."""
+    """Build prompt for an Actor response.
+
+    For round > 0, Critic feedback is already appended to previous_responses
+    by the deliberation loop, so it will be included via the template.
+    """
     from src.prompts.templates import get_prompt_template, PromptType
-    from src.prompts.formatter import _format_responses
 
     if round_num == 0:
         prompt_type = PromptType.SINGLE_SHOT
@@ -350,9 +434,9 @@ def _build_actor_prompt(
 
     template = get_prompt_template(dataset_name, prompt_type)
 
-    # Build responses text from previous rounds (consistent with formatter.py)
+    # Build responses text from previous rounds (includes Critic feedback)
     if previous_responses:
-        responses_text = _format_responses(previous_responses)
+        responses_text = "\n\n".join(previous_responses)
     else:
         responses_text = ""
 

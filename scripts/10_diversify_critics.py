@@ -114,17 +114,22 @@ def build_critic_preference_pairs(
     classified_results: List[Dict],
     trajectories: Dict[str, Any],
     error_type: str,
+    model_name: str = "Qwen/Qwen2.5-7B-Instruct",
+    device: int = 0,
+    dtype: str = "bfloat16",
+    gpu_memory_utilization: float = 0.65,
+    max_model_len: int = 4096,
 ) -> List[Dict[str, Any]]:
     """
-    Build DPO preference pairs for Critic training from existing bootstrap data.
+    Build DPO preference pairs for Critic training using LLM-generated feedback.
 
-    Chosen: detailed feedback pointing out the specific error type
-    Rejected: generic/vague feedback
+    Uses the LLM to generate:
+    - chosen: Guided feedback specific to the error type
+    - rejected: Generic/vague feedback
 
-    Fallback for small datasets: use ALL samples to build critic pairs,
-    even if no wrong answers exist (generate synthetic feedback).
+    This avoids hardcoded template strings and produces real LLM feedback.
     """
-    from src.algorithms.reward import extract_answer
+    from src.algorithms.reward import extract_answer, math_answers_equal
 
     preference_pairs = []
 
@@ -139,6 +144,8 @@ def build_critic_preference_pairs(
     # Use all samples to build critic pairs (fallback for small datasets)
     all_samples = classified_results
 
+    # Collect candidate responses for LLM feedback generation
+    candidates = []
     for result in all_samples:
         sample_id = result["sample_id"]
 
@@ -161,50 +168,95 @@ def build_critic_preference_pairs(
         for resp in all_responses:
             response_text = resp.get("response", "")
             answer = resp.get("answer")
-            if answer and answer != correct_answer:
+            task_type = sample.get("task_type", "math")
+
+            # Use math_answers_equal for math tasks
+            if task_type == "math":
+                is_correct = math_answers_equal(answer or "", correct_answer)
+            else:
+                is_correct = (answer or "").upper() == (correct_answer or "").upper()
+
+            if not is_correct:
                 wrong_responses.append(response_text)
             else:
                 correct_responses.append(response_text)
 
-        # Build chosen: specific error-focused feedback
-        # Build rejected: vague/generic feedback
         if wrong_responses:
-            chosen = (
-                f"Let me analyze this solution carefully. "
-                f"I notice a potential {error_type} error in the reasoning. "
-                f"The correct answer should be {correct_answer}. "
-                f"Please review the calculation steps and verify the result. "
-                f"[Confidence: 0.9]"
-            )
-            rejected = (
-                f"This solution looks mostly fine, but there might be some issues. "
-                f"Try checking your work again. [Confidence: 0.3]"
-            )
-        else:
-            # No wrong answers - generate synthetic feedback pairs using the question
-            chosen = (
-                f"I've reviewed the solution for this problem. "
-                f"The key {error_type} consideration is to carefully verify each step. "
-                f"The correct answer is {correct_answer}. "
-                f"The reasoning chain should be double-checked for {error_type} issues. "
-                f"[Confidence: 0.85]"
-            )
-            rejected = (
-                f"I'm not sure about this solution. "
-                f"It might be right or wrong. "
-                f"[Confidence: 0.2]"
-            )
+            candidates.append({
+                "sample": sample,
+                "question": question,
+                "wrong_response": wrong_responses[0],
+                "correct_answer": correct_answer,
+            })
 
-        preference_pairs.append({
-            "sample": sample,
-            "chosen": chosen,
-            "rejected": rejected,
-            "metadata": {
-                "error_type": error_type,
-                "sample_id": sample_id,
-                "had_wrong_response": len(wrong_responses) > 0,
-            },
-        })
+    if not candidates:
+        logger.warning(f"  No wrong-answer candidates found for {error_type}, skipping")
+        return []
+
+    # Use LLM to generate feedback pairs
+    from src.inference.vllm_server import VLLMInference
+
+    try:
+        engine = VLLMInference(
+            model_name,
+            cuda_device=device,
+            dtype=dtype,
+            gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=max_model_len,
+        )
+
+        for cand in candidates:
+            question = cand["question"]
+            wrong_resp = cand["wrong_response"]
+            correct_answer = cand["correct_answer"]
+
+            # Chosen: guided feedback with error-type specificity
+            guided_prompt = (
+                f"You are reviewing a solution and have identified a {error_type} error.\n"
+                f"Problem: {question}\n"
+                f"Student's solution: {wrong_resp}\n"
+                f"Correct answer: {correct_answer}\n\n"
+                f"Provide specific, actionable feedback that identifies the {error_type} error "
+                f"and guides toward the correct solution. "
+                f"After your analysis, output your confidence on a scale of 0.0 to 1.0 "
+                f"using the format: [Confidence: 0.X]"
+            )
+            chosen = engine.generate_single(guided_prompt, max_tokens=256, temperature=0.3)
+
+            # Rejected: generic feedback without specialty guidance
+            generic_prompt = (
+                f"Review this solution briefly.\n"
+                f"Problem: {question}\n"
+                f"Solution: {wrong_resp}\n\n"
+                f"Provide brief feedback. "
+                f"After your analysis, output your confidence on a scale of 0.0 to 1.0 "
+                f"using the format: [Confidence: 0.X]"
+            )
+            rejected = engine.generate_single(generic_prompt, max_tokens=256, temperature=0.7)
+
+            if chosen and rejected and chosen.strip() != rejected.strip():
+                preference_pairs.append({
+                    "sample": cand["sample"],
+                    "chosen": chosen,
+                    "rejected": rejected,
+                    "metadata": {
+                        "error_type": error_type,
+                        "sample_id": cand["sample"].get("sample_id", ""),
+                        "had_wrong_response": True,
+                    },
+                })
+
+        del engine
+        import gc
+        gc.collect()
+        try:
+            import torch
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+    except Exception as e:
+        logger.error(f"  Failed to generate LLM feedback: {e}")
 
     logger.info(f"  Built {len(preference_pairs)} preference pairs")
     return preference_pairs
@@ -329,11 +381,15 @@ def main():
     for error_type in args.error_types:
         logger.info(f"\n--- Training Critic: {error_type} ---")
 
-        # Build preference pairs for this error type
+        # Build preference pairs for this error type (using LLM-generated feedback)
         preference_pairs = build_critic_preference_pairs(
             classified_results,
             trajectories,
             error_type,
+            model_name=args.model_name,
+            device=args.device,
+            dtype=args.dtype,
+            gpu_memory_utilization=args.gpu_memory_utilization,
         )
 
         if not preference_pairs:

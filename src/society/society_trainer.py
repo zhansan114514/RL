@@ -6,8 +6,11 @@ to N Actors + M Critics with data-level diversification.
 
 From experiment plan:
   For each iteration:
-    Phase A: Fix all Actors → Train all Critics (each on its error-type data)
-    Phase B: Fix all Critics → Train all Actors (each on its style data)
+    Phase A: Fix all Actors -> Train all Critics (each on its error-type data)
+    Phase B: Fix all Critics -> Train all Actors (each on its style data)
+
+Preference pairs are generated using the LLM itself (guided vs natural trajectories),
+following the ACC-Collab paper's approach, NOT hardcoded template strings.
 """
 
 from __future__ import annotations
@@ -16,13 +19,12 @@ import gc
 import json
 import logging
 import os
-import subprocess
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from src.society.agent_registry import AgentRegistry, AgentRole, ReasoningStyle, ErrorType
+from src.society.agent_registry import AgentRegistry, AgentConfig, AgentRole, ReasoningStyle, ErrorType
 from src.society.diversity_split import DiversitySplit
 from src.society.data_classifier import classify_error_type, classify_reasoning_style
 from src.algorithms.reward import extract_answer, math_answers_equal
@@ -129,11 +131,11 @@ def society_alternating_train(
         # ---- Phase A: Train all Critics (fix Actors) ----
         logger.info(f"Phase A: Training {len(critics)} Critics (Actors frozen)")
 
-        # Generate trajectories ONCE for all critics (shared reference actor)
-        reference_actor = actors[0]
-        logger.info(f"  Generating shared trajectories using {reference_actor.display_name}...")
-        trajectories = _generate_critic_trajectories(
-            actor=reference_actor,
+        # Generate trajectories with guided vs natural Critic feedback
+        # using ALL actors for diverse reference responses
+        logger.info("  Generating deliberation trajectories for Critic training...")
+        critic_trajectories = _generate_critic_trajectories(
+            actors=actors,
             registry=registry,
             dataset=dataset,
             dataset_name=dataset_name,
@@ -144,7 +146,7 @@ def society_alternating_train(
             max_model_len=max_model_len,
             seed=seed,
         )
-        logger.info(f"  Generated {len(trajectories)} shared trajectories for all critics")
+        logger.info(f"  Generated {len(critic_trajectories)} trajectories for all critics")
 
         for critic in critics:
             critic_iter_dir = f"{output_base_dir}/critics/{critic.name}/iter_{iteration}"
@@ -155,12 +157,17 @@ def society_alternating_train(
                 f"(specialty: {critic.error_specialty.value})"
             )
 
-            # Filter shared trajectories for this critic's specialty
+            # Build LLM-generated preference pairs for this critic
             preference_pairs = _build_critic_preference_pairs(
-                trajectories=trajectories,
+                trajectories=critic_trajectories,
+                critic=critic,
                 dataset=dataset,
                 dataset_name=dataset_name,
-                critic_specialty=critic.error_specialty,
+                device=device,
+                dtype=dtype,
+                gpu_memory_utilization=gpu_memory_utilization,
+                max_model_len=max_model_len,
+                seed=seed,
             )
 
             if not preference_pairs:
@@ -299,7 +306,7 @@ def _cleanup_gpu():
 
 
 def _generate_critic_trajectories(
-    actor: AgentRole,
+    actors: list[AgentConfig],
     registry: AgentRegistry,
     dataset: list[dict],
     dataset_name: str,
@@ -312,8 +319,8 @@ def _generate_critic_trajectories(
 ) -> list[dict]:
     """Generate deliberation trajectories for Critic training data.
 
-    Loads the Actor model ONCE, runs deliberation with base-model-as-critic,
-    and collects (sample, actor_response, critic_feedback, answer) tuples.
+    Loads the base model ONCE, runs deliberation with actors generating
+    responses and base-model-as-critic, and collects trajectories.
     The result is shared across all Critics to avoid repeated vLLM loading.
     """
     from src.inference.vllm_server import VLLMInference
@@ -339,11 +346,11 @@ def _generate_critic_trajectories(
 
             result = multi_agent_deliberate_single_gpu(
                 inference_engine=engine,
-                actors=[actor],
-                critics=[],  # No specialized critics yet, just get actor responses
+                actors=actors,
+                critics=[],  # No specialized critics yet
                 sample=sample,
                 dataset_name=dataset_name,
-                num_rounds=min(num_rounds, 2),  # Fewer rounds for data generation
+                num_rounds=min(num_rounds, 2),
                 max_tokens=512,
                 temperature=0.7,
             )
@@ -353,8 +360,8 @@ def _generate_critic_trajectories(
                 "actor_responses": result.final_answers,
                 "rounds": [
                     {
-                        "actor_response": r.actor_responses.get(actor.name, ""),
-                        "actor_answer": r.actor_answers.get(actor.name),
+                        "actor_response": r.actor_responses,
+                        "actor_answers": r.actor_answers,
                     }
                     for r in result.rounds
                 ],
@@ -366,7 +373,6 @@ def _generate_critic_trajectories(
 
     except Exception as e:
         logger.error(f"Failed to generate trajectories: {e}")
-        # Fallback: create simple trajectories from dataset
         for sample in dataset[:min(len(dataset), 30)]:
             trajectories.append({
                 "sample": sample,
@@ -379,74 +385,130 @@ def _generate_critic_trajectories(
 
 def _build_critic_preference_pairs(
     trajectories: list[dict],
+    critic: AgentConfig,
     dataset: list[dict],
     dataset_name: str,
-    critic_specialty: ErrorType,
+    device: int,
+    dtype: str,
+    gpu_memory_utilization: float,
+    max_model_len: int,
+    seed: int,
 ) -> list[dict]:
-    """Build DPO preference pairs for a specific Critic.
+    """Build DPO preference pairs for a specific Critic using LLM-generated feedback.
 
-    Chosen: Critic feedback that would lead to correct answer
-    Rejected: Critic feedback that is unhelpful or misleading
+    Instead of hardcoded templates, we use the LLM to generate:
+    - chosen: Guided Critic feedback (prompted to provide helpful, specific feedback
+      about the error type this critic specializes in)
+    - rejected: Natural/unguided Critic feedback (generic, potentially unhelpful)
+
+    This follows the ACC-Collab paper's approach of using guided vs natural trajectories.
     """
-    preference_pairs = []
+    from src.inference.vllm_server import VLLMInference
+    from src.society.multi_deliberation import _build_critic_prompt
 
+    preference_pairs = []
+    specialty = critic.error_specialty
+    model_name = "Qwen/Qwen2.5-7B-Instruct"
+
+    # Collect samples with errors matching this critic's specialty
+    error_samples = []
     for traj in trajectories:
         sample = traj.get("sample", {})
         correct_answer = sample.get("answer", "")
         task_type = sample.get("task_type", "math")
 
         for round_data in traj.get("rounds", []):
-            actor_answer = round_data.get("actor_answer")
-            if actor_answer is None:
-                continue
+            actor_responses = round_data.get("actor_responses", {})
+            actor_answers = round_data.get("actor_answers", {})
 
-            # Check if the actor got it wrong
-            is_correct = False
-            if task_type == "math":
-                is_correct = math_answers_equal(actor_answer, correct_answer)
-            else:
-                from src.algorithms.reward import normalize_answer
-                is_correct = normalize_answer(actor_answer, task_type) == normalize_answer(correct_answer, task_type)
+            for actor_name, actor_response in actor_responses.items():
+                actor_answer = actor_answers.get(actor_name)
+                if actor_answer is None:
+                    continue
 
-            if is_correct:
-                continue  # Only need error cases for critic training
+                # Check if wrong answer
+                is_correct = False
+                if task_type == "math":
+                    is_correct = math_answers_equal(actor_answer or "", correct_answer)
+                else:
+                    from src.algorithms.reward import normalize_answer
+                    is_correct = normalize_answer(actor_answer, task_type) == normalize_answer(correct_answer, task_type)
 
-            # Classify the error type
-            error_result = classify_error_type(
-                response=round_data.get("actor_response", ""),
-                question=sample.get("question", ""),
-                extracted_answer=actor_answer,
-                correct_answer=correct_answer,
-                use_api=True,
+                if not is_correct:
+                    error_samples.append({
+                        "sample": sample,
+                        "actor_response": actor_response,
+                        "actor_answer": actor_answer,
+                        "correct_answer": correct_answer,
+                        "task_type": task_type,
+                    })
+
+    if not error_samples:
+        logger.warning(f"  No error samples found for {critic.name}")
+        return []
+
+    # Use LLM to generate guided (chosen) vs generic (rejected) feedback
+    try:
+        engine = VLLMInference(
+            model_name,
+            cuda_device=device,
+            dtype=dtype,
+            gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=max_model_len,
+        )
+
+        for es in error_samples:
+            sample = es["sample"]
+            actor_response = es["actor_response"]
+
+            # Chosen: guided feedback with specialty-specific prompt
+            guided_prompt = (
+                f"You are reviewing a solution and have identified a {specialty.value} error.\n"
+                f"Problem: {sample.get('question', '')}\n"
+                f"Student's solution: {actor_response}\n"
+                f"Correct answer: {es['correct_answer']}\n\n"
+                f"Provide specific, actionable feedback that identifies the {specialty.value} error "
+                f"and guides toward the correct solution. "
+                f"After your analysis, output your confidence on a scale of 0.0 to 1.0 "
+                f"using the format: [Confidence: 0.X]"
             )
+            chosen = engine.generate_single(guided_prompt, max_tokens=256, temperature=0.3)
 
-            # Only include if it matches this critic's specialty
-            if error_result.error_type == critic_specialty:
-                # Construct chosen (helpful feedback) and rejected (generic) pairs
-                chosen = (
-                    f"I found an error in this solution. "
-                    f"The approach has a {critic_specialty.value} issue. "
-                    f"The correct answer should be derived by correcting "
-                    f"the {critic_specialty.value} mistake."
-                )
-                rejected = "This solution looks correct."
+            # Rejected: generic feedback without specialty guidance
+            generic_prompt = (
+                f"Review this solution briefly.\n"
+                f"Problem: {sample.get('question', '')}\n"
+                f"Solution: {actor_response}\n\n"
+                f"Provide brief feedback. "
+                f"After your analysis, output your confidence on a scale of 0.0 to 1.0 "
+                f"using the format: [Confidence: 0.X]"
+            )
+            rejected = engine.generate_single(generic_prompt, max_tokens=256, temperature=0.7)
 
+            if chosen and rejected and chosen.strip() != rejected.strip():
                 preference_pairs.append({
                     "sample": sample,
                     "chosen": chosen,
                     "rejected": rejected,
                     "metadata": {
-                        "error_type": critic_specialty.value,
-                        "actor_answer": actor_answer,
-                        "correct_answer": correct_answer,
+                        "error_type": specialty.value,
+                        "actor_answer": es["actor_answer"],
+                        "correct_answer": es["correct_answer"],
                     },
                 })
+
+        del engine
+        _cleanup_gpu()
+
+    except Exception as e:
+        logger.error(f"Failed to generate LLM feedback pairs: {e}")
+        _cleanup_gpu()
 
     return preference_pairs
 
 
 def _build_all_actor_preference_pairs(
-    actors: list,
+    actors: list[AgentConfig],
     dataset: list[dict],
     dataset_name: str,
     registry: AgentRegistry,
@@ -458,10 +520,11 @@ def _build_all_actor_preference_pairs(
 ) -> dict[str, list[dict]]:
     """Build DPO preference pairs for ALL Actors with a SINGLE vLLM instance.
 
-    Loads vLLM once, generates responses for each actor on each sample,
-    then unloads. Returns {actor_name: [preference_pairs]}.
+    Uses the LLM to generate:
+    - chosen: Response guided toward the correct answer (using GUIDED_SINGLE_SHOT template)
+    - rejected: Response guided away from the correct answer or natural response
 
-    This avoids repeated vLLM loading which causes OOM on single-GPU setups.
+    This follows the ACC-Collab paper's Algorithm 1 approach.
     """
     from src.inference.vllm_server import VLLMInference
 
@@ -487,7 +550,7 @@ def _build_all_actor_preference_pairs(
             question = sample.get("question", "")
 
             for actor in actors:
-                # Generate response with actor's style prompt
+                # Generate natural response with actor's style prompt
                 from src.society.multi_deliberation import _generate_actor_response
                 response = _generate_actor_response(
                     engine=engine,
@@ -511,7 +574,7 @@ def _build_all_actor_preference_pairs(
                     is_correct = normalize_answer(extracted_answer or "", task_type) == normalize_answer(correct_answer, task_type)
 
                 if is_correct:
-                    # Classify style
+                    # Classify style for this correct response
                     try:
                         style_result = classify_reasoning_style(
                             response=response,
@@ -520,19 +583,28 @@ def _build_all_actor_preference_pairs(
                             use_api=True,
                         )
                     except Exception:
-                        # If API fails, assume matching style for correct answers
                         style_result = None
 
+                    # Only use if style matches this actor's specialization
                     if style_result is None or style_result.style == actor.reasoning_style:
-                        all_pairs[actor.name].append({
-                            "sample": sample,
-                            "chosen": response,
-                            "rejected": f"I think the answer is {correct_answer}.",
-                            "metadata": {
-                                "style": actor.reasoning_style.value,
-                                "confidence": getattr(style_result, "confidence", 1.0),
-                            },
-                        })
+                        # Generate a "rejected" response by asking for a wrong answer
+                        wrong_prompt = (
+                            f"{actor.system_prompt}\n\n"
+                            f"Solve this problem, but make a common mistake in your reasoning.\n"
+                            f"Problem: {question}\n"
+                        )
+                        rejected = engine.generate_single(wrong_prompt, max_tokens=512, temperature=0.9)
+
+                        if rejected and rejected.strip() != response.strip():
+                            all_pairs[actor.name].append({
+                                "sample": sample,
+                                "chosen": response,
+                                "rejected": rejected,
+                                "metadata": {
+                                    "style": actor.reasoning_style.value,
+                                    "confidence": getattr(style_result, "confidence", 1.0),
+                                },
+                            })
 
         del engine
         _cleanup_gpu()

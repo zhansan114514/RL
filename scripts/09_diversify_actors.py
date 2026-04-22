@@ -166,7 +166,15 @@ def build_preference_pairs_for_style(
             answer = resp.get("answer")
             task_type = sample.get("task_type", "math")
             extracted_answer = extract_answer(response_text, task_type)
-            if extracted_answer == correct_answer:
+
+            # Use math_answers_equal for math tasks to handle "42" vs "42.0"
+            from src.algorithms.reward import math_answers_equal
+            if task_type == "math":
+                is_correct = math_answers_equal(extracted_answer or "", correct_answer)
+            else:
+                is_correct = (extracted_answer or "").upper() == (correct_answer or "").upper()
+
+            if is_correct:
                 correct_responses.append(response_text)
             else:
                 incorrect_responses.append(response_text)
