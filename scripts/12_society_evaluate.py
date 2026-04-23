@@ -193,9 +193,15 @@ def _build_agent_configs(
     for name, info in actors_info.items():
         style_str = name.replace("actor_", "")
         try:
-            style = ReasoningStyle(style_str.upper())
+            style = ReasoningStyle(style_str)
         except ValueError:
-            style = ReasoningStyle.ALGEBRAIC
+            try:
+                style = ReasoningStyle[style_str.upper()]
+            except KeyError:
+                logger.warning(
+                    f"Unknown reasoning style '{style_str}', defaulting to ALGEBRAIC"
+                )
+                style = ReasoningStyle.ALGEBRAIC
         actor_configs.append(AgentConfig(
             name=name,
             role=AgentRole.ACTOR,
@@ -209,9 +215,15 @@ def _build_agent_configs(
     for name, info in critics_info.items():
         error_str = name.replace("critic_", "")
         try:
-            error = ErrorType(error_str.upper())
+            error = ErrorType(error_str)
         except ValueError:
-            error = ErrorType.LOGIC
+            try:
+                error = ErrorType[error_str.upper()]
+            except KeyError:
+                logger.warning(
+                    f"Unknown error type '{error_str}', defaulting to LOGIC"
+                )
+                error = ErrorType.LOGIC
         critic_configs.append(AgentConfig(
             name=name,
             role=AgentRole.CRITIC,
@@ -235,10 +247,11 @@ def _build_agent_configs(
 
 
 def _build_base_agent_configs(model_name: str):
-    """Build generic AgentConfigs WITHOUT LoRA for the A1 baseline.
+    """Build generic AgentConfigs WITHOUT LoRA for a true base-model baseline.
 
-    This represents the true ACC-Collab baseline: untrained base model
-    acting as a single Actor and single Critic.
+    This represents the untrained base model (no LoRA at all), acting as a
+    single Actor and single Critic.  Used as the zero-training reference
+    point — distinct from A1 which uses trained LoRA adapters.
     """
     from src.society.agent_registry import AgentConfig, AgentRole, ReasoningStyle, ErrorType
 
@@ -411,41 +424,71 @@ def run_all_evaluations(
 
     try:
         if run_ablations:
-            # A1: 1 Actor + 1 Critic (baseline ACC-Collab)
-            # Use base model WITHOUT LoRA — true untrained baseline
-            logger.info("[A1] 1 Actor + 1 Critic (baseline, no LoRA)...")
+            # A0: Base model baseline (no training at all) — zero-training reference
+            logger.info("[A0] Base model baseline (no LoRA, no training)...")
             a_configs, c_configs, lora = _build_base_agent_configs(base_model)
-            results["A1_baseline"] = _run_deliberation_on_samples(
+            results["A0_base_model"] = _run_deliberation_on_samples(
                 engine, a_configs, c_configs, samples, dataset_name,
                 lora, num_rounds, max_tokens, temperature,
                 router_top_k=1,
             )
-            logger.info(f"  A1: initial={results['A1_baseline'].initial_accuracy:.3f} final={results['A1_baseline'].final_accuracy:.3f}")
+            logger.info(f"  A0: initial={results['A0_base_model'].initial_accuracy:.3f} final={results['A0_base_model'].final_accuracy:.3f}")
 
-            # A2: 3 Actors + 1 Critic (Actor diversity only)
-            logger.info("[A2] 3 Actors + 1 Critic (Actor diversity)...")
+            # A1: 1 trained Actor + 1 trained Critic (ACC-Collab baseline)
+            # Uses the FIRST actor's and FIRST critic's trained LoRA adapters.
+            # This represents what ACC-Collab achieves with a single agent pair,
+            # NOT the untrained base model.
+            logger.info("[A1] 1 trained Actor + 1 trained Critic (ACC-Collab baseline)...")
             a_configs, c_configs, lora = _build_agent_configs(
                 registry,
-                actor_names=all_actor_names[:3],
-                critic_names=all_critic_names[:1],
+                actor_names=[all_actor_names[0]],
+                critic_names=[all_critic_names[0]],
             )
-            results["A2_actor_diversity"] = _run_deliberation_on_samples(
+            results["A1_acc_collab"] = _run_deliberation_on_samples(
                 engine, a_configs, c_configs, samples, dataset_name,
                 lora, num_rounds, max_tokens, temperature,
+                router_top_k=1,
+            )
+            logger.info(f"  A1: initial={results['A1_acc_collab'].initial_accuracy:.3f} final={results['A1_acc_collab'].final_accuracy:.3f}")
+
+            # A2: 3 trained Actors + 1 trained Critic (Actor diversity only)
+            # Uses all 3 Actors' LoRA + 1 Critic's LoRA.
+            # Measures the isolated contribution of Actor diversity:
+            #   (3 diverse trained Actors) vs (1 trained Actor)
+            logger.info("[A2] 3 trained Actors + 1 trained Critic (Actor diversity)...")
+            a_configs, _, a_lora = _build_agent_configs(
+                registry,
+                actor_names=all_actor_names[:3],
+            )
+            _, c_configs, c_lora = _build_agent_configs(
+                registry,
+                critic_names=[all_critic_names[0]],
+            )
+            merged_lora = {**a_lora, **c_lora}
+            results["A2_actor_diversity"] = _run_deliberation_on_samples(
+                engine, a_configs, c_configs, samples, dataset_name,
+                merged_lora, num_rounds, max_tokens, temperature,
                 router_top_k=1,
             )
             logger.info(f"  A2: initial={results['A2_actor_diversity'].initial_accuracy:.3f} final={results['A2_actor_diversity'].final_accuracy:.3f}")
 
-            # A3: 1 Actor + 4 Critics + Router (Critic specialization only)
-            logger.info("[A3] 1 Actor + 4 Critics (Critic specialization)...")
-            a_configs, c_configs, lora = _build_agent_configs(
+            # A3: 1 trained Actor + 4 trained Critics + Router (Critic specialization only)
+            # Uses 1 Actor's LoRA + all 4 Critics' LoRA + MoE Router.
+            # Measures the isolated contribution of Critic specialization:
+            #   (4 specialized trained Critics + Router) vs (1 trained Critic)
+            logger.info("[A3] 1 trained Actor + 4 trained Critics + Router (Critic specialization)...")
+            a_configs, _, a_lora = _build_agent_configs(
                 registry,
-                actor_names=all_actor_names[:1],
+                actor_names=[all_actor_names[0]],
+            )
+            _, c_configs, c_lora = _build_agent_configs(
+                registry,
                 critic_names=all_critic_names,
             )
+            merged_lora = {**a_lora, **c_lora}
             results["A3_critic_specialization"] = _run_deliberation_on_samples(
                 engine, a_configs, c_configs, samples, dataset_name,
-                lora, num_rounds, max_tokens, temperature,
+                merged_lora, num_rounds, max_tokens, temperature,
                 router_top_k=2,
             )
             logger.info(f"  A3: initial={results['A3_critic_specialization'].initial_accuracy:.3f} final={results['A3_critic_specialization'].final_accuracy:.3f}")

@@ -116,32 +116,55 @@ def build_preference_pairs_for_style(
     """
     Build DPO preference pairs for a specific thinking style.
 
-    Chosen: correct response with matching style
-    Rejected: incorrect response OR correct response with different style
+    Uses per-response labels (not sample-level aggregates) so that
+    each Actor trains only on responses whose style matches its own.
 
-    Fallback for small datasets: if style-specific samples are too few,
-    use ALL samples and pick different agent responses as chosen/rejected.
+    Chosen: correct response with matching style
+    Rejected: incorrect response (from same sample)
+
+    If too few style-specific responses are found, returns an empty list.
     """
     from src.algorithms.reward import extract_answer
 
     preference_pairs = []
 
-    # Filter samples with this reasoning style
-    style_samples = [
-        r for r in classified_results
-        if r.get("reasoning_style") == thinking_style
-    ]
+    # Build a per-response style lookup:
+    # sample_id -> {response_index: reasoning_style}
+    per_response_lookup: Dict[str, Dict[int, str]] = {}
+    for r in classified_results:
+        sid = r["sample_id"]
+        per_response_lookup[sid] = {}
+        for ri, label in enumerate(r.get("per_response_labels", [])):
+            if label.get("reasoning_style"):
+                per_response_lookup[sid][ri] = label["reasoning_style"]
 
-    # Fallback: if too few style-specific samples, use ALL samples
-    use_fallback = len(style_samples) < 2
-    if use_fallback:
-        logger.info(f"  Only {len(style_samples)} samples for style '{thinking_style}', using ALL samples")
-        style_samples = classified_results
-    else:
-        logger.info(f"  Found {len(style_samples)} samples for style '{thinking_style}'")
+    # Collect all samples that have at least one response matching this style
+    matched_sample_count = 0
+    for r in classified_results:
+        sample_id = r["sample_id"]
+        resp_labels = r.get("per_response_labels", [])
 
-    for result in style_samples:
-        sample_id = result["sample_id"]
+        # Check if any response in this sample matches the target style
+        has_matching_style = any(
+            label.get("reasoning_style") == thinking_style
+            for label in resp_labels
+        )
+        if has_matching_style:
+            matched_sample_count += 1
+
+    # Strict: skip if too few style-specific samples
+    if matched_sample_count < 2:
+        logger.warning(
+            f"  Only {matched_sample_count} samples with style '{thinking_style}', "
+            f"skipping (need at least 2 for meaningful specialization)"
+        )
+        return preference_pairs
+
+    logger.info(f"  Found {matched_sample_count} samples with style '{thinking_style}'")
+
+    for r in classified_results:
+        sample_id = r["sample_id"]
+        resp_labels = r.get("per_response_labels", [])
 
         if sample_id not in trajectories:
             continue
@@ -149,6 +172,7 @@ def build_preference_pairs_for_style(
         traj = trajectories[sample_id]
         sample = traj["sample"]
         correct_answer = sample.get("answer", "")
+        task_type = sample.get("task_type", "math")
 
         # Get responses from all rounds (initial + debate) for more diversity
         all_responses = list(traj.get("initial_responses", []))
@@ -158,16 +182,14 @@ def build_preference_pairs_for_style(
         if not all_responses:
             continue
 
-        # Collect correct and incorrect responses
-        correct_responses = []
+        # Collect style-matching correct responses and any incorrect responses
+        style_correct_responses = []
         incorrect_responses = []
-        for resp in all_responses:
+        for ri, resp in enumerate(all_responses):
             response_text = resp.get("response", "")
             answer = resp.get("answer")
-            task_type = sample.get("task_type", "math")
             extracted_answer = extract_answer(response_text, task_type)
 
-            # Use math_answers_equal for math tasks to handle "42" vs "42.0"
             from src.algorithms.reward import math_answers_equal
             if task_type == "math":
                 is_correct = math_answers_equal(extracted_answer or "", correct_answer)
@@ -175,21 +197,24 @@ def build_preference_pairs_for_style(
                 is_correct = (extracted_answer or "").upper() == (correct_answer or "").upper()
 
             if is_correct:
-                correct_responses.append(response_text)
+                # Only include as "chosen" if the per-response label matches this style
+                resp_style = per_response_lookup.get(sample_id, {}).get(ri)
+                if resp_style == thinking_style:
+                    style_correct_responses.append(response_text)
+                # Skip correct responses that don't match this style
             else:
                 incorrect_responses.append(response_text)
 
         chosen_response = None
         rejected_response = None
 
-        if correct_responses and incorrect_responses:
-            # Ideal: correct vs incorrect
-            chosen_response = correct_responses[0]
+        if style_correct_responses and incorrect_responses:
+            # Ideal: style-matching correct vs incorrect — strong preference signal
+            chosen_response = style_correct_responses[0]
             rejected_response = incorrect_responses[0]
-        elif len(correct_responses) >= 2:
-            # All correct: use different agent responses as chosen/rejected
-            chosen_response = correct_responses[0]
-            rejected_response = correct_responses[-1]
+        elif len(style_correct_responses) >= 2:
+            # All matching-style correct: no meaningful preference signal.
+            continue
         elif len(incorrect_responses) >= 2:
             # All incorrect: no meaningful preference signal, skip
             continue
@@ -202,7 +227,6 @@ def build_preference_pairs_for_style(
                 "metadata": {
                     "thinking_style": thinking_style,
                     "sample_id": sample_id,
-                    "fallback": use_fallback,
                 },
             })
 
@@ -215,6 +239,7 @@ def train_actor_dpo(
     preference_pairs: List[Dict],
     thinking_style: str,
     output_dir: str,
+    dataset_name: str,
     lora_r: int,
     lora_alpha: int,
     learning_rate: float,
@@ -230,6 +255,8 @@ def train_actor_dpo(
     from datasets import Dataset
     from src.training.dpo_trainer import train_dpo
     from src.utils.model_utils import detect_model_type
+    from src.prompts.formatter import format_prompt
+    from src.prompts.templates import PromptType
 
     model_type = detect_model_type(model_name)
 
@@ -241,9 +268,15 @@ def train_actor_dpo(
     logger.info(f"    Pairs: {len(preference_pairs)}")
     logger.info(f"    Output: {actor_output_dir}")
 
+    # Reconstruct full prompts using the same template as generation
+    prompts = [
+        format_prompt(dataset_name, PromptType.SINGLE_SHOT, p["sample"])
+        for p in preference_pairs
+    ]
+
     # Convert preference_pairs to HuggingFace Dataset
     hf_data = {
-        "prompt": [p["sample"].get("question", "") for p in preference_pairs],
+        "prompt": prompts,
         "chosen": [p["chosen"] for p in preference_pairs],
         "rejected": [p["rejected"] for p in preference_pairs],
     }
@@ -323,6 +356,7 @@ def main():
             preference_pairs=preference_pairs,
             thinking_style=thinking_style,
             output_dir=output_dir,
+            dataset_name=args.dataset,
             lora_r=args.lora_r,
             lora_alpha=args.lora_alpha,
             learning_rate=args.learning_rate,

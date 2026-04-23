@@ -2,25 +2,29 @@
 Diversify Critics by training specialized LoRA adapters for each error type.
 
 For each Critic:
-1. Load base model
-2. Filter classified data by error type
-3. Build DPO preference pairs (chosen=specialty-guided feedback, rejected=generic feedback)
-4. Train with DPO
-5. Save to cache/society/critics/{agent_id}/
+1. Load trained Actor LoRA adapters (from Step 09)
+2. Run Algorithm 1 (generate_trajectories) with Actor + base Critic
+3. Extract Critic preference pairs (chosen=positive_critic, rejected=negative_critic)
+4. Filter by error type via DiversitySplit (data-level diversification)
+5. Train with DPO
+6. Save to output/society/critics/{agent_id}/
+
+This uses the same Algorithm 1 approach as society_trainer.py's
+_generate_critic_pairs_algorithm1(), ensuring data consistency across
+the bootstrap diversification phase and later alternating training.
 
 Usage:
     python scripts/10_diversify_critics.py \
-        --config configs/society/experiment_h100.yaml \
-        --error_types arithmetic logic hallucination verification
+        --config configs/society/experiment_h100.yaml
 """
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import os
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -43,6 +47,9 @@ STEP_DEFAULTS = {
     "output_dir": "output/society/critics",
     "error_types": ["arithmetic", "logic", "hallucination", "verification"],
     "max_delib_samples": 50,
+    "num_rounds": 5,
+    "num_simulations": 5,
+    "reward_threshold": 0.0,
     "lora_r": 256,
     "lora_alpha": 512,
     "learning_rate": 5e-5,
@@ -51,7 +58,6 @@ STEP_DEFAULTS = {
     "num_epochs": 1,
     "max_length": 2048,
     "beta": 0.1,
-    "num_rounds": 5,
     "seed": 42,
     "device": 0,
     "dtype": "bfloat16",
@@ -75,6 +81,91 @@ def parse_args():
     )
 
 
+# ============================================================
+# LoRA Model Adapter — same pattern as society_trainer.py
+# Bridges shared VLLMInference + LoRA to the generate() /
+# generate_single() interface expected by trajectory.py.
+# ============================================================
+
+class _LoRAModelAdapter:
+    """Wraps a shared VLLMInference engine with an optional LoRA adapter."""
+
+    def __init__(self, engine: Any, lora_request: Any = None):
+        self._engine = engine
+        self._lora_request = lora_request
+
+    def generate(self, prompts, max_tokens=256, temperature=0.7, **kwargs):
+        if self._lora_request is not None:
+            return self._generate_with_lora(prompts, max_tokens, temperature)
+        return self._engine.generate(
+            prompts, max_tokens=max_tokens, temperature=temperature, **kwargs,
+        )
+
+    def generate_single(self, prompt, max_tokens=256, temperature=0.7, **kwargs):
+        results = self.generate(
+            [prompt], max_tokens=max_tokens, temperature=temperature, **kwargs,
+        )
+        return results[0] if results else ""
+
+    def _generate_with_lora(self, prompts, max_tokens, temperature):
+        if hasattr(self._engine, "generate_with_lora"):
+            return self._engine.generate_with_lora(
+                prompts, self._lora_request,
+                max_tokens=max_tokens, temperature=temperature,
+            )
+        if hasattr(self._engine, "_llm") and self._engine._llm is not None:
+            from vllm import SamplingParams
+            params = SamplingParams(max_tokens=max_tokens, temperature=temperature, n=1)
+            outputs = self._engine._llm.generate(
+                prompts, params, lora_request=self._lora_request,
+            )
+            return [c.text for o in outputs for c in o.outputs]
+        raise RuntimeError(
+            "Engine does not support LoRA generation. "
+            "Create VLLMInference with enable_lora=True."
+        )
+
+
+def _build_adapters(
+    engine: Any,
+    lora_paths: Dict[str, str],
+) -> Dict[str, _LoRAModelAdapter]:
+    """Create _LoRAModelAdapter for each named agent path."""
+    from src.society.multi_deliberation import _load_lora_adapter
+
+    adapters: Dict[str, _LoRAModelAdapter] = {}
+    for name, path in lora_paths.items():
+        lora_req = None
+        if path:
+            try:
+                lora_req = _load_lora_adapter(engine, path)
+                logger.info(f"    Loaded LoRA for {name}: {path}")
+            except Exception as e:
+                logger.warning(f"    Could not load LoRA for {name}: {e}. Using base model.")
+        adapters[name] = _LoRAModelAdapter(engine, lora_req)
+    return adapters
+
+
+def load_actor_lora_paths(actor_dir: str) -> Dict[str, str]:
+    """Load actor LoRA paths from the registry saved by script 09."""
+    registry_file = os.path.join(actor_dir, "actor_registry.json")
+    if not os.path.exists(registry_file):
+        logger.warning(f"Actor registry not found: {registry_file}")
+        return {}
+
+    with open(registry_file) as f:
+        registry = json.load(f)
+
+    paths = {}
+    for style, info in registry.get("actors", {}).items():
+        model_path = info.get("model_path", "")
+        if model_path:
+            paths[style] = model_path
+
+    logger.info(f"  Loaded {len(paths)} actor LoRA paths from registry")
+    return paths
+
+
 def load_classified_data(input_dir: str) -> Dict[str, Any]:
     """Load classified data."""
     classified_file = os.path.join(input_dir, "classified_data.json")
@@ -89,10 +180,16 @@ def load_classified_data(input_dir: str) -> Dict[str, Any]:
 
 
 def build_critic_preference_pairs(
-    classified_results: List[Dict],
-    trajectories: Dict[str, Any],
+    samples: List[Dict],
+    actor_lora_paths: Dict[str, str],
     error_type: str,
     model_name: str = "Qwen/Qwen2.5-7B-Instruct",
+    dataset_name: str = "math",
+    num_rounds: int = 5,
+    num_simulations: int = 5,
+    reward_threshold: float = 0.0,
+    max_samples: int = 50,
+    seed: int = 42,
     device: int = 0,
     dtype: str = "bfloat16",
     gpu_memory_utilization: float = 0.65,
@@ -100,154 +197,186 @@ def build_critic_preference_pairs(
     engine=None,
 ) -> List[Dict[str, Any]]:
     """
-    Build DPO preference pairs for Critic training using LLM-generated feedback.
+    Build DPO preference pairs for Critic training using Algorithm 1.
 
-    Uses the LLM to generate:
-    - chosen: Guided feedback specific to the error type
-    - rejected: Generic/vague feedback
+    This mirrors society_trainer.py's _generate_critic_pairs_algorithm1():
+    1. Run generate_trajectories() with Actor LoRA + base Critic for each sample
+    2. Extract Critic pairs: chosen=positive_critic, rejected=negative_critic
+       where the Actor's negative response is wrong (error scenario for Critic)
+    3. Filter by error type via DiversitySplit (data-level diversification)
 
-    This avoids hardcoded template strings and produces real LLM feedback.
+    The Critic is always the base model (no LoRA) at this stage since no
+    Critic LoRA adapters exist yet. Actors use their trained LoRA adapters
+    from script 09, providing diverse real actor responses.
     """
-    from src.algorithms.reward import extract_answer, math_answers_equal
-
-    preference_pairs = []
-
-    # Filter samples with this error type (core of data-level diversification)
-    error_samples = [
-        r for r in classified_results
-        if r.get("error_type") == error_type
-    ]
-
-    logger.info(f"  Found {len(error_samples)} samples for error type '{error_type}'")
-
-    # Only use error-type-filtered samples so each Critic specializes on its error domain
-    if not error_samples:
-        logger.warning(
-            f"  No typed samples for error type '{error_type}'. "
-            f"Skipping this Critic to preserve data-level diversification "
-            f"(using all errors would break specialization)."
-        )
-        return []
-
-    # Collect candidate responses for LLM feedback generation
-    candidates = []
-    for result in error_samples:
-        sample_id = result["sample_id"]
-
-        if sample_id not in trajectories:
-            continue
-
-        traj = trajectories[sample_id]
-        sample = traj["sample"]
-        correct_answer = sample.get("answer", "")
-        question = sample.get("question", "")
-
-        # Collect all responses across rounds
-        all_responses = list(traj.get("initial_responses", []))
-        for round_responses in traj.get("debate_rounds", []):
-            all_responses.extend(round_responses)
-
-        # Find wrong answers as context for critic training
-        wrong_responses = []
-        correct_responses = []
-        for resp in all_responses:
-            response_text = resp.get("response", "")
-            answer = resp.get("answer")
-            task_type = sample.get("task_type", "math")
-
-            # Use math_answers_equal for math tasks
-            if task_type == "math":
-                is_correct = math_answers_equal(answer or "", correct_answer)
-            else:
-                is_correct = (answer or "").upper() == (correct_answer or "").upper()
-
-            if not is_correct:
-                wrong_responses.append(response_text)
-            else:
-                correct_responses.append(response_text)
-
-        if wrong_responses:
-            candidates.append({
-                "sample": sample,
-                "question": question,
-                "wrong_response": wrong_responses[0],
-                "correct_answer": correct_answer,
-            })
-
-    if not candidates:
-        logger.warning(f"  No wrong-answer candidates found for {error_type}, skipping")
-        return []
-
-    # Use provided engine or create a new one
     from src.inference.vllm_server import VLLMInference
+    from src.algorithms.trajectory import generate_trajectories
+    from src.algorithms.reward import extract_answer, math_answers_equal, normalize_answer
+    from src.society.diversity_split import DiversitySplit
+    from src.society.agent_registry import ErrorType
 
-    engine_provided = engine is not None
+    logger.info(f"  Generating Critic preference pairs for '{error_type}' via Algorithm 1")
+
+    # Collect all unique LoRA paths to determine max_loras for engine
+    all_lora_paths = {k: v for k, v in actor_lora_paths.items() if v}
+    # Need at most 1 actor LoRA at a time
+    max_loras = 1 if all_lora_paths else 0
+
+    n_samples = min(len(samples), max_samples)
+    preference_pairs: List[Dict] = []
+    _owns_engine = engine is None
+
     try:
-        if engine is None:
+        if _owns_engine:
             engine = VLLMInference(
                 model_name,
                 cuda_device=device,
                 dtype=dtype,
                 gpu_memory_utilization=gpu_memory_utilization,
                 max_model_len=max_model_len,
+                enable_lora=bool(all_lora_paths) or None,
+                max_loras=max(max_loras, 1),
+                max_lora_rank=256,
             )
 
-        for cand in candidates:
-            question = cand["question"]
-            wrong_resp = cand["wrong_response"]
-            correct_answer = cand["correct_answer"]
+        # Build adapters for all actors
+        adapters = _build_adapters(engine, all_lora_paths)
+        actor_names = list(adapters.keys())
 
-            # Chosen: guided feedback with error-type specificity
-            guided_prompt = (
-                f"You are reviewing a solution and have identified a {error_type} error.\n"
-                f"Problem: {question}\n"
-                f"Student's solution: {wrong_resp}\n"
-                f"Correct answer: {correct_answer}\n\n"
-                f"Provide specific, actionable feedback that identifies the {error_type} error "
-                f"and guides toward the correct solution. "
-                f"After your analysis, output your confidence on a scale of 0.0 to 1.0 "
-                f"using the format: [Confidence: 0.X]"
+        # Base Critic adapter (no LoRA)
+        critic_adapter = _LoRAModelAdapter(engine, None)
+
+        # Step 1: Run Algorithm 1 for each sample, round-robin actors
+        raw_pairs: List[Dict] = []
+        for i, sample in enumerate(samples[:n_samples]):
+            if (i + 1) % 10 == 0:
+                logger.info(f"    Algorithm 1: sample {i + 1}/{n_samples}")
+
+            # Round-robin actors so critic sees diverse styles
+            actor_name = actor_names[i % len(actor_names)]
+            actor_adapter = adapters[actor_name]
+
+            task_type = sample.get("task_type", "math")
+            correct_answer = sample.get("answer", "")
+
+            algo_pairs = generate_trajectories(
+                actor_model=actor_adapter,
+                critic_model=critic_adapter,
+                sample=sample,
+                dataset_name=dataset_name,
+                num_rounds=num_rounds,
+                num_simulations=num_simulations,
+                reward_threshold=reward_threshold,
+                seed=seed + i,
             )
-            chosen = engine.generate_single(guided_prompt, max_tokens=256, temperature=0.3)
 
-            # Rejected: generic feedback without specialty guidance
-            generic_prompt = (
-                f"Review this solution briefly.\n"
-                f"Problem: {question}\n"
-                f"Solution: {wrong_resp}\n\n"
-                f"Provide brief feedback. "
-                f"After your analysis, output your confidence on a scale of 0.0 to 1.0 "
-                f"using the format: [Confidence: 0.X]"
-            )
-            rejected = engine.generate_single(generic_prompt, max_tokens=256, temperature=0.7)
+            # Extract Critic preference pairs from Algorithm 1 results
+            for pair in algo_pairs:
+                # pair has: positive, negative (actor),
+                #           positive_critic, negative_critic,
+                #           delta, direction
+                negative_actor = pair["negative"]
+                negative_answer = extract_answer(negative_actor, task_type)
 
-            if chosen and rejected and chosen.strip() != rejected.strip():
-                preference_pairs.append({
-                    "sample": cand["sample"],
-                    "chosen": chosen,
-                    "rejected": rejected,
-                    "metadata": {
-                        "error_type": error_type,
-                        "sample_id": cand["sample"].get("sample_id", ""),
-                        "had_wrong_response": True,
-                    },
-                })
+                # Only keep pairs where the actor's negative response was wrong
+                # (error scenario — this is where Critic feedback matters)
+                if task_type == "math":
+                    is_wrong = not math_answers_equal(
+                        negative_answer or "", correct_answer,
+                    )
+                else:
+                    is_wrong = normalize_answer(
+                        negative_answer or "", task_type,
+                    ) != normalize_answer(correct_answer, task_type)
 
-        if not engine_provided:
-            del engine
-            import gc
-            gc.collect()
+                if is_wrong:
+                    raw_pairs.append({
+                        "sample": sample,
+                        "chosen": pair["positive_critic"],
+                        "rejected": pair["negative_critic"],
+                        "actor_response": negative_actor,
+                        "actor_answer": negative_answer,
+                        "correct_answer": correct_answer,
+                        "task_type": task_type,
+                        "delta": pair["delta"],
+                        "direction": pair["direction"],
+                    })
+
+        logger.info(
+            f"  Algorithm 1 produced {len(raw_pairs)} raw critic pairs "
+            f"for '{error_type}'"
+        )
+
+        # Step 2: Filter by error type via DiversitySplit
+        if raw_pairs:
             try:
-                import torch
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
+                specialty = ErrorType(error_type.lower())
+            except ValueError:
+                logger.warning(f"  Unknown error type '{error_type}', skipping filter")
+                preference_pairs = raw_pairs
+            else:
+                splitter = DiversitySplit(
+                    balance=True, seed=seed, use_api=True,
+                    cache_dir=input_dir,
+                )
+                error_splits = splitter.split_by_error_type(
+                    samples=[p["sample"] for p in raw_pairs],
+                    responses=[p["actor_response"] for p in raw_pairs],
+                    correct_answers=[p["correct_answer"] for p in raw_pairs],
+                    extracted_answers=[p["actor_answer"] or "" for p in raw_pairs],
+                )
+
+                specialty_items = error_splits.get(specialty, [])
+
+                # O(1) lookup by (question, actor_response)
+                pair_index: Dict[tuple, Dict] = {}
+                for p in raw_pairs:
+                    key = (p["sample"].get("question", ""), p["actor_response"])
+                    pair_index[key] = p
+
+                for sample, _response in specialty_items:
+                    key = (sample.get("question", ""), _response)
+                    p = pair_index.get(key)
+                    if p is not None:
+                        preference_pairs.append({
+                            "sample": p["sample"],
+                            "chosen": p["chosen"],
+                            "rejected": p["rejected"],
+                            "actor_response": p.get("actor_response", ""),
+                            "metadata": {
+                                "error_type": specialty.value,
+                                "delta": p["delta"],
+                                "direction": p["direction"],
+                            },
+                        })
+
+                logger.info(
+                    f"  {len(preference_pairs)}/{len(raw_pairs)} pairs "
+                    f"matched specialty '{specialty.value}'"
+                )
+        else:
+            logger.warning(f"  No raw pairs produced for '{error_type}'")
+
+        if _owns_engine:
+            del engine
+            _cleanup_gpu()
 
     except Exception as e:
-        logger.error(f"  Failed to generate LLM feedback: {e}")
+        logger.error(f"  Failed to generate Critic pairs for '{error_type}': {e}")
+        if _owns_engine:
+            _cleanup_gpu()
 
-    logger.info(f"  Built {len(preference_pairs)} preference pairs")
     return preference_pairs
+
+
+def _cleanup_gpu():
+    """Release GPU memory."""
+    gc.collect()
+    try:
+        import torch
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
 
 
 def train_critic_dpo(
@@ -255,6 +384,7 @@ def train_critic_dpo(
     preference_pairs: List[Dict],
     error_type: str,
     output_dir: str,
+    dataset_name: str,
     lora_r: int,
     lora_alpha: int,
     learning_rate: float,
@@ -270,6 +400,8 @@ def train_critic_dpo(
     from datasets import Dataset
     from src.training.dpo_trainer import train_dpo
     from src.utils.model_utils import detect_model_type
+    from src.prompts.formatter import format_prompt
+    from src.prompts.templates import PromptType
 
     model_type = detect_model_type(model_name)
 
@@ -281,9 +413,24 @@ def train_critic_dpo(
     logger.info(f"    Pairs: {len(preference_pairs)}")
     logger.info(f"    Output: {critic_output_dir}")
 
+    # Reconstruct full prompts using the same template as inference
+    # (DELIBERATION_CRITIC with actor_response)
+    prompts = []
+    for p in preference_pairs:
+        sample = p.get("sample", {})
+        actor_resp = p.get("actor_response", "")
+        if actor_resp:
+            prompt = format_prompt(
+                dataset_name, PromptType.DELIBERATION_CRITIC, sample,
+                actor_response=actor_resp,
+            )
+        else:
+            prompt = format_prompt(dataset_name, PromptType.SINGLE_SHOT, sample)
+        prompts.append(prompt)
+
     # Convert preference_pairs to HuggingFace Dataset
     hf_data = {
-        "prompt": [p["sample"].get("question", "") for p in preference_pairs],
+        "prompt": prompts,
         "chosen": [p["chosen"] for p in preference_pairs],
         "rejected": [p["rejected"] for p in preference_pairs],
     }
@@ -318,46 +465,85 @@ def main():
     # Setup directories
     input_dir = args.input_dir
     output_dir = args.output_dir
+    actor_dir = args.actor_dir
     os.makedirs(output_dir, exist_ok=True)
 
     logger.info("=" * 60)
-    logger.info("Diversify Critics")
+    logger.info("Diversify Critics (Algorithm 1 trajectory-based)")
     logger.info(f"  Model: {args.model_name}")
     logger.info(f"  Input dir: {input_dir}")
-    logger.info(f"  Actor dir: {args.actor_dir}")
+    logger.info(f"  Actor dir: {actor_dir}")
     logger.info(f"  Output dir: {output_dir}")
     logger.info(f"  Error types: {args.error_types}")
     logger.info("=" * 60)
 
-    # Load classified data
+    # Load classified data to get sample list
     logger.info("[Step 1] Loading classified data...")
     classified_data = load_classified_data(input_dir)
     classified_results = classified_data["results"]
 
-    # Load trajectories
-    logger.info("[Step 2] Loading bootstrap trajectories...")
+    # Build per-error-type sample lists from classified data
+    error_sample_ids: Dict[str, List[str]] = {}
+    for r in classified_results:
+        et = r.get("error_type")
+        if et:
+            error_sample_ids.setdefault(et, []).append(r["sample_id"])
 
-    # Load trajectories directly
+    # Load original dataset for Algorithm 1 input
+    logger.info("[Step 2] Loading dataset for Algorithm 1...")
+    from src.data.loader import load_dataset
+    dataset = load_dataset(args.dataset)
+
+    # Build sample lookup and filter to classified error samples
+    sample_lookup = {}
+    for sample in dataset:
+        q = sample.get("question", "")
+        if q:
+            sample_lookup[q] = sample
+
+    # Load trajectories to build sample_id -> sample mapping
     bootstrap_dir = os.path.join(args.cache_dir, "bootstrap")
     trajectory_file = os.path.join(bootstrap_dir, "trajectories.jsonl")
 
-    trajectories = {}
+    # Build a mapping from sample_id to the standardized sample
+    id_to_sample: Dict[str, Dict] = {}
     if os.path.exists(trajectory_file):
         with open(trajectory_file) as f:
             for line in f:
                 if line.strip():
                     traj = json.loads(line)
-                    trajectories[traj["sample_id"]] = traj
-        logger.info(f"  Loaded {len(trajectories)} trajectories")
+                    sample = traj.get("sample", {})
+                    sid = traj.get("sample_id", "")
+                    if sid and sample:
+                        id_to_sample[sid] = sample
+        logger.info(f"  Loaded {len(id_to_sample)} trajectory samples")
+    else:
+        # Fallback: use dataset samples directly
+        for sample in dataset:
+            q = sample.get("question", "")
+            id_to_sample[q] = sample
+        logger.info(f"  Using {len(id_to_sample)} dataset samples directly")
+
+    # Load Actor LoRA paths from script 09
+    logger.info("[Step 3] Loading Actor LoRA paths...")
+    actor_lora_paths = load_actor_lora_paths(actor_dir)
+
+    if not actor_lora_paths:
+        logger.warning(
+            "No Actor LoRA paths found. Algorithm 1 will run with base-model "
+            "actors only (no LoRA). This reduces trajectory quality."
+        )
 
     # Train each critic
-    logger.info("[Step 3] Training specialized critics...")
+    logger.info("[Step 4] Generating preference pairs & training Critics...")
 
     critic_paths = {}
 
-    # Create a single vLLM engine to reuse across all error types
+    # Create a single vLLM engine shared across all error types
     from src.inference.vllm_server import VLLMInference
     shared_engine = None
+
+    all_lora_paths = {k: v for k, v in actor_lora_paths.items() if v}
     try:
         shared_engine = VLLMInference(
             args.model_name,
@@ -365,21 +551,48 @@ def main():
             dtype=args.dtype,
             gpu_memory_utilization=args.gpu_memory_utilization,
             max_model_len=4096,
+            enable_lora=bool(all_lora_paths) or None,
+            max_loras=max(1, len(all_lora_paths)),
+            max_lora_rank=256,
         )
     except Exception as e:
-        logger.warning(f"Failed to create shared vLLM engine, will create per-error-type: {e}")
+        logger.warning(f"Failed to create shared vLLM engine: {e}")
+        logger.warning("Will attempt per-error-type engine creation")
 
     try:
-        # Phase 1: Use shared engine to generate preference pairs for ALL error types
+        # Phase 1: Generate preference pairs for ALL error types
         all_pairs = {}
         for error_type in args.error_types:
             logger.info(f"\n--- Building pairs for Critic: {error_type} ---")
 
+            # Collect samples with this error type
+            sample_ids = error_sample_ids.get(error_type, [])
+            samples_for_type = [
+                id_to_sample[sid]
+                for sid in sample_ids
+                if sid in id_to_sample
+            ]
+
+            if not samples_for_type:
+                logger.warning(
+                    f"  No samples found for error type '{error_type}'. "
+                    f"Skipping this Critic to preserve data-level diversification."
+                )
+                continue
+
+            logger.info(f"  {len(samples_for_type)} samples for '{error_type}'")
+
             preference_pairs = build_critic_preference_pairs(
-                classified_results,
-                trajectories,
-                error_type,
+                samples=samples_for_type,
+                actor_lora_paths=actor_lora_paths,
+                error_type=error_type,
                 model_name=args.model_name,
+                dataset_name=args.dataset,
+                num_rounds=args.num_rounds,
+                num_simulations=args.num_simulations,
+                reward_threshold=args.reward_threshold,
+                max_samples=args.max_delib_samples,
+                seed=args.seed,
                 device=args.device,
                 dtype=args.dtype,
                 gpu_memory_utilization=args.gpu_memory_utilization,
@@ -395,13 +608,7 @@ def main():
         if shared_engine is not None:
             del shared_engine
             shared_engine = None
-            import gc
-            gc.collect()
-            try:
-                import torch
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
+            _cleanup_gpu()
 
         # Phase 2: Train each critic (no engine needed, DPO runs in subprocess)
         for error_type, preference_pairs in all_pairs.items():
@@ -412,6 +619,7 @@ def main():
                 preference_pairs=preference_pairs,
                 error_type=error_type,
                 output_dir=output_dir,
+                dataset_name=args.dataset,
                 lora_r=args.lora_r,
                 lora_alpha=args.lora_alpha,
                 learning_rate=args.learning_rate,
@@ -430,16 +638,10 @@ def main():
         # Clean up shared engine if still alive (e.g. on early exit)
         if shared_engine is not None:
             del shared_engine
-            import gc
-            gc.collect()
-            try:
-                import torch
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
+            _cleanup_gpu()
 
     # Save critic registry
-    logger.info("\n[Step 4] Saving critic registry...")
+    logger.info("\n[Step 5] Saving critic registry...")
 
     registry_file = os.path.join(output_dir, "critic_registry.json")
     with open(registry_file, "w") as f:

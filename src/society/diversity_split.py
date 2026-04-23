@@ -35,7 +35,7 @@ class DiversitySplit:
         balance: bool = True,
         seed: int = 42,
         use_api: bool = True,
-        cache_dir: str = "cache/society/classifications",
+        cache_dir: str = "output/society/classified",
     ):
         self.balance = balance
         self.rng = np.random.default_rng(seed)

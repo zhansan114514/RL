@@ -41,6 +41,35 @@ class InferenceResult:
 # Main inference function
 # ============================================================
 
+def _select_agents(
+    agents: list,
+    count: Optional[int],
+    offset: int = 0,
+) -> list:
+    """Select a subset of agents with deterministic round-robin offset.
+
+    Instead of always picking the lexicographically first agents,
+    rotate the starting position by *offset* so that different ablation
+    configs (A1, A3, ...) exercise different agents.  This makes the
+    single-agent baselines representative rather than biased toward one
+    particular name.
+
+    Args:
+        agents: Sorted list of agent configs.
+        count: Number to select (None = all).
+        offset: Round-robin start index (modulo len(agents)).
+
+    Returns:
+        Selected subset, preserving the sorted order.
+    """
+    if count is None or count >= len(agents):
+        return list(agents)
+    start = offset % len(agents)
+    # Build a rotated view then take the first *count* items
+    rotated = agents[start:] + agents[:start]
+    return rotated[:count]
+
+
 def society_inference(
     registry: AgentRegistry,
     sample: dict,
@@ -55,6 +84,7 @@ def society_inference(
     router_top_k: int = 2,
     router_uniform: bool = False,
     checkpoint_dir: Optional[str] = None,
+    ablation_label: Optional[str] = None,
 ) -> InferenceResult:
     """
     Run society inference with configurable voting strategies.
@@ -87,14 +117,22 @@ def society_inference(
     all_actors = registry.list_actors()
     all_critics = registry.list_critics()
 
-    # Select subset of agents with deterministic shuffle for diversity
-    # Use sorted + stable sample to ensure different styles are represented
-    actors = sorted(all_actors, key=lambda a: a.name)
-    critics = sorted(all_critics, key=lambda c: c.name)
-    if num_actors is not None:
-        actors = actors[:num_actors]
-    if num_critics is not None:
-        critics = critics[:num_critics]
+    # Sort for determinism, then apply round-robin offset so different
+    # ablation configs (A1, A3, ...) select different agents instead of
+    # always picking the lexicographically first one.
+    sorted_actors = sorted(all_actors, key=lambda a: a.name)
+    sorted_critics = sorted(all_critics, key=lambda c: c.name)
+
+    # Derive stable offsets from the ablation label so each config
+    # exercises a different subset of agents.
+    # Use hashlib (deterministic) instead of Python's hash() which is
+    # randomized via PYTHONHASHSEED and non-reproducible across runs.
+    import hashlib
+    actor_offset = int(hashlib.md5((ablation_label or "").encode()).hexdigest(), 16) % max(len(sorted_actors), 1)
+    critic_offset = int(hashlib.md5((ablation_label or "").encode()).hexdigest(), 16) % max(len(sorted_critics), 1)
+
+    actors = _select_agents(sorted_actors, num_actors, actor_offset)
+    critics = _select_agents(sorted_critics, num_critics, critic_offset)
 
     logger.info(
         f"Society inference: {len(actors)} actors, {len(critics)} critics, "
@@ -160,7 +198,7 @@ def _apply_voting(
     elif strategy == "best_actor":
         return _best_actor(answers, result)
     elif strategy == "weighted":
-        return _weighted_vote(answers, result)
+        return _weighted_vote(answers, result, task_type)
     else:
         logger.warning(f"Unknown strategy {strategy}, using majority_vote")
         return _majority_vote(answers, task_type)
@@ -302,23 +340,46 @@ def _collect_answer_correctness(result: MultiDeliberationResult) -> dict[str, fl
 def _weighted_vote(
     answers: dict[str, str],
     result: MultiDeliberationResult,
+    task_type: str = "yes_no",
 ) -> tuple[str, float]:
     """Weighted voting: each Actor's vote is weighted by Critics' correctness judgment.
 
     This leverages the Critics' [Answer_Correct: yes/no] tags -- Actors whose
     answers were judged correct by more Critics receive higher voting weight.
     Falls back to Critic confidence when answer-correctness tags are absent.
+
+    For math tasks, groups equivalent answers (e.g., "42" and "42.0") using
+    math_answers_equal, consistent with _majority_vote.
     """
     if not answers:
         return "", 0.0
 
+    from src.algorithms.reward import math_answers_equal
+
     # Collect Critics' correctness judgment per Actor
     actor_scores = _collect_answer_correctness(result)
 
-    # Group actors by answer value
+    # Group actors by answer value (math-aware for equivalence)
     answer_votes: dict[str, list[str]] = {}
-    for actor_name, answer in answers.items():
-        answer_votes.setdefault(answer, []).append(actor_name)
+    actor_to_group: dict[str, str] = {}
+
+    if task_type == "math":
+        for actor_name, answer in answers.items():
+            matched_key = None
+            for key in answer_votes:
+                if math_answers_equal(answer, key):
+                    matched_key = key
+                    break
+            if matched_key:
+                answer_votes[matched_key].append(actor_name)
+                actor_to_group[actor_name] = matched_key
+            else:
+                answer_votes[answer] = [actor_name]
+                actor_to_group[actor_name] = answer
+    else:
+        for actor_name, answer in answers.items():
+            answer_votes.setdefault(answer, []).append(actor_name)
+            actor_to_group[actor_name] = answer
 
     # Weight each answer = sum of its actors' correctness scores
     answer_weights = {
@@ -342,16 +403,18 @@ def _weighted_vote(
 # ============================================================
 
 ABLATION_CONFIGS = {
+    "A0": {"num_actors": 1, "num_critics": 1, "router_top_k": 1, "router_uniform": False,
+            "description": "Base model baseline (no LoRA, no training)"},
     "A1": {"num_actors": 1, "num_critics": 1, "router_top_k": 1, "router_uniform": False,
-            "description": "1 Actor + 1 Critic (baseline ACC-Collab)"},
+            "description": "1 trained Actor + 1 trained Critic (ACC-Collab baseline)"},
     "A2": {"num_actors": 3, "num_critics": 1, "router_top_k": 1, "router_uniform": False,
-            "description": "3 Actors + 1 Critic (Actor diversity only)"},
+            "description": "3 trained Actors + 1 trained Critic (Actor diversity only)"},
     "A3": {"num_actors": 1, "num_critics": 4, "router_top_k": 2, "router_uniform": False,
-            "description": "1 Actor + 4 Critics + Router (Critic specialization only)"},
+            "description": "1 trained Actor + 4 trained Critics + Router (Critic specialization only)"},
     "A4": {"num_actors": 3, "num_critics": 4, "router_top_k": 4, "router_uniform": True,
-            "description": "3 Actors + 4 Critics, uniform weights (no routing)"},
+            "description": "3 trained Actors + 4 trained Critics, uniform weights (no routing)"},
     "A5": {"num_actors": 3, "num_critics": 4, "router_top_k": 2, "router_uniform": False,
-            "description": "3 Actors + 4 Critics + Router (full system)"},
+            "description": "3 trained Actors + 4 trained Critics + Router (full system)"},
 }
 
 
@@ -401,6 +464,7 @@ def run_ablation(
                 router_uniform=config.get("router_uniform", False),
                 voting_strategy="majority_vote",
                 checkpoint_dir=checkpoint_dir,
+                ablation_label=config_name,
             )
             config_results.append(result)
 

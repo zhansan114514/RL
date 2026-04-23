@@ -148,9 +148,17 @@ def create_agent_registry(
     # Register actors: model_path=base model, lora_path=LoRA checkpoint
     for style, path in actor_paths.items():
         try:
-            reasoning_style = ReasoningStyle(style.upper())
+            # Enum values are lowercase (e.g. "algebraic"), try value match first,
+            # then name match (e.g. "ALGEBRAIC" -> ReasoningStyle.ALGEBRAIC)
+            reasoning_style = ReasoningStyle(style)
         except ValueError:
-            reasoning_style = ReasoningStyle.ALGEBRAIC
+            try:
+                reasoning_style = ReasoningStyle[style.upper()]
+            except KeyError:
+                logger.warning(
+                    f"Unknown reasoning style '{style}', defaulting to ALGEBRAIC"
+                )
+                reasoning_style = ReasoningStyle.ALGEBRAIC
 
         config = AgentConfig(
             name=f"actor_{style}",
@@ -167,9 +175,17 @@ def create_agent_registry(
     # Register critics: model_path=base model, lora_path=LoRA checkpoint
     for error_type, path in critic_paths.items():
         try:
-            error = ErrorType(error_type.upper())
+            # Enum values are lowercase (e.g. "arithmetic"), try value match first,
+            # then name match (e.g. "ARITHMETIC" -> ErrorType.ARITHMETIC)
+            error = ErrorType(error_type)
         except ValueError:
-            error = ErrorType.LOGIC
+            try:
+                error = ErrorType[error_type.upper()]
+            except KeyError:
+                logger.warning(
+                    f"Unknown error type '{error_type}', defaulting to LOGIC"
+                )
+                error = ErrorType.LOGIC
 
         config = AgentConfig(
             name=f"critic_{error_type}",
@@ -266,6 +282,7 @@ def main():
         dtype=args.dtype,
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_samples=len(train_data),
+        classifications_cache_dir=args.cache_dir + "/classified",
     )
 
     # Save final registry

@@ -30,7 +30,7 @@ DATASET_REGISTRY = {
         "splits": None,  # BBH needs custom splitting
     },
     "sciq": {
-        "hf_id": "sciq",
+        "hf_id": "allenai/sciq",
         "task_type": "multiple_choice",
         "splits": ["train", "validation", "test"],
     },

@@ -278,7 +278,7 @@ def classify_reasoning_style(
     question: str,
     correct_answer: str = "",
     use_api: bool = True,
-    cache_dir: str = "cache/society/classifications",
+    cache_dir: str = "output/society/classified",
 ) -> ReasoningStyleResult:
     """
     Classify the reasoning style of a correct response.
@@ -338,7 +338,7 @@ def classify_error_type(
     extracted_answer: str = "",
     correct_answer: str = "",
     use_api: bool = True,
-    cache_dir: str = "cache/society/classifications",
+    cache_dir: str = "output/society/classified",
 ) -> ErrorTypeResult:
     """
     Classify the error type of an incorrect response.
@@ -401,7 +401,7 @@ class DataClassifier:
 
     def classify_reasoning_style(
         self, response: str, question: str, correct_answer: str = "",
-        use_api: bool = True, cache_dir: str = "cache/society/classifications",
+        use_api: bool = True, cache_dir: str = "output/society/classified",
     ) -> ReasoningStyleResult:
         return classify_reasoning_style(
             response, question, correct_answer, use_api, cache_dir
@@ -410,7 +410,7 @@ class DataClassifier:
     def classify_error_type(
         self, response: str, question: str, extracted_answer: str = "",
         correct_answer: str = "", use_api: bool = True,
-        cache_dir: str = "cache/society/classifications",
+        cache_dir: str = "output/society/classified",
     ) -> ErrorTypeResult:
         return classify_error_type(
             response, question, extracted_answer, correct_answer, use_api, cache_dir

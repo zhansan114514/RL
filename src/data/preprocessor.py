@@ -53,19 +53,46 @@ def standardize_sample(
             choice_labels = choices.get("label", [])
             result["choices"] = choice_texts
             result["choice_labels"] = choice_labels if choice_labels else [chr(65 + i) for i in range(len(choice_texts))]
-        elif isinstance(choices, list):
+        elif isinstance(choices, list) and choices:
             result["choices"] = choices
             # Map choices to A/B/C/D
             labels = [chr(65 + i) for i in range(len(choices))]
             result["choice_labels"] = labels
+        else:
+            # No choices provided: SCIQ format (correct_answer + distractor1/2/3)
+            # Also handles choices=[] (empty list) from datasets without explicit choices.
+            correct = sample.get("correct_answer", "")
+            distractors = [
+                sample.get(f"distractor{i}", "")
+                for i in range(1, 4)
+                if sample.get(f"distractor{i}")
+            ]
+            if correct and distractors:
+                import random as _rng
+                import hashlib
+                # Deterministic seed from sample content so the same SCIQ
+                # sample always produces the same option order and answer
+                # label across processes and runs.
+                seed_bytes = hashlib.md5(
+                    (correct + "".join(distractors)).encode()
+                ).digest()
+                seed_int = int.from_bytes(seed_bytes[:4], "little")
+                _r = _rng.Random(seed_int)
+                all_options = [correct] + distractors
+                _r.shuffle(all_options)
+                result["choices"] = all_options
+                result["choice_labels"] = [chr(65 + i) for i in range(len(all_options))]
+                correct_idx = all_options.index(correct)
+                result["answer"] = chr(65 + correct_idx)
 
-        # Handle answer as index or string
-        answer = sample.get("answer", sample.get("answerKey", ""))
-        if isinstance(answer, int):
-            n_choices = len(result["choices"]) if result["choices"] else 4
-            result["answer"] = chr(65 + answer) if answer < n_choices else ""
-        elif isinstance(answer, str):
-            result["answer"] = answer.upper().strip("()")
+        # Handle answer as index or string (skip if already set by SCIQ handler)
+        if not result["answer"]:
+            answer = sample.get("answer", sample.get("answerKey", ""))
+            if isinstance(answer, int):
+                n_choices = len(result["choices"]) if result["choices"] else 4
+                result["answer"] = chr(65 + answer) if answer < n_choices else ""
+            elif isinstance(answer, str):
+                result["answer"] = answer.upper().strip("()")
 
     elif task_type == "math":
         # MATH/GSM8K format with \boxed{} or "#### number" answers

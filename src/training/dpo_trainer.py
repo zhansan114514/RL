@@ -32,6 +32,7 @@ def train_dpo(
     warmup_ratio: float = 0.1,
     beta: float = 0.1,
     loss_type: str = "sigmoid",
+    sft_weight: float = 1.0,
     max_grad_norm: float = 1.0,
     optim: str = "adamw_torch",
     weight_decay: float = 0.01,
@@ -59,6 +60,10 @@ def train_dpo(
         warmup_ratio: Warmup ratio.
         beta: DPO beta parameter controlling deviation from reference policy.
         loss_type: DPO loss type ("sigmoid", "hinge", "ipo", etc.).
+        sft_weight: Weight for the SFT NLL regularization loss.
+            Per ACC-Collab paper Appendix A, NLL regularization with weight 1.0
+            is used alongside the DPO loss. Set to 0.0 to disable SFT regularization
+            and use pure DPO loss only.
         max_grad_norm: Max gradient norm for clipping (important for FP16).
         optim: Optimizer type.
         weight_decay: Weight decay for optimizer.
@@ -141,6 +146,7 @@ def train_dpo(
         "warmup_ratio": warmup_ratio,
         "beta": beta,
         "loss_type": loss_type,
+        "sft_weight": sft_weight,
         "max_grad_norm": max_grad_norm,
         "optim": optim,
         "weight_decay": weight_decay,

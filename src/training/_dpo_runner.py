@@ -97,6 +97,16 @@ def _run():
     # Per ACC-Collab paper Appendix A: "we use a negative log-likelihood (NLL)
     # regularization term (with weight 1)" — achieved by adding "sft" to loss_types.
     loss_type_val = cfg.get("loss_type", "sigmoid")
+    sft_weight = cfg.get("sft_weight", 1.0)
+
+    if sft_weight > 0:
+        effective_loss_type = [loss_type_val, "sft"]
+        effective_loss_weights = [1.0, sft_weight]
+        logger.info(f"Using DPO + SFT regularization: loss_type={effective_loss_type}, weights={effective_loss_weights}")
+    else:
+        effective_loss_type = loss_type_val
+        effective_loss_weights = None
+        logger.info(f"Using pure DPO loss: loss_type={effective_loss_type}")
 
     training_args = DPOConfig(
         output_dir=cfg["output_dir"],
@@ -107,8 +117,8 @@ def _run():
         warmup_ratio=cfg["warmup_ratio"],
         max_length=cfg["max_length"],
         beta=cfg["beta"],
-        loss_type=[loss_type_val, "sft"],
-        loss_weights=[1.0, 1.0],
+        loss_type=effective_loss_type,
+        loss_weights=effective_loss_weights,
         max_grad_norm=cfg["max_grad_norm"],
         optim=cfg["optim"],
         weight_decay=cfg["weight_decay"],

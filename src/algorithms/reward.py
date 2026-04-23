@@ -85,12 +85,19 @@ def _extract_mc(text: str) -> Optional[str]:
         r"[Oo]ption\s*([A-D])",
         r"[Cc]hoice\s*([A-D])",
         r"[Tt]he (?:correct )?(?:answer|option) is\s*\(?\s*([A-D])\s*\)?",
-        r"\b([A-D])\b(?=[\.\,\;\:]?\s*$|\s*(?:is|\.))",
     ]
     for pat in patterns:
         m = re.search(pat, text, re.IGNORECASE)
         if m:
             return m.group(1).strip().upper()
+
+    # Fallback: last standalone A-D letter in the text.
+    # Using findall+last avoids the re.search left-to-right bias that would
+    # match "A" in "A is wrong. The answer is C" instead of "C".
+    matches = re.findall(r"\b([A-D])\b", text)
+    if matches:
+        return matches[-1].strip().upper()
+
     return None
 
 
@@ -131,10 +138,10 @@ def _extract_math(text: str) -> Optional[str]:
 
     # Try to extract from "Final Answer:" or "Answer:" patterns
     answer_patterns = [
-        r'[Ff]inal [Aa]nswer:?\s*([0-9]+(?:\.[0-9]+)?)',
-        r'[Aa]nswer:?\s*([0-9]+(?:\.[0-9]+)?)',
-        r'[Tt]he answer is\s+([0-9]+(?:\.[0-9]+)?)',
-        r'=\s*([0-9]+(?:\.[0-9]+)?)(?:\s|$|\.|,)',
+        r'[Ff]inal [Aa]nswer:?\s*(-?[0-9]+(?:\.[0-9]+)?)',
+        r'[Aa]nswer:?\s*(-?[0-9]+(?:\.[0-9]+)?)',
+        r'[Tt]he answer is\s+(-?[0-9]+(?:\.[0-9]+)?)',
+        r'=\s*(-?[0-9]+(?:\.[0-9]+)?)(?:\s|$|\.|,)',
     ]
     for pat in answer_patterns:
         m = re.search(pat, text)
@@ -144,8 +151,8 @@ def _extract_math(text: str) -> Optional[str]:
     # Fallback: try to extract any mathematical expression near the end
     # Look for patterns like "therefore X" or "equals X"
     fallback_patterns = [
-        r'(?:therefore|so|thus|equals?|is)\s+([0-9]+(?:\.[0-9]+)?|\([^)]+\))',
-        r'=\s*([0-9]+(?:\.[0-9]+)?|\([^)]+\))',
+        r'(?:therefore|so|thus|equals?|is)\s+(-?[0-9]+(?:\.[0-9]+)?|\([^)]+\))',
+        r'=\s*(-?[0-9]+(?:\.[0-9]+)?|\([^)]+\))',
     ]
     for pat in fallback_patterns:
         matches = re.findall(pat, text, re.IGNORECASE)
@@ -173,12 +180,29 @@ def _normalize_math_answer(answer: str) -> str:
     """Normalize a math answer for comparison.
 
     Strips whitespace and LaTeX formatting, normalizes numeric values.
+    Handles \\frac{a}{b} and \\dfrac{a}{b} by evaluating to float.
     """
     s = answer.strip()
     # Strip surrounding \text{} if present
     text_match = re.match(r'^\\text\{(.+)\}$', s)
     if text_match:
         s = text_match.group(1).strip()
+
+    # Evaluate \frac{a}{b} and \dfrac{a}{b} to a numeric string
+    # Handles nested fractions like \frac{1}{2} -> "0.5"
+    frac_match = re.match(r'^\\d?frac\{(.+?)\}\{(.+?)\}$', s)
+    if frac_match:
+        try:
+            num = float(frac_match.group(1))
+            den = float(frac_match.group(2))
+            if den != 0:
+                result = num / den
+                if result == int(result):
+                    return str(int(result))
+                return str(result)
+        except (ValueError, OverflowError):
+            pass
+
     # Try numeric comparison: parse as float and normalize
     try:
         num = float(s)

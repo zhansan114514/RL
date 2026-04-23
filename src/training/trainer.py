@@ -121,7 +121,7 @@ def generate_trajectory_data(
             f"batch_size={effective_batch}"
         )
         try:
-            return generate_trajectories_batch(
+            pairs = generate_trajectories_batch(
                 actor_model, critic_model, dataset, dataset_name,
                 num_rounds=num_rounds,
                 reward_threshold=reward_threshold,
@@ -131,6 +131,9 @@ def generate_trajectory_data(
                 seed=seed,
                 batch_size=effective_batch,
             )
+            if cache_dir and pairs:
+                save_trajectory_batch(pairs, cache_dir, agent, iteration)
+            return pairs
         except Exception as e:
             logger.warning(f"  Batched generation failed ({e}), falling back to sequential")
 

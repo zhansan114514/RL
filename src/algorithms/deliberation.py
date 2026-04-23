@@ -23,7 +23,7 @@ def deliberate(
     sample: dict,
     dataset_name: str,
     num_rounds: int = 5,
-    max_tokens: int = 256,
+    max_tokens: int = 512,
     temperature: float = 0.7,
 ) -> list[dict]:
     """
@@ -95,7 +95,7 @@ def deliberate_batch(
     samples: list[dict],
     dataset_name: str,
     num_rounds: int = 5,
-    max_tokens: int = 256,
+    max_tokens: int = 512,
     temperature: float = 0.7,
 ) -> list[list[dict]]:
     """

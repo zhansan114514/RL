@@ -81,6 +81,10 @@ class GLMClassifier:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
 
+    # Valid fallback values per classification type
+    _STYLE_FALLBACK = "direct"
+    _ERROR_FALLBACK = "logic"
+
     def classify_reasoning_style(
         self,
         question: str,
@@ -98,7 +102,11 @@ Response: {response}
 
 Respond with just the style name and a confidence score (0-1), e.g., "algebraic 0.85"."""
 
-        return self._call_api(prompt)
+        try:
+            return self._call_api(prompt, valid_labels={"algebraic", "direct", "backtracking"})
+        except RuntimeError:
+            logger.warning("Reasoning style classification failed, using fallback 'direct'")
+            return self._STYLE_FALLBACK, 0.5
 
     def classify_error_type(
         self,
@@ -120,12 +128,27 @@ Error types:
 
 Respond with just the error type and confidence (0-1), e.g., "arithmetic 0.8"."""
 
-        return self._call_api(prompt)
+        try:
+            return self._call_api(prompt, valid_labels={"arithmetic", "logic", "hallucination", "verification"})
+        except RuntimeError:
+            logger.warning("Error type classification failed, using fallback 'logic'")
+            return self._ERROR_FALLBACK, 0.5
 
-    def _call_api(self, prompt: str) -> tuple[str, float]:
-        """Call GLM API with retry logic."""
+    def _call_api(self, prompt: str, valid_labels: set[str] | None = None) -> tuple[str, float]:
+        """Call GLM API with retry logic.
+
+        Args:
+            prompt: The prompt to send.
+            valid_labels: If provided, the returned label must belong to this set.
+                          Responses with unrecognized labels are rejected and retried.
+
+        Raises:
+            RuntimeError: If all retry attempts are exhausted or the response
+                          cannot be parsed into a valid label.
+        """
         import requests
 
+        last_error = None
         for attempt in range(self.max_retries):
             try:
                 response = requests.post(
@@ -146,23 +169,26 @@ Respond with just the error type and confidence (0-1), e.g., "arithmetic 0.8".""
                 result = response.json()["choices"][0]["message"]["content"].strip().lower()
 
                 # Robust parsing: extract label and confidence separately
-                # Label: first word matching a known category
-                # Confidence: last number that looks like 0.X
                 label = self._extract_label(result)
                 confidence = self._extract_confidence(result)
 
-                if label:
+                if label and (valid_labels is None or label in valid_labels):
                     return label, confidence
-                else:
-                    return result.split()[0] if result.split() else "direct", 0.5
+
+                # Label not recognized or not in valid_labels — treat as parse failure
+                last_error = f"Unrecognized label in API response: {result!r}"
+                logger.warning(
+                    f"API returned unrecognized label (attempt {attempt + 1}/{self.max_retries}): {last_error}"
+                )
 
             except Exception as e:
+                last_error = str(e)
                 logger.warning(f"API call failed (attempt {attempt + 1}/{self.max_retries}): {e}")
-                if attempt < self.max_retries - 1:
-                    time.sleep(self.retry_delay)
-                else:
-                    logger.error(f"API call failed after {self.max_retries} attempts, using fallback")
-                    return "direct", 0.5
+
+            if attempt < self.max_retries - 1:
+                time.sleep(self.retry_delay)
+
+        raise RuntimeError(f"API classification failed after {self.max_retries} attempts: {last_error}")
 
     @staticmethod
     def _extract_label(text: str) -> str:
@@ -345,9 +371,13 @@ def main():
         # Determine task type for proper answer comparison
         task_type = traj.get("sample", {}).get("task_type", "math")
 
+        # Per-response classifications (preserve agent-level diversity)
+        per_response_labels = []
+
         for resp in final_responses:
             response_text = resp.get("response", "")
             answer = resp.get("answer")
+            agent_name = resp.get("agent_name", "")
             # Use ground truth from sample, not consensus (consensus may be wrong)
             correct_answer = traj.get("sample", {}).get("answer", "")
 
@@ -360,16 +390,31 @@ def main():
             else:
                 is_correct = False
 
+            per_response_labels.append({
+                "agent_name": agent_name,
+                "response": response_text,
+                "answer": answer,
+                "is_correct": is_correct,
+                "reasoning_style": None,
+                "reasoning_style_confidence": 0.0,
+                "error_type": None,
+                "error_type_confidence": 0.0,
+            })
+
             if is_correct:
                 # Correct response - classify reasoning style
                 style, conf = classifier.classify_reasoning_style(question, response_text)
                 reasoning_styles.append((style, conf))
+                per_response_labels[-1]["reasoning_style"] = style
+                per_response_labels[-1]["reasoning_style_confidence"] = conf
             else:
                 # Incorrect response - classify error type
                 error, conf = classifier.classify_error_type(question, response_text)
                 error_types.append((error, conf))
+                per_response_labels[-1]["error_type"] = error
+                per_response_labels[-1]["error_type_confidence"] = conf
 
-        # Aggregate classifications (use most common)
+        # Aggregate classifications for backward compat (sample-level summary)
         from collections import Counter
 
         reasoning_style = None
@@ -405,6 +450,7 @@ def main():
             "error_type": error_type,
             "error_type_confidence": error_confidence,
             "metadata": result.metadata,
+            "per_response_labels": per_response_labels,
         })
 
         completed_ids.add(sample_id)
@@ -428,15 +474,42 @@ def main():
     style_splits = {}
     error_splits = {}
 
+    # Per-response granular splits: maps (sample_id, response_index) -> style/error
+    per_response_style_splits = {}
+    per_response_error_splits = {}
+
     for result in results:
         style = result["reasoning_style"]
         error = result["error_type"]
+        sample_id = result["sample_id"]
 
         if style:
-            style_splits.setdefault(style, []).append(result["sample_id"])
+            style_splits.setdefault(style, []).append(sample_id)
 
         if error:
-            error_splits.setdefault(error, []).append(result["sample_id"])
+            error_splits.setdefault(error, []).append(sample_id)
+
+        # Build per-response splits for finer-grained data diversification
+        per_labels = result.get("per_response_labels", [])
+        for ri, label in enumerate(per_labels):
+            if label.get("reasoning_style"):
+                per_response_style_splits.setdefault(
+                    label["reasoning_style"], [],
+                ).append({
+                    "sample_id": sample_id,
+                    "response_index": ri,
+                    "agent_name": label.get("agent_name", ""),
+                    "is_correct": label.get("is_correct", False),
+                })
+            if label.get("error_type"):
+                per_response_error_splits.setdefault(
+                    label["error_type"], [],
+                ).append({
+                    "sample_id": sample_id,
+                    "response_index": ri,
+                    "agent_name": label.get("agent_name", ""),
+                    "is_correct": label.get("is_correct", False),
+                })
 
     splits_file = os.path.join(output_dir, "splits.json")
     with open(splits_file, "w") as f:
@@ -445,8 +518,18 @@ def main():
             "error_types": error_splits,
         }, f, indent=2)
 
+    # Save per-response splits for finer-grained Actor/Critic diversification
+    per_response_splits_file = os.path.join(output_dir, "per_response_splits.json")
+    with open(per_response_splits_file, "w") as f:
+        json.dump({
+            "reasoning_styles": per_response_style_splits,
+            "error_types": per_response_error_splits,
+        }, f, indent=2)
+
     logger.info(f"  Reasoning style splits: {list(style_splits.keys())}")
     logger.info(f"  Error type splits: {list(error_splits.keys())}")
+    logger.info(f"  Per-response style splits: { {k: len(v) for k, v in per_response_style_splits.items()} }")
+    logger.info(f"  Per-response error splits: { {k: len(v) for k, v in per_response_error_splits.items()} }")
 
     logger.info("=" * 60)
     logger.info("Classification complete!")

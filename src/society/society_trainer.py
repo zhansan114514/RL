@@ -33,6 +33,58 @@ from src.algorithms.reward import extract_answer, math_answers_equal, normalize_
 logger = logging.getLogger(__name__)
 
 
+def _cleanup_gpu():
+    """Force garbage collection and clear CUDA cache."""
+    gc.collect()
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except ImportError:
+        pass
+
+
+def _create_phase_engine(
+    model_name: str,
+    agents: list[AgentConfig],
+    device: int,
+    dtype: str,
+    gpu_memory_utilization: float,
+    max_model_len: int,
+    max_concurrent_loras: int | None = None,
+):
+    """Create a shared VLLMInference engine for all agents in a training phase.
+
+    The engine is configured to accommodate LoRA adapters for all agents
+    that have lora_path set.
+
+    Args:
+        max_concurrent_loras: Override for max_loras.  When *None*, defaults to
+            the number of agents that have a LoRA path (one slot per agent).
+            Set this to a smaller number (e.g. 2) when only a subset of agents
+            are active concurrently, to reduce GPU memory reservation.
+    """
+    from src.inference.vllm_server import VLLMInference
+
+    enable_lora = any(a.lora_path for a in agents)
+
+    if max_concurrent_loras is not None:
+        max_loras = max_concurrent_loras
+    else:
+        max_loras = sum(1 for a in agents if a.lora_path) if enable_lora else 0
+
+    return VLLMInference(
+        model_name,
+        cuda_device=device,
+        dtype=dtype,
+        gpu_memory_utilization=gpu_memory_utilization,
+        max_model_len=max_model_len,
+        enable_lora=enable_lora or None,
+        max_loras=max(max_loras, 1),
+        max_lora_rank=256,
+    )
+
+
 def _get_rng(seed: int):
     """Get a numpy random generator for sampling."""
     import numpy as np
@@ -70,6 +122,7 @@ def society_alternating_train(
     gpu_memory_utilization: float = 0.85,
     max_model_len: int = 4096,
     max_samples: int = 200,
+    classifications_cache_dir: str = "output/society/classified",
 ) -> SocietyTrainingResult:
     """
     Train N Actors + M Critics in alternating fashion.
@@ -136,8 +189,23 @@ def society_alternating_train(
     for iteration in range(start_iteration, num_iterations):
         logger.info(f"=== Society Training Iteration {iteration + 1}/{num_iterations} ===")
 
+        model_name = registry.base_model_path or "Qwen/Qwen2.5-7B-Instruct"
+
         # ---- Phase A: Train all Critics (fix Actors) ----
         logger.info(f"Phase A: Training {len(critics)} Critics (Actors frozen)")
+
+        # Create a shared engine for all critics in this phase.
+        # Each critic's Algorithm 1 uses at most 1 actor LoRA + 1 critic LoRA
+        # concurrently, so max_loras=2 is sufficient (saves ~200MB per unused slot).
+        phase_a_engine = _create_phase_engine(
+            model_name=model_name,
+            agents=actors + critics,
+            device=device,
+            dtype=dtype,
+            gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=max_model_len,
+            max_concurrent_loras=2,
+        )
 
         for critic in critics:
             critic_iter_dir = f"{output_base_dir}/critics/{critic.name}/iter_{iteration}"
@@ -164,6 +232,7 @@ def society_alternating_train(
                 dtype=dtype,
                 gpu_memory_utilization=gpu_memory_utilization,
                 max_model_len=max_model_len,
+                engine=phase_a_engine,
             )
 
             if not preference_pairs:
@@ -180,6 +249,7 @@ def society_alternating_train(
                 output_dir=critic_iter_dir,
                 agent_type="critic",
                 agent_name=critic.name,
+                dataset_name=dataset_name,
                 lora_r=lora_r,
                 lora_alpha=lora_alpha,
                 learning_rate=learning_rate,
@@ -191,17 +261,44 @@ def society_alternating_train(
                 device=device,
             )
 
-            critic_paths[critic.name] = checkpoint_path or critic_iter_dir
-            metrics[f"critic_{critic.name}_iter{iteration}"] = {
-                "status": "completed",
-                "pairs": len(preference_pairs),
-                "path": checkpoint_path or "",
-            }
+            if checkpoint_path is not None:
+                critic_paths[critic.name] = checkpoint_path
+                metrics[f"critic_{critic.name}_iter{iteration}"] = {
+                    "status": "completed",
+                    "pairs": len(preference_pairs),
+                    "path": checkpoint_path,
+                }
+            else:
+                logger.warning(
+                    f"  DPO training failed for {critic.name}, "
+                    f"keeping previous LoRA path"
+                )
+                metrics[f"critic_{critic.name}_iter{iteration}"] = {
+                    "status": "failed",
+                    "pairs": len(preference_pairs),
+                    "path": critic_paths.get(critic.name, ""),
+                }
 
+        # Cleanup shared Phase A engine
+        if phase_a_engine is not None:
+            del phase_a_engine
         _cleanup_gpu()
 
         # ---- Phase B: Train all Actors (fix Critics) ----
         logger.info(f"Phase B: Training {len(actors)} Actors (Critics frozen)")
+
+        # Create a shared engine for all actors in this phase.
+        # Each actor's Algorithm 1 uses at most 1 actor LoRA + 1 critic LoRA
+        # concurrently, so max_loras=2 is sufficient.
+        phase_b_engine = _create_phase_engine(
+            model_name=model_name,
+            agents=actors + critics,
+            device=device,
+            dtype=dtype,
+            gpu_memory_utilization=gpu_memory_utilization,
+            max_model_len=max_model_len,
+            max_concurrent_loras=2,
+        )
 
         for actor in actors:
             actor_iter_dir = f"{output_base_dir}/actors/{actor.name}/iter_{iteration}"
@@ -228,11 +325,11 @@ def society_alternating_train(
                 dtype=dtype,
                 gpu_memory_utilization=gpu_memory_utilization,
                 max_model_len=max_model_len,
+                engine=phase_b_engine,
             )
 
             if not preference_pairs:
                 logger.warning(f"  No preference pairs for {actor.name}, skipping")
-                actor_paths[actor.name] = actor_iter_dir
                 metrics[f"actor_{actor.name}_iter{iteration}"] = {"status": "skipped", "pairs": 0}
                 continue
 
@@ -244,6 +341,7 @@ def society_alternating_train(
                 output_dir=actor_iter_dir,
                 agent_type="actor",
                 agent_name=actor.name,
+                dataset_name=dataset_name,
                 lora_r=lora_r,
                 lora_alpha=lora_alpha,
                 learning_rate=learning_rate,
@@ -255,12 +353,28 @@ def society_alternating_train(
                 device=device,
             )
 
-            actor_paths[actor.name] = checkpoint_path or actor_iter_dir
-            metrics[f"actor_{actor.name}_iter{iteration}"] = {
-                "status": "completed",
-                "pairs": len(preference_pairs),
-                "path": checkpoint_path or "",
-            }
+            if checkpoint_path is not None:
+                actor_paths[actor.name] = checkpoint_path
+                metrics[f"actor_{actor.name}_iter{iteration}"] = {
+                    "status": "completed",
+                    "pairs": len(preference_pairs),
+                    "path": checkpoint_path,
+                }
+            else:
+                logger.warning(
+                    f"  DPO training failed for {actor.name}, "
+                    f"keeping previous LoRA path"
+                )
+                metrics[f"actor_{actor.name}_iter{iteration}"] = {
+                    "status": "failed",
+                    "pairs": len(preference_pairs),
+                    "path": actor_paths.get(actor.name, ""),
+                }
+
+        # Cleanup shared Phase B engine
+        if phase_b_engine is not None:
+            del phase_b_engine
+        _cleanup_gpu()
 
         # Save checkpoint
         _save_checkpoint(ckpt_file, {
@@ -270,14 +384,14 @@ def society_alternating_train(
             "metrics": metrics,
         })
 
-    # Update registry with new LoRA paths
+    # Update registry with new LoRA paths (only if training succeeded)
     for name, path in actor_paths.items():
         agent = registry.get(name)
-        if agent:
+        if agent and path:
             agent.lora_path = path
     for name, path in critic_paths.items():
         agent = registry.get(name)
-        if agent:
+        if agent and path:
             agent.lora_path = path
 
     # Save updated registry
@@ -382,16 +496,14 @@ def _generate_critic_pairs_algorithm1(
     dtype: str,
     gpu_memory_utilization: float,
     max_model_len: int,
+    engine: Any = None,
 ) -> list[dict]:
     """Generate Critic DPO preference pairs using Algorithm 1 from trajectory.py.
 
-    Pairs the target critic with a reference actor (first with LoRA, or first
-    overall) and calls ``generate_trajectories`` for each sample to obtain:
-      - Natural deliberation trajectory
-      - Guided-toward-correct trajectory
-      - Guided-toward-wrong trajectory
-      - MC roll-out reward estimation
-      - Preference pairs filtered by reward delta >= epsilon
+    Round-robins across all available actors (one per sample) so the critic
+    learns to give feedback for diverse actor styles, matching the multi-actor
+    inference setting.  Each ``generate_trajectories`` call still uses only
+    1 actor + 1 critic LoRA concurrently.
 
     The critic preference pairs use:
       chosen  = positive_critic (guided toward correct answer)
@@ -405,32 +517,37 @@ def _generate_critic_pairs_algorithm1(
     model_name = registry.base_model_path or "Qwen/Qwen2.5-7B-Instruct"
     specialty = critic.error_specialty
 
-    # Pick reference actor (prefer one with LoRA)
-    ref_actor = next((a for a in actors if a.lora_path), actors[0])
-
-    # Determine LoRA requirements
-    all_agents = [ref_actor, critic]
-    enable_lora = any(a.lora_path for a in all_agents)
-    max_loras = sum(1 for a in all_agents if a.lora_path) if enable_lora else 0
+    # Build adapters for ALL actors (not just one) so we can round-robin
+    # across them per sample.  Each generate_trajectories call still uses
+    # only 1 actor + 1 critic LoRA concurrently, keeping max_loras=2.
+    all_agents = list(actors) + [critic]
 
     n_samples = min(len(dataset), max_samples)
     preference_pairs: list[dict] = []
+    _owns_engine = engine is None
 
     try:
-        engine = VLLMInference(
-            model_name,
-            cuda_device=device,
-            dtype=dtype,
-            gpu_memory_utilization=gpu_memory_utilization,
-            max_model_len=max_model_len,
-            enable_lora=enable_lora or None,
-            max_loras=max(max_loras, 1),
-            max_lora_rank=256,
-        )
+        if _owns_engine:
+            enable_lora = any(a.lora_path for a in all_agents)
+            max_loras = sum(1 for a in all_agents if a.lora_path) if enable_lora else 0
+            engine = VLLMInference(
+                model_name,
+                cuda_device=device,
+                dtype=dtype,
+                gpu_memory_utilization=gpu_memory_utilization,
+                max_model_len=max_model_len,
+                enable_lora=enable_lora or None,
+                max_loras=max(max_loras, 1),
+                max_lora_rank=256,
+            )
 
         adapters = _build_lora_adapters(engine, all_agents)
-        actor_adapter = adapters[ref_actor.name]
         critic_adapter = adapters[critic.name]
+
+        # Round-robin actors so the critic sees diverse partner styles,
+        # matching the multi-actor inference setting.
+        actors_with_lora = [a for a in actors if a.lora_path]
+        actors_pool = actors_with_lora if actors_with_lora else actors
 
         # Step 1: Run Algorithm 1 for each sample
         raw_pairs: list[dict] = []
@@ -439,6 +556,10 @@ def _generate_critic_pairs_algorithm1(
                 logger.info(
                     f"  [{critic.name}] Algorithm 1: sample {i + 1}/{n_samples}"
                 )
+
+            # Pick actor via round-robin (deterministic, sample-index based)
+            ref_actor = actors_pool[i % len(actors_pool)]
+            actor_adapter = adapters[ref_actor.name]
 
             task_type = sample.get("task_type", "math")
             correct_answer = sample.get("answer", "")
@@ -490,7 +611,10 @@ def _generate_critic_pairs_algorithm1(
 
         # Step 2: Filter by error type via DiversitySplit
         if raw_pairs:
-            splitter = DiversitySplit(balance=True, seed=seed, use_api=True)
+            splitter = DiversitySplit(
+                balance=True, seed=seed, use_api=True,
+                cache_dir=classifications_cache_dir,
+            )
             error_splits = splitter.split_by_error_type(
                 samples=[p["sample"] for p in raw_pairs],
                 responses=[p["actor_response"] for p in raw_pairs],
@@ -499,35 +623,42 @@ def _generate_critic_pairs_algorithm1(
             )
 
             specialty_items = error_splits.get(specialty, [])
+
+            # Build lookup dict for O(1) matching instead of O(N*M) scan
+            pair_index: dict[tuple[str, str], dict] = {}
+            for p in raw_pairs:
+                key = (p["sample"].get("question", ""), p["actor_response"])
+                pair_index[key] = p
+
             for sample, _response in specialty_items:
-                for p in raw_pairs:
-                    if (
-                        p["sample"].get("question") == sample.get("question")
-                        and p["actor_response"] == _response
-                    ):
-                        preference_pairs.append({
-                            "sample": p["sample"],
-                            "chosen": p["chosen"],
-                            "rejected": p["rejected"],
-                            "metadata": {
-                                "error_type": specialty.value,
-                                "delta": p["delta"],
-                                "direction": p["direction"],
-                            },
-                        })
-                        break
+                key = (sample.get("question", ""), _response)
+                p = pair_index.get(key)
+                if p is not None:
+                    preference_pairs.append({
+                        "sample": p["sample"],
+                        "chosen": p["chosen"],
+                        "rejected": p["rejected"],
+                        "actor_response": p.get("actor_response", ""),
+                        "metadata": {
+                            "error_type": specialty.value,
+                            "delta": p["delta"],
+                            "direction": p["direction"],
+                        },
+                    })
 
         logger.info(
             f"  [{critic.name}] {len(preference_pairs)}/{len(raw_pairs)} pairs "
             f"matched specialty '{specialty.value}'"
         )
 
-        del engine
-        _cleanup_gpu()
+        if _owns_engine:
+            del engine
+            _cleanup_gpu()
 
     except Exception as e:
         logger.error(f"Failed to generate critic pairs for {critic.name}: {e}")
-        _cleanup_gpu()
+        if _owns_engine:
+            _cleanup_gpu()
 
     return preference_pairs
 
@@ -551,12 +682,14 @@ def _generate_actor_pairs_algorithm1(
     dtype: str,
     gpu_memory_utilization: float,
     max_model_len: int,
+    engine: Any = None,
 ) -> list[dict]:
     """Generate Actor DPO preference pairs using Algorithm 1 from trajectory.py.
 
-    Pairs the target actor with a reference critic (first with LoRA, or first
-    overall) and calls ``generate_trajectories`` for each sample to obtain
-    full Algorithm 1 preference pairs with MC roll-out reward estimation.
+    Round-robins across all available critics (one per sample) so the actor
+    learns from diverse critic feedback styles, matching the MoE Top-K
+    routing at inference.  Each ``generate_trajectories`` call still uses
+    only 1 actor + 1 critic LoRA concurrently.
 
     The actor preference pairs use:
       chosen  = positive (guided-toward-correct actor response)
@@ -569,32 +702,37 @@ def _generate_actor_pairs_algorithm1(
 
     model_name = registry.base_model_path or "Qwen/Qwen2.5-7B-Instruct"
 
-    # Pick reference critic (prefer one with LoRA)
-    ref_critic = next((c for c in critics if c.lora_path), critics[0])
-
-    # Determine LoRA requirements
-    all_agents = [actor, ref_critic]
-    enable_lora = any(a.lora_path for a in all_agents)
-    max_loras = sum(1 for a in all_agents if a.lora_path) if enable_lora else 0
+    # Build adapters for ALL critics (not just one) so we can round-robin
+    # across them per sample.  Each generate_trajectories call still uses
+    # only 1 actor + 1 critic LoRA concurrently, keeping max_loras=2.
+    all_agents = [actor] + list(critics)
 
     n_samples = min(len(dataset), max_samples)
     preference_pairs: list[dict] = []
+    _owns_engine = engine is None
 
     try:
-        engine = VLLMInference(
-            model_name,
-            cuda_device=device,
-            dtype=dtype,
-            gpu_memory_utilization=gpu_memory_utilization,
-            max_model_len=max_model_len,
-            enable_lora=enable_lora or None,
-            max_loras=max(max_loras, 1),
-            max_lora_rank=256,
-        )
+        if _owns_engine:
+            enable_lora = any(a.lora_path for a in all_agents)
+            max_loras = sum(1 for a in all_agents if a.lora_path) if enable_lora else 0
+            engine = VLLMInference(
+                model_name,
+                cuda_device=device,
+                dtype=dtype,
+                gpu_memory_utilization=gpu_memory_utilization,
+                max_model_len=max_model_len,
+                enable_lora=enable_lora or None,
+                max_loras=max(max_loras, 1),
+                max_lora_rank=256,
+            )
 
         adapters = _build_lora_adapters(engine, all_agents)
         actor_adapter = adapters[actor.name]
-        critic_adapter = adapters[ref_critic.name]
+
+        # Round-robin critics so the actor sees diverse feedback styles,
+        # matching the MoE Top-K routing at inference.
+        critics_with_lora = [c for c in critics if c.lora_path]
+        critics_pool = critics_with_lora if critics_with_lora else critics
 
         # Step 1: Run Algorithm 1 for each sample
         raw_pairs: list[dict] = []
@@ -603,6 +741,10 @@ def _generate_actor_pairs_algorithm1(
                 logger.info(
                     f"  [{actor.name}] Algorithm 1: sample {i + 1}/{n_samples}"
                 )
+
+            # Pick critic via round-robin (deterministic, sample-index based)
+            ref_critic = critics_pool[i % len(critics_pool)]
+            critic_adapter = adapters[ref_critic.name]
 
             algo_pairs = generate_trajectories(
                 actor_model=actor_adapter,
@@ -629,32 +771,66 @@ def _generate_actor_pairs_algorithm1(
             f"  [{actor.name}] Algorithm 1 produced {len(raw_pairs)} raw actor pairs"
         )
 
-        # Step 2: Filter by reasoning style
+        # Step 2: Batch classify reasoning styles, then filter
         if raw_pairs:
+            # Deduplicate classification calls by (question, response) key.
+            # Many raw_pairs share the same response (e.g. same actor output
+            # across different rounds), so we classify each unique response
+            # exactly once.
+            style_cache: dict[tuple[str, str], Optional[ReasoningStyle]] = {}
+            classify_keys: list[tuple[str, str, str, str]] = []  # (q, resp, ans, key)
+
             for p in raw_pairs:
                 sample = p["sample"]
                 question = sample.get("question", "")
-                correct_answer = sample.get("answer", "")
                 chosen = p["chosen"]
+                correct_answer = sample.get("answer", "")
+                key = (question, chosen)
+                if key not in style_cache:
+                    style_cache[key] = None  # sentinel: pending
+                    classify_keys.append((question, chosen, correct_answer, key))
 
-                style_result = None
+            # Batch classify: each call checks disk cache first, then API.
+            # The per-file disk cache in data_classifier.py avoids redundant
+            # API calls across runs.  We consolidate here to deduplicate
+            # identical (question, response) pairs.
+            n_ok = 0
+            n_failed = 0
+            for question, response, correct_answer, key in classify_keys:
                 try:
-                    style_result = classify_reasoning_style(
-                        response=chosen,
+                    result = classify_reasoning_style(
+                        response=response,
                         question=question,
                         correct_answer=correct_answer,
                         use_api=True,
                     )
+                    style_cache[key] = result.style
+                    n_ok += 1
                 except ClassificationError:
-                    pass
+                    n_failed += 1
 
-                if style_result is not None and style_result.style == actor.reasoning_style:
+            logger.info(
+                f"  [{actor.name}] Style classification: "
+                f"{len(style_cache)} unique responses, "
+                f"{n_ok} classified, {n_failed} failures"
+            )
+
+            # Filter pairs by actor's reasoning style using cached results
+            target_style = actor.reasoning_style
+            for p in raw_pairs:
+                sample = p["sample"]
+                question = sample.get("question", "")
+                chosen = p["chosen"]
+                key = (question, chosen)
+
+                style = style_cache.get(key)
+                if style is not None and style == target_style:
                     preference_pairs.append({
                         "sample": sample,
                         "chosen": chosen,
                         "rejected": p["rejected"],
                         "metadata": {
-                            "style": actor.reasoning_style.value,
+                            "style": target_style.value,
                             "delta": p["delta"],
                             "direction": p["direction"],
                         },
@@ -665,12 +841,14 @@ def _generate_actor_pairs_algorithm1(
             f"matched style '{actor.reasoning_style.value}'"
         )
 
-        del engine
-        _cleanup_gpu()
+        if _owns_engine:
+            del engine
+            _cleanup_gpu()
 
     except Exception as e:
         logger.error(f"Failed to generate actor pairs for {actor.name}: {e}")
-        _cleanup_gpu()
+        if _owns_engine:
+            _cleanup_gpu()
 
     return preference_pairs
 
@@ -685,6 +863,7 @@ def _run_dpo_training(
     output_dir: str,
     agent_type: str,
     agent_name: str,
+    dataset_name: str = "math",
     lora_r: int = 256,
     lora_alpha: int = 512,
     learning_rate: float = 5e-5,
@@ -711,10 +890,33 @@ def _run_dpo_training(
     try:
         from datasets import Dataset
         from src.training.dpo_trainer import train_dpo
+        from src.prompts.formatter import format_prompt
+        from src.prompts.templates import PromptType
+
+        # Reconstruct full prompts using the same template as generation.
+        # Actor pairs  -> SINGLE_SHOT (question + passage + choices)
+        # Critic pairs -> DELIBERATION_CRITIC (question + passage + actor_response)
+        prompts = []
+        for p in preference_pairs:
+            sample = p.get("sample", {})
+            if agent_type == "critic" and p.get("actor_response"):
+                prompt = format_prompt(
+                    dataset_name,
+                    PromptType.DELIBERATION_CRITIC,
+                    sample,
+                    actor_response=p["actor_response"],
+                )
+            else:
+                prompt = format_prompt(
+                    dataset_name,
+                    PromptType.SINGLE_SHOT,
+                    sample,
+                )
+            prompts.append(prompt)
 
         # Convert preference_pairs to HuggingFace Dataset
         hf_data = {
-            "prompt": [p.get("sample", {}).get("question", "") for p in preference_pairs],
+            "prompt": prompts,
             "chosen": [p.get("chosen", "") for p in preference_pairs],
             "rejected": [p.get("rejected", "") for p in preference_pairs],
         }

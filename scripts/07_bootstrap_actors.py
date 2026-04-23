@@ -190,7 +190,7 @@ def simulate_debate_round(
             dataset_name,
             PromptType.DELIBERATION_ACTOR,
             sample,
-            responses_text=responses_text,
+            responses=responses_text,
         )
 
         # Generate response

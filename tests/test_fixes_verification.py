@@ -123,16 +123,26 @@ class TestFix2TrajectoryStartsFromT1:
 
         actor = MagicMock()
         critic = MagicMock()
-        # actor.generate is called per round: guided actor (2) + MC roll-out (3*num_simulations)
-        # For 2 rounds (t=1,2), each round: guided actor(2) + MC roll-out(15) = 17
-        # Total: 2 calls to actor.generate, 2 calls to critic.generate
+        # MC roll-out now uses 3-phase actor-critic simulation per round:
+        #   guided actor (2) → guided critic (2)
+        #   → Phase A: actor (15) → Phase B: critic (15) → Phase C: actor (15)
+        # For 2 rounds (t=1,2):
+        #   actor.generate: 3 calls per round (guided + phase A + phase C) = 6 total
+        #   critic.generate: 2 calls per round (guided + phase B) = 4 total
         actor.generate.side_effect = [
             ["Guided actor z_y", "Guided actor z_not_y"],  # round 1: guided actor
-            ["The answer is Yes."] * 15,  # round 1: MC roll-out (3*5=15)
+            ["The answer is Yes."] * 15,  # round 1: MC Phase A (3*5=15)
+            ["The answer is Yes."] * 15,  # round 1: MC Phase C (3*5=15)
             ["Guided actor z_y", "Guided actor z_not_y"],  # round 2: guided actor
-            ["The answer is Yes."] * 15,  # round 2: MC roll-out
+            ["The answer is Yes."] * 15,  # round 2: MC Phase A
+            ["The answer is Yes."] * 15,  # round 2: MC Phase C
         ]
-        critic.generate.return_value = ["Guided critic"] * 2
+        critic.generate.side_effect = [
+            ["Guided critic z_y", "Guided critic z_not_y"],  # round 1: guided critic
+            ["Critic feedback"] * 15,  # round 1: MC Phase B
+            ["Guided critic z_y", "Guided critic z_not_y"],  # round 2: guided critic
+            ["Critic feedback"] * 15,  # round 2: MC Phase B
+        ]
 
         sample = {
             "question": "Test?",
@@ -170,12 +180,17 @@ class TestFix2TrajectoryStartsFromT1:
 
         actor = MagicMock()
         critic = MagicMock()
-        # 1 round (t=1): guided actor(2) + MC roll-out(15)
+        # 1 round (t=1): guided actor(2) + guided critic(2)
+        # + MC Phase A(15) + Phase B(15) + Phase C(15)
         actor.generate.side_effect = [
             ["Guided actor z_y", "Guided actor z_not_y"],  # guided actor
-            ["The answer is Yes."] * 15,  # MC roll-out: all correct -> high delta
+            ["The answer is Yes."] * 15,  # MC Phase A: all correct
+            ["The answer is Yes."] * 15,  # MC Phase C: all correct -> high delta
         ]
-        critic.generate.return_value = ["Guided critic"] * 2
+        critic.generate.side_effect = [
+            ["Guided critic z_y", "Guided critic z_not_y"],  # guided critic
+            ["Critic feedback"] * 15,  # MC Phase B
+        ]
 
         sample = {
             "question": "Test?",
@@ -218,9 +233,13 @@ class TestFix3TrajectoryIfStructure:
         # delta_not_y = 0.0 < 0.3 -> no "away" pair
         actor.generate.side_effect = [
             ["Guided actor z_y", "Guided actor z_not_y"],
-            ["No."] * 5 + ["The answer is Yes."] * 5 + ["No."] * 5,
+            ["No."] * 5 + ["The answer is Yes."] * 5 + ["No."] * 5,  # Phase A
+            ["No."] * 5 + ["The answer is Yes."] * 5 + ["No."] * 5,  # Phase C
         ]
-        critic.generate.return_value = ["Guided critic"] * 2
+        critic.generate.side_effect = [
+            ["Guided critic z_y", "Guided critic z_not_y"],
+            ["Critic feedback"] * 15,  # Phase B
+        ]
 
         sample = {
             "question": "Test?",
@@ -257,13 +276,20 @@ class TestFix3TrajectoryIfStructure:
         # v_natural=3/5=0.6, v_guided_correct=5/5=1.0, v_guided_wrong=0/5=0.0
         # delta_y = 0.4 >= 0.3 -> "towards" pair
         # delta_not_y = 0.6 >= 0.3 -> "away" pair
+        mc_responses = [
+            "The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "No.", "No.",
+            "The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "The answer is Yes.",
+            "No.", "No.", "No.", "No.", "No.",
+        ]
         actor.generate.side_effect = [
             ["Guided actor z_y", "Guided actor z_not_y"],
-            ["The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "No.", "No.",
-             "The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "The answer is Yes.",
-             "No.", "No.", "No.", "No.", "No."],
+            mc_responses,  # Phase A
+            mc_responses,  # Phase C
         ]
-        critic.generate.return_value = ["Guided critic"] * 2
+        critic.generate.side_effect = [
+            ["Guided critic z_y", "Guided critic z_not_y"],
+            ["Critic feedback"] * 15,  # Phase B
+        ]
 
         sample = {
             "question": "Test?",
@@ -300,13 +326,20 @@ class TestFix3TrajectoryIfStructure:
         critic = MagicMock()
         # v_natural: 3/5=0.6, v_guided_correct: 4/5=0.8, v_guided_wrong: 0/5=0.0
         # delta_y = 0.8-0.6 = 0.2 < 0.3, delta_not_y = 0.6-0.0 = 0.6 >= 0.3 -> "away"
+        mc_responses = [
+            "The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "No.", "No.",
+            "The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "No.",
+            "No.", "No.", "No.", "No.", "No.",
+        ]
         actor.generate.side_effect = [
             ["Guided actor z_y", "Guided actor z_not_y"],
-            ["The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "No.", "No.",
-             "The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "The answer is Yes.", "No.",
-             "No.", "No.", "No.", "No.", "No."],
+            mc_responses,  # Phase A
+            mc_responses,  # Phase C
         ]
-        critic.generate.return_value = ["Guided critic"] * 2
+        critic.generate.side_effect = [
+            ["Guided critic z_y", "Guided critic z_not_y"],
+            ["Critic feedback"] * 15,  # Phase B
+        ]
 
         sample = {
             "question": "Test?",
@@ -343,9 +376,13 @@ class TestFix3TrajectoryIfStructure:
         # delta_y = 0.0, delta_not_y = 0.0
         actor.generate.side_effect = [
             ["Guided actor z_y", "Guided actor z_not_y"],
-            ["The answer is Yes."] * 15,
+            ["The answer is Yes."] * 15,  # Phase A
+            ["The answer is Yes."] * 15,  # Phase C
         ]
-        critic.generate.return_value = ["Guided critic"] * 2
+        critic.generate.side_effect = [
+            ["Guided critic z_y", "Guided critic z_not_y"],
+            ["Critic feedback"] * 15,  # Phase B
+        ]
 
         sample = {
             "question": "Test?",
@@ -368,37 +405,42 @@ class TestFix4DPONLLRegularization:
     """Fix #4: DPO training should include NLL regularization."""
 
     def test_dpo_config_includes_nll_regularization(self):
-        """DPOConfig should have loss_type=[dpo_loss, "sft"] for NLL regularization."""
-        # Since train_dpo imports transformers/trl internally which may try to download models,
-        # we'll verify the fix by checking the source code directly.
-        # The DPO training logic lives in _dpo_runner.py (subprocess runner).
+        """DPOConfig should include SFT NLL regularization when sft_weight > 0."""
         import inspect
         from src.training._dpo_runner import _run
 
         source = inspect.getsource(_run)
 
-        # Verify loss_type is set to a list including "sft"
-        assert 'loss_type=[loss_type_val, "sft"]' in source, \
-            "Code should set loss_type=[loss_type_val, 'sft'] for NLL regularization"
+        # Verify SFT regularization is conditionally added based on sft_weight
+        assert 'effective_loss_type = [loss_type_val, "sft"]' in source, \
+            "Code should construct loss_type list with 'sft' for NLL regularization"
 
-        # Verify loss_weights is set
-        assert 'loss_weights=[1.0, 1.0]' in source, \
-            "Code should set loss_weights=[1.0, 1.0]"
+        # Verify sft_weight controls the regularization
+        assert "sft_weight" in source, \
+            "Code should read sft_weight from config"
+
+        # Verify loss_weights uses sft_weight
+        assert "sft_weight" in source and "effective_loss_weights" in source, \
+            "Code should use sft_weight for loss weights"
 
         # Verify NLL is documented in comments
         assert "NLL" in source or "negative log-likelihood" in source.lower(), \
             "Code should document NLL regularization"
 
     def test_nll_regularization_with_custom_loss_type(self):
-        """NLL regularization should work with any base loss_type."""
+        """NLL regularization should work with any base loss_type and be configurable."""
         import inspect
         from src.training._dpo_runner import _run
 
         source = inspect.getsource(_run)
 
-        # The code reads loss_type from config and adds "sft" to it
-        assert 'loss_type=[loss_type_val, "sft"]' in source, \
-            "Code should use loss_type parameter and add 'sft' to the list"
+        # The code reads loss_type from config and conditionally adds "sft"
+        assert 'effective_loss_type = [loss_type_val, "sft"]' in source, \
+            "Code should construct loss_type list with loss_type_val and 'sft'"
+
+        # Verify sft_weight=0 disables SFT regularization
+        assert "sft_weight > 0" in source, \
+            "Code should allow disabling SFT regularization via sft_weight=0"
 
     def test_dpo_code_mentions_nll_regularization(self):
         """The code should document NLL regularization in comments."""
