@@ -1,0 +1,83 @@
+# Qwen2.5-7B-Instruct + MMLU + 300 samples, GPU 4
+# Diverse Actor-Critic Society 全流程 (07-12)
+
+common:
+  model_name: "Qwen/Qwen2.5-7B-Instruct"
+  base_model: "Qwen/Qwen2.5-7B-Instruct"
+  dataset: "mmlu"
+  cache_dir: "output/society_mmlu"
+  seed: 42
+  max_samples: 300
+  device: 4
+  dtype: "bfloat16"
+  gpu_memory_utilization: 0.65
+  max_model_len: 8192
+
+# Phase 1: Bootstrap data generation
+step01_bootstrap:
+  output_dir: "output/society_mmlu/bootstrap"
+  num_agents: 5
+  num_debate_rounds: 2
+  temperature: 0.8
+  max_tokens: 512
+
+# Phase 2: Data classification (GLM API)
+step02_classify:
+  input_dir: "output/society_mmlu/bootstrap"
+  output_dir: "output/society_mmlu/classified"
+  api_key: "69b94b7210714cb7a7e3b989e4559114.8cDGdODef5b4cLH1"
+  api_base: "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+  api_model: "glm-4-flash"
+
+# Phase 3: Actor diversification
+step03_diversify_actors:
+  input_dir: "output/society_mmlu/classified"
+  output_dir: "output/society_mmlu/actors"
+  reasoning_styles: ["algebraic", "direct", "backtracking"]
+  lora_r: 256
+  lora_alpha: 512
+  learning_rate: 5.0e-5
+  beta: 0.1
+  batch_size: 4
+  num_epochs: 1
+  max_length: 2048
+
+# Phase 4: Critic diversification
+step04_diversify_critics:
+  input_dir: "output/society_mmlu/classified"
+  actor_base_dir: "output/society_mmlu/actors"
+  output_dir: "output/society_mmlu/critics"
+  error_types: ["arithmetic", "logic", "hallucination", "verification"]
+  lora_r: 256
+  lora_alpha: 512
+  learning_rate: 5.0e-5
+  beta: 0.1
+  batch_size: 4
+  num_epochs: 1
+  max_length: 2048
+
+# Phase 5: Society alternating training
+step05_train_society:
+  actor_base_dir: "output/society_mmlu/actors"
+  critic_base_dir: "output/society_mmlu/critics"
+  output_dir: "output/society_mmlu/society"
+  num_iterations: 1
+  num_rounds: 5
+  num_simulations: 5
+  reward_threshold: 0.0
+  lora_r: 256
+  lora_alpha: 512
+  learning_rate: 5.0e-5
+  beta: 0.1
+  batch_size: 4
+  num_epochs: 1
+  max_length: 2048
+  checkpoint_dir: "output/society_mmlu/checkpoints"
+
+# Phase 6: Evaluation + ablation
+step06_evaluate:
+  society_dir: "output/society_mmlu/society"
+  output_dir: "output/society_mmlu/eval"
+  num_rounds: 2
+  max_tokens: 512
+  temperature: 0.7
