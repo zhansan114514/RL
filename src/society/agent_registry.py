@@ -55,6 +55,86 @@ class ErrorType(Enum):
 
 
 # ============================================================
+# Robust enum resolution (no silent fallback to defaults)
+# ============================================================
+
+def resolve_reasoning_style(value: str) -> ReasoningStyle:
+    """Resolve a string to ReasoningStyle with robust case-insensitive matching.
+
+    Matching priority:
+      1. Exact value match  (e.g. "algebraic")
+      2. Exact name match   (e.g. "ALGEBRAIC")
+      3. Case-insensitive value match (e.g. "Algebraic")
+
+    Raises ValueError (never silently falls back to a default).
+    """
+    if not value:
+        raise ValueError("Cannot resolve empty string to ReasoningStyle")
+
+    # 1. Exact value match
+    try:
+        return ReasoningStyle(value)
+    except ValueError:
+        pass
+
+    # 2. Exact name match
+    try:
+        return ReasoningStyle[value]
+    except KeyError:
+        pass
+
+    # 3. Case-insensitive value match
+    lower = value.lower()
+    for style in ReasoningStyle:
+        if style.value == lower:
+            return style
+
+    raise ValueError(
+        f"Cannot resolve '{value}' to ReasoningStyle. "
+        f"Valid values: {[s.value for s in ReasoningStyle]}, "
+        f"valid names: {[s.name for s in ReasoningStyle]}"
+    )
+
+
+def resolve_error_type(value: str) -> ErrorType:
+    """Resolve a string to ErrorType with robust case-insensitive matching.
+
+    Matching priority:
+      1. Exact value match  (e.g. "arithmetic")
+      2. Exact name match   (e.g. "ARITHMETIC")
+      3. Case-insensitive value match (e.g. "Arithmetic")
+
+    Raises ValueError (never silently falls back to a default).
+    """
+    if not value:
+        raise ValueError("Cannot resolve empty string to ErrorType")
+
+    # 1. Exact value match
+    try:
+        return ErrorType(value)
+    except ValueError:
+        pass
+
+    # 2. Exact name match
+    try:
+        return ErrorType[value]
+    except KeyError:
+        pass
+
+    # 3. Case-insensitive value match
+    lower = value.lower()
+    for et in ErrorType:
+        if et.value == lower:
+            return et
+
+    raise ValueError(
+        f"Cannot resolve '{value}' to ErrorType. "
+        f"Valid values: {[e.value for e in ErrorType]}, "
+        f"valid names: {[e.name for e in ErrorType]}"
+    )
+
+
+# ============================================================
 # Default prompt templates per specialization
 # ============================================================
 

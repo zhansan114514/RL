@@ -1,5 +1,0 @@
-data:
-  name: "gsm8k"
-  hf_id: "openai/gsm8k"
-  task_type: "math"
-  answer_key: "answer"

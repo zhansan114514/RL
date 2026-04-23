@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import sys
 import time
 from dataclasses import dataclass
@@ -26,20 +27,13 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from _utils import resolve_config, setup_logging
+from _utils import setup_logging
+from src.utils.config import ConfigManager
 
 setup_logging()
 logger = logging.getLogger(__name__)
 
-ALLOWED_DATASETS = ("boolq", "mmlu", "bbh", "sciq", "arc", "math", "gsm8k")
-COMMON_KEYS = ("model_name", "dataset", "cache_dir", "input_dir", "output_dir")
-
 STEP_DEFAULTS = {
-    "model_name": "Qwen/Qwen2.5-7B-Instruct",
-    "dataset": "math",
-    "cache_dir": "output/society",
-    "input_dir": "output/society/bootstrap",
-    "output_dir": "output/society/classified",
     "api_key": "",
     "api_base": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
     "api_model": "glm-4-flash",
@@ -47,7 +41,9 @@ STEP_DEFAULTS = {
     "request_timeout": 30,
     "retry_delay": 5,
     "max_retries": 3,
-    "use_cache": True,
+    "api_temperature": 0.1,
+    "input_dir": "output/society/bootstrap",
+    "output_dir": "output/society/classified",
 }
 
 
@@ -73,6 +69,7 @@ class GLMClassifier:
         timeout: int = 30,
         max_retries: int = 3,
         retry_delay: int = 5,
+        temperature: float = 0.1,
     ):
         self.api_key = api_key
         self.api_base = api_base
@@ -80,6 +77,7 @@ class GLMClassifier:
         self.timeout = timeout
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.temperature = temperature
 
     # Valid fallback values per classification type
     _STYLE_FALLBACK = "direct"
@@ -135,17 +133,7 @@ Respond with just the error type and confidence (0-1), e.g., "arithmetic 0.8".""
             return self._ERROR_FALLBACK, 0.5
 
     def _call_api(self, prompt: str, valid_labels: set[str] | None = None) -> tuple[str, float]:
-        """Call GLM API with retry logic.
-
-        Args:
-            prompt: The prompt to send.
-            valid_labels: If provided, the returned label must belong to this set.
-                          Responses with unrecognized labels are rejected and retried.
-
-        Raises:
-            RuntimeError: If all retry attempts are exhausted or the response
-                          cannot be parsed into a valid label.
-        """
+        """Call GLM API with retry logic."""
         import requests
 
         last_error = None
@@ -160,7 +148,7 @@ Respond with just the error type and confidence (0-1), e.g., "arithmetic 0.8".""
                     json={
                         "model": self.model,
                         "messages": [{"role": "user", "content": prompt}],
-                        "temperature": 0.1,
+                        "temperature": self.temperature,
                     },
                     timeout=self.timeout,
                 )
@@ -168,14 +156,12 @@ Respond with just the error type and confidence (0-1), e.g., "arithmetic 0.8".""
 
                 result = response.json()["choices"][0]["message"]["content"].strip().lower()
 
-                # Robust parsing: extract label and confidence separately
                 label = self._extract_label(result)
                 confidence = self._extract_confidence(result)
 
                 if label and (valid_labels is None or label in valid_labels):
                     return label, confidence
 
-                # Label not recognized or not in valid_labels — treat as parse failure
                 last_error = f"Unrecognized label in API response: {result!r}"
                 logger.warning(
                     f"API returned unrecognized label (attempt {attempt + 1}/{self.max_retries}): {last_error}"
@@ -205,8 +191,6 @@ Respond with just the error type and confidence (0-1), e.g., "arithmetic 0.8".""
     @staticmethod
     def _extract_confidence(text: str) -> float:
         """Extract a confidence score (0-1 float) from API response text."""
-        import re
-        # Look for patterns like 0.85, .9, 0.9
         matches = re.findall(r'(?<!\d)(0?\.\d+|1\.0+)(?!\d)', text)
         if matches:
             try:
@@ -232,11 +216,8 @@ def parse_args():
     )
     cli_args = parser.parse_args()
 
-    args = resolve_config(
-        cli_args.config, "step02_classify", STEP_DEFAULTS,
-        common_keys=COMMON_KEYS,
-        allowed_datasets=ALLOWED_DATASETS,
-    )
+    cfg = ConfigManager.initialize(config_path=cli_args.config)
+    args = cfg.step("step02_classify", defaults=STEP_DEFAULTS).to_namespace()
 
     # CLI override for API key, with env var fallback
     if cli_args.api_key:
@@ -335,6 +316,7 @@ def main():
         timeout=args.request_timeout,
         max_retries=args.max_retries,
         retry_delay=args.retry_delay,
+        temperature=args.api_temperature,
     )
 
     # Classify trajectories
@@ -474,7 +456,7 @@ def main():
     style_splits = {}
     error_splits = {}
 
-    # Per-response granular splits: maps (sample_id, response_index) -> style/error
+    # Per-response granular splits
     per_response_style_splits = {}
     per_response_error_splits = {}
 

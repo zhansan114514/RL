@@ -1,5 +1,0 @@
-data:
-  name: "math"
-  hf_id: "EleutherAI/hendrycks_math"
-  task_type: "math"
-  answer_key: "answer"

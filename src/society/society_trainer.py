@@ -185,6 +185,10 @@ def society_alternating_train(
     actor_paths = state.get("actor_paths", {})
     critic_paths = state.get("critic_paths", {})
     metrics = state.get("metrics", {})
+    # Resume granularity: skip agents whose phase already completed in a
+    # partially-run iteration.  Keys: "phase_A_done" / "phase_B_done" ->
+    # list of agent names that finished successfully.
+    phase_done: dict[str, list[str]] = state.get("phase_done", {})
 
     for iteration in range(start_iteration, num_iterations):
         logger.info(f"=== Society Training Iteration {iteration + 1}/{num_iterations} ===")
@@ -207,7 +211,16 @@ def society_alternating_train(
             max_concurrent_loras=2,
         )
 
+        phase_a_done = set(phase_done.get("phase_A", []))
+
         for critic in critics:
+            # Skip if this critic already completed in a resumed run
+            if critic.name in phase_a_done:
+                logger.info(
+                    f"  Skipping Critic {critic.display_name} (already completed)"
+                )
+                continue
+
             critic_iter_dir = f"{output_base_dir}/critics/{critic.name}/iter_{iteration}"
             Path(critic_iter_dir).mkdir(parents=True, exist_ok=True)
 
@@ -279,6 +292,22 @@ def society_alternating_train(
                     "path": critic_paths.get(critic.name, ""),
                 }
 
+            # Per-critic checkpoint: if we crash after this point, the next
+            # run will skip this critic and start from the next one.
+            _save_checkpoint(ckpt_file, {
+                "iteration": iteration,
+                "actor_paths": actor_paths,
+                "critic_paths": critic_paths,
+                "metrics": metrics,
+                "phase_done": {
+                    **phase_done,
+                    "phase_A": [
+                        n for n, p in critic_paths.items()
+                        if metrics.get(f"critic_{n}_iter{iteration}", {}).get("status") == "completed"
+                    ],
+                },
+            })
+
         # Cleanup shared Phase A engine
         if phase_a_engine is not None:
             del phase_a_engine
@@ -300,7 +329,16 @@ def society_alternating_train(
             max_concurrent_loras=2,
         )
 
+        phase_b_done = set(phase_done.get("phase_B", []))
+
         for actor in actors:
+            # Skip if this actor already completed in a resumed run
+            if actor.name in phase_b_done:
+                logger.info(
+                    f"  Skipping Actor {actor.display_name} (already completed)"
+                )
+                continue
+
             actor_iter_dir = f"{output_base_dir}/actors/{actor.name}/iter_{iteration}"
             Path(actor_iter_dir).mkdir(parents=True, exist_ok=True)
 
@@ -326,6 +364,7 @@ def society_alternating_train(
                 gpu_memory_utilization=gpu_memory_utilization,
                 max_model_len=max_model_len,
                 engine=phase_b_engine,
+                classifications_cache_dir=classifications_cache_dir,
             )
 
             if not preference_pairs:
@@ -371,17 +410,35 @@ def society_alternating_train(
                     "path": actor_paths.get(actor.name, ""),
                 }
 
+            # Per-actor checkpoint
+            _save_checkpoint(ckpt_file, {
+                "iteration": iteration,
+                "actor_paths": actor_paths,
+                "critic_paths": critic_paths,
+                "metrics": metrics,
+                "phase_done": {
+                    **phase_done,
+                    "phase_A": phase_done.get("phase_A", []),
+                    "phase_B": [
+                        n for n, p in actor_paths.items()
+                        if metrics.get(f"actor_{n}_iter{iteration}", {}).get("status") == "completed"
+                    ],
+                },
+            })
+
         # Cleanup shared Phase B engine
         if phase_b_engine is not None:
             del phase_b_engine
         _cleanup_gpu()
 
-        # Save checkpoint
+        # End-of-iteration checkpoint (iteration is now complete, so bump
+        # the counter and clear phase_done for the next iteration).
         _save_checkpoint(ckpt_file, {
             "iteration": iteration + 1,
             "actor_paths": actor_paths,
             "critic_paths": critic_paths,
             "metrics": metrics,
+            "phase_done": {},
         })
 
     # Update registry with new LoRA paths (only if training succeeded)
@@ -611,9 +668,15 @@ def _generate_critic_pairs_algorithm1(
 
         # Step 2: Filter by error type via DiversitySplit
         if raw_pairs:
+            # Try to use pre-classified data from phase 2 to ensure
+            # single source of truth across all training phases
+            pre_classified = os.path.join(
+                classifications_cache_dir, "classified_data.json"
+            )
             splitter = DiversitySplit(
                 balance=True, seed=seed, use_api=True,
                 cache_dir=classifications_cache_dir,
+                pre_classified_file=pre_classified if os.path.exists(pre_classified) else None,
             )
             error_splits = splitter.split_by_error_type(
                 samples=[p["sample"] for p in raw_pairs],
@@ -683,6 +746,7 @@ def _generate_actor_pairs_algorithm1(
     gpu_memory_utilization: float,
     max_model_len: int,
     engine: Any = None,
+    classifications_cache_dir: str = "output/society/classified",
 ) -> list[dict]:
     """Generate Actor DPO preference pairs using Algorithm 1 from trajectory.py.
 
@@ -803,6 +867,7 @@ def _generate_actor_pairs_algorithm1(
                         question=question,
                         correct_answer=correct_answer,
                         use_api=True,
+                        cache_dir=classifications_cache_dir,
                     )
                     style_cache[key] = result.style
                     n_ok += 1

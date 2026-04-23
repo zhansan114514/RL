@@ -11,7 +11,10 @@ This data-level diversification naturally produces diverse thinking chains.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -28,6 +31,9 @@ class DiversitySplit:
 
     Uses DataClassifier to label each sample, then groups by label.
     Optionally balances splits by downsampling majority groups.
+
+    Supports loading pre-classified results from phase 2 (08_classify_data.py)
+    via `pre_classified_file` to avoid redundant re-classification.
     """
 
     def __init__(
@@ -36,11 +42,89 @@ class DiversitySplit:
         seed: int = 42,
         use_api: bool = True,
         cache_dir: str = "output/society/classified",
+        pre_classified_file: Optional[str] = None,
     ):
         self.balance = balance
         self.rng = np.random.default_rng(seed)
         self.use_api = use_api
         self.cache_dir = cache_dir
+        self.pre_classified_file = pre_classified_file
+        self._pre_classified: Optional[dict] = None
+
+        if pre_classified_file:
+            self._pre_classified = self._load_pre_classified(pre_classified_file)
+
+    @staticmethod
+    def _load_pre_classified(path: str) -> Optional[dict]:
+        """Load pre-classified results from phase 2 (08_classify_data.py).
+
+        Returns a dict keyed by (question, response) hash -> classification,
+        or None if the file doesn't exist.
+        """
+        path = Path(path)
+        if not path.exists():
+            logger.warning(f"Pre-classified file not found: {path}")
+            return None
+
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning(f"Failed to load pre-classified file: {e}")
+            return None
+
+        # Build lookup: (question_hash, response_hash) -> {style, error_type, confidence}
+        lookup: dict[tuple[str, str], dict] = {}
+        for result in data.get("results", []):
+            # Use per-response labels for fine-grained matching
+            for label in result.get("per_response_labels", []):
+                question = result.get("sample_id", "")
+                response = label.get("response", "")
+                key = _content_hash(question, response)
+                entry = {}
+                if label.get("reasoning_style"):
+                    entry["style"] = label["reasoning_style"]
+                    entry["style_confidence"] = label.get("reasoning_style_confidence", 0.5)
+                if label.get("error_type"):
+                    entry["error_type"] = label["error_type"]
+                    entry["error_confidence"] = label.get("error_type_confidence", 0.5)
+                if entry:
+                    lookup[key] = entry
+
+        logger.info(
+            f"Loaded {len(lookup)} pre-classified entries from {path}"
+        )
+        return lookup
+
+    def _lookup_pre_classified_style(
+        self, question: str, response: str,
+    ) -> Optional[ReasoningStyle]:
+        """Check pre-classified results for a reasoning style match."""
+        if not self._pre_classified:
+            return None
+        key = _content_hash(question, response)
+        entry = self._pre_classified.get(key)
+        if entry and "style" in entry:
+            try:
+                return ReasoningStyle(entry["style"])
+            except ValueError:
+                pass
+        return None
+
+    def _lookup_pre_classified_error(
+        self, question: str, response: str,
+    ) -> Optional[ErrorType]:
+        """Check pre-classified results for an error type match."""
+        if not self._pre_classified:
+            return None
+        key = _content_hash(question, response)
+        entry = self._pre_classified.get(key)
+        if entry and "error_type" in entry:
+            try:
+                return ErrorType(entry["error_type"])
+            except ValueError:
+                pass
+        return None
 
     def split_by_reasoning_style(
         self,
@@ -70,6 +154,13 @@ class DiversitySplit:
             answer = answers[i] if answers and i < len(answers) else sample.get("answer", "")
 
             if response:
+                # Try pre-classified data first (single source of truth)
+                style = self._lookup_pre_classified_style(question, response)
+                if style is not None:
+                    splits[style].append(sample)
+                    continue
+
+                # Fall back to live classification
                 try:
                     result = classify_reasoning_style(
                         response=response,
@@ -129,6 +220,13 @@ class DiversitySplit:
             correct = correct_answers[i] if correct_answers and i < len(correct_answers) else sample.get("answer", "")
             extracted = extracted_answers[i] if extracted_answers and i < len(extracted_answers) else ""
 
+            # Try pre-classified data first (single source of truth)
+            error_type = self._lookup_pre_classified_error(question, response)
+            if error_type is not None:
+                splits[error_type].append((sample, response))
+                continue
+
+            # Fall back to live classification
             try:
                 result = classify_error_type(
                     response=response,
@@ -171,3 +269,9 @@ class DiversitySplit:
             else:
                 balanced[key] = items
         return balanced
+
+
+def _content_hash(question: str, response: str) -> str:
+    """Stable hash for (question, response) pair — used for lookup keys."""
+    content = f"{question}||{response}"
+    return hashlib.md5(content.encode()).hexdigest()[:12]

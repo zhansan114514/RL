@@ -26,13 +26,11 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from _utils import resolve_config, setup_logging
+from _utils import setup_logging
+from src.utils.config import ConfigManager
 
 setup_logging()
 logger = logging.getLogger(__name__)
-
-ALLOWED_DATASETS = ("boolq", "mmlu", "bbh", "sciq", "arc", "math", "gsm8k")
-COMMON_KEYS = ("model_name", "dataset", "cache_dir", "input_dir", "output_dir", "seed", "device", "dtype", "gpu_memory_utilization")
 
 STEP_DEFAULTS = {
     "model_name": "Qwen/Qwen2.5-7B-Instruct",
@@ -64,11 +62,9 @@ def parse_args():
         help="YAML config path.",
     )
     cli_args = parser.parse_args()
-    return resolve_config(
-        cli_args.config, "step03_diversify_actors", STEP_DEFAULTS,
-        common_keys=COMMON_KEYS,
-        allowed_datasets=ALLOWED_DATASETS,
-    )
+
+    cfg = ConfigManager.initialize(config_path=cli_args.config)
+    return cfg.step("step03_diversify_actors", defaults=STEP_DEFAULTS).to_namespace()
 
 
 def load_classified_data(input_dir: str) -> Dict[str, Any]:

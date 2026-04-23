@@ -11,12 +11,11 @@ common:
   device: 4
   dtype: "auto"
   gpu_memory_utilization: 0.85
-  use_wandb: false
 
 # Phase 1: Bootstrap data generation
 step01_bootstrap:
   output_dir: "output/society/bootstrap"
-  num_responses: 5
+  num_agents: 5
   num_debate_rounds: 2
   temperature: 0.8
   max_tokens: 512
@@ -25,11 +24,9 @@ step01_bootstrap:
 step02_classify:
   input_dir: "output/society/bootstrap"
   output_dir: "output/society/classified"
-  use_api: true
-  api_key: "bcf988da32f64948a82fd7dda3b9b3d3.mVYoCk3Wi5ZrcsUM"
+  api_key: "69b94b7210714cb7a7e3b989e4559114.8cDGdODef5b4cLH1"
   api_base: "https://open.bigmodel.cn/api/paas/v4/chat/completions"
   api_model: "glm-4-flash"
-  cache_dir: "output/society/classifications"
 
 # Phase 3: Actor diversification
 step03_diversify_actors:
@@ -78,6 +75,3 @@ step06_evaluate:
   num_rounds: 2
   max_tokens: 512
   temperature: 0.7
-  voting_strategy: "majority_vote"
-  router_top_k: 2
-  ablation_configs: ["A1", "A2", "A3", "A4", "A5"]

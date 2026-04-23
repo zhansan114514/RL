@@ -55,3 +55,12 @@ scheduler:
   critic_device: 0
   early_stopping_patience: null
   min_improvement: 0.0
+
+# Society (Diverse Actor-Critic) defaults
+society:
+  max_lora_rank: 256
+  router_top_k: 2
+  api_temperature: 0.1
+  actor_temperature: 0.7
+  actor_max_tokens: 512
+  critic_max_tokens: 256

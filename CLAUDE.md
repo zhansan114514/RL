@@ -57,29 +57,34 @@ ACC-Collab 复现项目 -- 实现 ICLR 2025 论文《ACC-Collab: An Actor-Critic
 
 ## 配置系统
 
-使用 OmegaConf 分层合并（不使用 Hydra CLI 入口），覆盖优先级从低到高：
+使用 `ConfigManager` 单例（`src/utils/config.py`）统一管理配置，通过 OmegaConf 分层合并。所有脚本通过 `ConfigManager.initialize(config_path=...)` + `cfg.step(step_key, defaults=...)` 获取配置。
 
+覆盖优先级从低到高：
 ```
-configs/default.yaml       -- 全局默认（模型、推理、审议、训练、调度器参数）
-configs/base.yaml          -- 基础覆盖（seed=42, 审议5轮, LoRA r=256, lr=5e-5）
-configs/model/*.yaml       -- 模型配置（gemma2_2b / llama3_8b / mistral_7b / qwen2.5_7b）
-configs/data/*.yaml        -- 数据集配置（boolq / mmlu / bbh / sciq / arc / math / gsm）
-configs/train/*.yaml       -- 训练配置（dpo_actor / dpo_critic，结构相同仅 agent 字段不同）
-configs/society/*.yaml     -- Society 模块配置（base / actors / critics / router / experiment_h100）
+脚本内 STEP_DEFAULTS 字典     -- 脚本级默认值（hardcoded）
+configs/default.yaml         -- 全局默认（模型、推理、审议、训练、调度器、society 参数）
+实验 YAML common: 部分        -- 跨步骤共享参数（model_name, dataset, device, max_samples, seed 等）
+实验 YAML stepNN_name: 部分   -- 步骤特有参数（覆盖 defaults 和 common）
+CLI overrides                -- 少量脚本接受 CLI 覆盖（如 --num_iterations, --api_key），最高优先级
 ```
 
-通过 `src.utils.config.load_config(model=..., dataset=..., train=...)` 加载并合并。
+**重要**：大多数运行参数（max_samples、seed、device、learning_rate、num_rounds 等）只能通过 YAML 配置文件修改，不接受 CLI 传入。具体哪些参数可 CLI 覆盖见"脚本 CLI 参数速查"表格。
 
-新增实验配置：
-- `configs/verify.yaml` -- 3 样本验证（boolq, 1 iteration, 2 rounds）
+脚本使用模式：
+```python
+from src.utils.config import ConfigManager
+cfg = ConfigManager.initialize(config_path=cli_args.config)
+args = cfg.step("step01_bootstrap", defaults=STEP_DEFAULTS).to_namespace()
+```
+
+实验配置文件：
+- `configs/config.yaml` -- 原始 ACC-Collab 6步管线
+- `configs/verify.yaml` -- 3 样本验证
 - `configs/debug.yaml` / `configs/debug_3samples.yaml` -- 调试用配置
-- `configs/experiment_gpu1.yaml` -- 单 H100 GPU 实验配置（含 cache_dir）
+- `configs/experiment_gpu1.yaml` -- 单 H100 GPU 实验配置
 - `configs/experiment_qwen3_arc.yaml` -- Qwen3-4B + ARC-Challenge 实验
-
-新增配置参数：
-- `cache_dir`：实验级缓存目录
-- `reuse_trajectories`：轨迹复用开关
-- 各步骤独立的 GPU 设备分配（`gpu_device`）和推理参数（`dtype`, `gpu_memory_utilization`）
+- `configs/society/experiment_h100.yaml` -- Society H100 实验
+- `configs/society/experiment_v100.yaml` / `experiment_v100_300.yaml` -- V100 变体
 
 ## 运行命令
 
@@ -94,11 +99,35 @@ pytest tests/ -v
 
 # 代码检查
 ruff check src/ tests/
+```
 
-# === 原始 ACC-Collab 实验 ===
+Makefile 快捷方式：`make test` / `make lint` / `make clean`
 
-# 一键全流程
-python scripts/06_full_pipeline.py --model_name google/gemma-2-2b-it --dataset boolq --output_dir experiments/gemma2_boolq --max_samples 100
+### 脚本 CLI 参数速查
+
+**所有脚本均通过 `ConfigManager` 从 YAML 配置文件读取参数（model_name、dataset、max_samples、seed、device 等），CLI 只接受少量入口参数。** 要修改 `max_samples`、`num_rounds`、`learning_rate` 等运行参数，应编辑 YAML 配置文件的 `common:` 或对应 `stepNN:` 段落，而非通过命令行传递。
+
+| 脚本 | CLI 参数 | 说明 |
+|------|---------|------|
+| `01_generate_trajectories.py` | `--config` | 默认 `configs/config.yaml` |
+| `02_build_preferences.py` | `--config` | 默认 `configs/config.yaml` |
+| `train.py` | `--config`, `--agent` | `--agent` 必选，值为 `actor` 或 `critic` |
+| `05_evaluate.py` | `--config` | 默认 `configs/config.yaml` |
+| `06_full_pipeline.py` | `--config` | 默认 `configs/experiment_gpu1.yaml`，一键全流程 |
+| `07_bootstrap_actors.py` | `--config` | 默认 `configs/society/experiment_h100.yaml` |
+| `08_classify_data.py` | `--config`, `--api_key` | `--api_key` 覆盖配置文件中的 API 密钥 |
+| `09_diversify_actors.py` | `--config` | `reasoning_styles` 等参数在 YAML 中设置 |
+| `10_diversify_critics.py` | `--config` | `error_types` 等参数在 YAML 中设置 |
+| `11_society_train.py` | `--config`, `--num_iterations`, `--num_rounds` | 后两个覆盖配置文件中的值 |
+| `12_society_evaluate.py` | `--config`, `--no_ablations` | 默认运行消融实验，加 `--no_ablations` 跳过 |
+
+### 原始 ACC-Collab 实验（01-06 脚本）
+
+```bash
+export PYTHONPATH=$(pwd)
+
+# 一键全流程（参数在 YAML 配置中设置，如 model_name/dataset/max_samples 等）
+python scripts/06_full_pipeline.py --config configs/experiment_gpu1.yaml
 
 # 统一训练入口（合并了原 03_train_critic 和 04_train_actor）
 python scripts/train.py --config configs/verify.yaml --agent critic
@@ -107,8 +136,6 @@ python scripts/train.py --config configs/verify.yaml --agent actor
 # 分步执行：01_生成轨迹 -> 02_构建偏好 -> train.py --agent critic -> train.py --agent actor -> 05_评估
 ```
 
-Makefile 快捷方式：`make test` / `make lint` / `make clean`
-
 ### Diverse Actor-Critic Society 实验（07-12 脚本）
 
 结合 ACC-Collab + Multiagent FT 的扩展实验。基座模型：Qwen2.5-7B-Instruct，单张 H100 80GB。
@@ -116,10 +143,11 @@ Makefile 快捷方式：`make test` / `make lint` / `make clean`
 ```bash
 export PYTHONPATH=$(pwd)
 
-# === 小规模验证（5样本，2轮审议）===
+# === 小规模验证 ===
+# 在 YAML 配置中设置 common.max_samples: 5 来控制样本数
 
 # Phase 1: Bootstrap 多样化数据
-python scripts/07_bootstrap_actors.py --config configs/society/experiment_h100.yaml --max_samples 5
+python scripts/07_bootstrap_actors.py --config configs/society/experiment_h100.yaml
 
 # Phase 2: 分类推理风格 + 错误类型（GLM4.5 API）
 python scripts/08_classify_data.py --config configs/society/experiment_h100.yaml
@@ -131,12 +159,13 @@ python scripts/09_diversify_actors.py --config configs/society/experiment_h100.y
 python scripts/10_diversify_critics.py --config configs/society/experiment_h100.yaml
 
 # Phase 5: Society 交替训练（N×M 交替 DPO）
-python scripts/11_society_train.py --config configs/society/experiment_h100.yaml --max_samples 5 --num_rounds 2
+python scripts/11_society_train.py --config configs/society/experiment_h100.yaml --num_rounds 2
 
 # Phase 6: 评估 + 消融实验（A1-A5）
-python scripts/12_society_evaluate.py --config configs/society/experiment_h100.yaml --max_samples 5
+python scripts/12_society_evaluate.py --config configs/society/experiment_h100.yaml
 
 # === 全量运行（200样本，5轮，预计17-22小时）===
+# 修改 YAML 中 common.max_samples: 200，step05_train_society.num_rounds: 5
 python scripts/07_bootstrap_actors.py --config configs/society/experiment_h100.yaml
 python scripts/08_classify_data.py --config configs/society/experiment_h100.yaml
 python scripts/09_diversify_actors.py --config configs/society/experiment_h100.yaml
@@ -145,7 +174,7 @@ python scripts/11_society_train.py --config configs/society/experiment_h100.yaml
 python scripts/12_society_evaluate.py --config configs/society/experiment_h100.yaml
 ```
 
-消融实验配置（A1-A5 自动运行）：
+消融实验配置（A1-A5 自动运行，除非指定 `--no_ablations`）：
 - **A1**: 1 Actor + 1 Critic（原始 ACC-Collab 基线）
 - **A2**: 3 Actor + 1 Critic（Actor 多样性单独贡献）
 - **A3**: 1 Actor + 4 Critic + Router（Critic 专长化单独贡献）
@@ -154,7 +183,7 @@ python scripts/12_society_evaluate.py --config configs/society/experiment_h100.y
 
 预期：A5 > A1（完整系统优于单 Agent 基线）
 
-API 分类需要设置环境变量：`export GLM_API_KEY=your_key`（或在 data_classifier.py 中配置默认值）。
+API 分类需要设置环境变量：`export GLM_API_KEY=your_key`（或在 YAML 配置的 `step02_classify.api_key` 中设置，或通过 `--api_key` 传入）。
 
 ## 管线脚本编号约定
 

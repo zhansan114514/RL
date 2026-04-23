@@ -41,6 +41,7 @@ def train_dpo(
     wandb_project: str = "acc-collab",
     gradient_checkpointing: bool = True,
     device: int = 0,
+    timeout_per_1k: int = 1800,
 ) -> str:
     """
     Train a model with DPO + LoRA.
@@ -70,6 +71,12 @@ def train_dpo(
         seed: Random seed.
         use_wandb: Whether to log to wandb.
         wandb_project: Wandb project name.
+        gradient_checkpointing: Whether to use gradient checkpointing.
+        device: CUDA device index.
+        timeout_per_1k: Base timeout in seconds per 1000 preference pairs.
+            The total subprocess timeout is ``timeout_per_1k *
+            ceil(n_pairs / 1000)``, minimum 1800 s.  Default 1800 s means
+            a 200-pair job gets 1800 s, a 5000-pair job gets 9000 s.
 
     Returns:
         Path to saved model.
@@ -179,13 +186,23 @@ def train_dpo(
     env["PYTHONPATH"] = project_root + ((":" + existing_pp) if existing_pp else "")
     logger.info(f"DPO training on physical GPU {target_physical} (isolated subprocess)")
 
+    # Compute subprocess timeout scaled by dataset size.
+    # timeout_per_1k seconds per 1000 pairs, minimum 1800 s (30 min).
+    n_pairs = len(preference_dataset) if preference_dataset is not None else 1
+    import math
+    _timeout = max(1800, timeout_per_1k * math.ceil(n_pairs / 1000))
+    logger.info(
+        f"DPO timeout: {_timeout}s ({n_pairs} pairs, "
+        f"{timeout_per_1k}s/1k pairs)"
+    )
+
     try:
         result = subprocess.run(
             [sys.executable, _runner_script, _config_path],
             env=env,
             capture_output=True,
             text=True,
-            timeout=3600,
+            timeout=_timeout,
         )
 
         if result.stdout:

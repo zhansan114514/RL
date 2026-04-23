@@ -12,7 +12,8 @@ import json
 import logging
 import os
 
-from _utils import resolve_config, setup_logging
+from _utils import setup_logging
+from src.utils.config import ConfigManager
 
 # Apply NVML fix if needed (for PyTorch 2.10+ with old NVIDIA drivers)
 try:
@@ -23,9 +24,6 @@ except ImportError:
 
 setup_logging()
 logger = logging.getLogger(__name__)
-
-ALLOWED_DATASETS = ("boolq", "mmlu", "bbh", "sciq", "arc")
-COMMON_KEYS = ("model_name", "dataset", "max_samples", "seed", "use_wandb", "cache_dir")
 
 STEP_DEFAULTS = {
     "model_name": "google/gemma-2-2b-it",
@@ -63,11 +61,8 @@ def parse_args():
         help="YAML config path.",
     )
     cli_args = parser.parse_args()
-    return resolve_config(
-        cli_args.config, "step06", STEP_DEFAULTS,
-        common_keys=COMMON_KEYS,
-        allowed_datasets=ALLOWED_DATASETS,
-    )
+    cfg = ConfigManager.initialize(config_path=cli_args.config)
+    return cfg.step("step06", defaults=STEP_DEFAULTS).to_namespace()
 
 
 def main():

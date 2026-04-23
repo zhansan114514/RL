@@ -22,13 +22,11 @@ from typing import Any, Dict, List
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from _utils import resolve_config, setup_logging
+from _utils import setup_logging
+from src.utils.config import ConfigManager
 
 setup_logging()
 logger = logging.getLogger(__name__)
-
-ALLOWED_DATASETS = ("boolq", "mmlu", "bbh", "sciq", "arc", "math", "gsm8k")
-COMMON_KEYS = ("model_name", "dataset", "cache_dir", "output_dir", "seed", "max_samples", "device", "dtype", "gpu_memory_utilization")
 
 STEP_DEFAULTS = {
     "model_name": "Qwen/Qwen2.5-7B-Instruct",
@@ -53,6 +51,9 @@ STEP_DEFAULTS = {
     "dtype": "bfloat16",
     "gpu_memory_utilization": 0.85,
     "checkpoint_dir": "output/society/checkpoints",
+    "actor_temperature": 0.7,
+    "actor_max_tokens": 512,
+    "critic_max_tokens": 256,
 }
 
 
@@ -74,11 +75,8 @@ def parse_args():
     )
     cli_args = parser.parse_args()
 
-    args = resolve_config(
-        cli_args.config, "step05_train_society", STEP_DEFAULTS,
-        common_keys=COMMON_KEYS,
-        allowed_datasets=ALLOWED_DATASETS,
-    )
+    cfg = ConfigManager.initialize(config_path=cli_args.config)
+    args = cfg.step("step05_train_society", defaults=STEP_DEFAULTS).to_namespace()
 
     # CLI overrides
     if cli_args.num_iterations is not None:
@@ -129,6 +127,9 @@ def create_agent_registry(
     actor_paths: Dict[str, str],
     critic_paths: Dict[str, str],
     base_model: str,
+    actor_temperature: float = 0.7,
+    actor_max_tokens: int = 512,
+    critic_max_tokens: int = 256,
 ) -> "AgentRegistry":
     """Create AgentRegistry from loaded paths.
 
@@ -139,8 +140,8 @@ def create_agent_registry(
         AgentRegistry,
         AgentConfig,
         AgentRole,
-        ReasoningStyle,
-        ErrorType,
+        resolve_reasoning_style,
+        resolve_error_type,
     )
 
     registry = AgentRegistry(base_model_path=base_model)
@@ -148,54 +149,40 @@ def create_agent_registry(
     # Register actors: model_path=base model, lora_path=LoRA checkpoint
     for style, path in actor_paths.items():
         try:
-            # Enum values are lowercase (e.g. "algebraic"), try value match first,
-            # then name match (e.g. "ALGEBRAIC" -> ReasoningStyle.ALGEBRAIC)
-            reasoning_style = ReasoningStyle(style)
-        except ValueError:
-            try:
-                reasoning_style = ReasoningStyle[style.upper()]
-            except KeyError:
-                logger.warning(
-                    f"Unknown reasoning style '{style}', defaulting to ALGEBRAIC"
-                )
-                reasoning_style = ReasoningStyle.ALGEBRAIC
+            reasoning_style = resolve_reasoning_style(style)
+        except ValueError as e:
+            logger.error(f"Cannot resolve actor style '{style}': {e}")
+            raise
 
         config = AgentConfig(
-            name=f"actor_{style}",
+            name=f"actor_{reasoning_style.value}",
             role=AgentRole.ACTOR,
             reasoning_style=reasoning_style,
             model_path=base_model,
             lora_path=path,
             system_prompt="",
-            temperature=0.7,
-            max_tokens=512,
+            temperature=actor_temperature,
+            max_tokens=actor_max_tokens,
         )
         registry.register(config)
 
     # Register critics: model_path=base model, lora_path=LoRA checkpoint
     for error_type, path in critic_paths.items():
         try:
-            # Enum values are lowercase (e.g. "arithmetic"), try value match first,
-            # then name match (e.g. "ARITHMETIC" -> ErrorType.ARITHMETIC)
-            error = ErrorType(error_type)
-        except ValueError:
-            try:
-                error = ErrorType[error_type.upper()]
-            except KeyError:
-                logger.warning(
-                    f"Unknown error type '{error_type}', defaulting to LOGIC"
-                )
-                error = ErrorType.LOGIC
+            error = resolve_error_type(error_type)
+        except ValueError as e:
+            logger.error(f"Cannot resolve critic error type '{error_type}': {e}")
+            raise
 
         config = AgentConfig(
-            name=f"critic_{error_type}",
+            name=f"critic_{error.value}",
             role=AgentRole.CRITIC,
             error_specialty=error,
             model_path=base_model,
             lora_path=path,
             system_prompt="",
-            temperature=0.7,
-            max_tokens=256,
+            temperature=actor_temperature,
+            max_tokens=critic_max_tokens,
         )
         registry.register(config)
 
@@ -254,6 +241,9 @@ def main():
         actor_paths,
         critic_paths,
         args.model_name,
+        actor_temperature=args.actor_temperature,
+        actor_max_tokens=args.actor_max_tokens,
+        critic_max_tokens=args.critic_max_tokens,
     )
 
     # Run society alternating training

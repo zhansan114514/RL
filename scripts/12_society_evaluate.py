@@ -33,13 +33,11 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from _utils import resolve_config, setup_logging
+from _utils import setup_logging
+from src.utils.config import ConfigManager
 
 setup_logging()
 logger = logging.getLogger(__name__)
-
-ALLOWED_DATASETS = ("boolq", "mmlu", "bbh", "sciq", "arc", "math", "gsm8k")
-COMMON_KEYS = ("model_name", "dataset", "cache_dir", "society_dir", "output_dir", "seed", "max_samples", "device", "dtype", "gpu_memory_utilization")
 
 STEP_DEFAULTS = {
     "model_name": "Qwen/Qwen2.5-7B-Instruct",
@@ -53,9 +51,11 @@ STEP_DEFAULTS = {
     "device": 0,
     "dtype": "bfloat16",
     "gpu_memory_utilization": 0.65,
-    "aggregation": "majority_vote",
     "run_ablations": True,
     "num_samples_for_qualitative": 5,
+    "max_model_len": 4096,
+    "max_lora_rank": 256,
+    "router_top_k": 2,
 }
 
 
@@ -88,11 +88,9 @@ def parse_args():
         help="Skip ablation experiments.",
     )
     cli_args = parser.parse_args()
-    args = resolve_config(
-        cli_args.config, "step06_evaluate", STEP_DEFAULTS,
-        common_keys=COMMON_KEYS,
-        allowed_datasets=ALLOWED_DATASETS,
-    )
+
+    cfg = ConfigManager.initialize(config_path=cli_args.config)
+    args = cfg.step("step06_evaluate", defaults=STEP_DEFAULTS).to_namespace()
 
     if cli_args.no_ablations:
         args.run_ablations = False
@@ -177,7 +175,10 @@ def _build_agent_configs(
 
     Returns (actor_configs, critic_configs, lora_paths).
     """
-    from src.society.agent_registry import AgentConfig, AgentRole, ReasoningStyle, ErrorType
+    from src.society.agent_registry import (
+        AgentConfig, AgentRole, ReasoningStyle, ErrorType,
+        resolve_reasoning_style, resolve_error_type,
+    )
 
     actors_info = registry.get("actors", {})
     critics_info = registry.get("critics", {})
@@ -193,15 +194,10 @@ def _build_agent_configs(
     for name, info in actors_info.items():
         style_str = name.replace("actor_", "")
         try:
-            style = ReasoningStyle(style_str)
-        except ValueError:
-            try:
-                style = ReasoningStyle[style_str.upper()]
-            except KeyError:
-                logger.warning(
-                    f"Unknown reasoning style '{style_str}', defaulting to ALGEBRAIC"
-                )
-                style = ReasoningStyle.ALGEBRAIC
+            style = resolve_reasoning_style(style_str)
+        except ValueError as e:
+            logger.error(f"Cannot resolve actor style '{style_str}': {e}")
+            raise
         actor_configs.append(AgentConfig(
             name=name,
             role=AgentRole.ACTOR,
@@ -215,15 +211,10 @@ def _build_agent_configs(
     for name, info in critics_info.items():
         error_str = name.replace("critic_", "")
         try:
-            error = ErrorType(error_str)
-        except ValueError:
-            try:
-                error = ErrorType[error_str.upper()]
-            except KeyError:
-                logger.warning(
-                    f"Unknown error type '{error_str}', defaulting to LOGIC"
-                )
-                error = ErrorType.LOGIC
+            error = resolve_error_type(error_str)
+        except ValueError as e:
+            logger.error(f"Cannot resolve critic error type '{error_str}': {e}")
+            raise
         critic_configs.append(AgentConfig(
             name=name,
             role=AgentRole.CRITIC,
@@ -272,6 +263,97 @@ def _build_base_agent_configs(model_name: str):
         system_prompt="",
     )
     return [actor_config], [critic_config], {}
+
+
+def _build_agent_configs_from_phase_registries(
+    actor_phase_dir: str,
+    critic_phase_dir: str,
+    base_model: str,
+    actor_names: Optional[List[str]] = None,
+    critic_names: Optional[List[str]] = None,
+):
+    """Build AgentConfigs from phase 3/4 diversification registries.
+
+    These are PRE-society-training LoRA adapters, used for ablation A1-A3
+    to isolate diversification-only effects from society training effects.
+
+    Args:
+        actor_phase_dir: Directory containing actor_registry.json (from script 09)
+        critic_phase_dir: Directory containing critic_registry.json (from script 10)
+        base_model: Base model path
+        actor_names: Optional filter for specific actor style names
+        critic_names: Optional filter for specific critic error type names
+    """
+    from src.society.agent_registry import (
+        AgentConfig, AgentRole,
+        resolve_reasoning_style, resolve_error_type,
+    )
+
+    actor_configs = []
+    critic_configs = []
+    lora_paths = {}
+
+    # Load actor registry
+    actor_reg_file = os.path.join(actor_phase_dir, "actor_registry.json")
+    if os.path.exists(actor_reg_file):
+        with open(actor_reg_file) as f:
+            actor_data = json.load(f)
+
+        for style_key, info in actor_data.get("actors", {}).items():
+            if actor_names is not None and style_key not in actor_names:
+                continue
+            try:
+                style = resolve_reasoning_style(style_key)
+            except ValueError as e:
+                logger.error(f"Cannot resolve phase actor style '{style_key}': {e}")
+                raise
+
+            path = info.get("model_path", "")
+            name = f"actor_{style.value}"
+            actor_configs.append(AgentConfig(
+                name=name,
+                role=AgentRole.ACTOR,
+                reasoning_style=style,
+                model_path=base_model,
+                lora_path=path,
+                system_prompt="",
+            ))
+            if path:
+                lora_paths[name] = path
+    else:
+        logger.warning(f"Phase actor registry not found: {actor_reg_file}")
+
+    # Load critic registry
+    critic_reg_file = os.path.join(critic_phase_dir, "critic_registry.json")
+    if os.path.exists(critic_reg_file):
+        with open(critic_reg_file) as f:
+            critic_data = json.load(f)
+
+        for error_key, info in critic_data.get("critics", {}).items():
+            if critic_names is not None and error_key not in critic_names:
+                continue
+            try:
+                error = resolve_error_type(error_key)
+            except ValueError as e:
+                logger.error(f"Cannot resolve phase critic error type '{error_key}': {e}")
+                raise
+
+            path = info.get("model_path", "")
+            name = f"critic_{error.value}"
+            critic_configs.append(AgentConfig(
+                name=name,
+                role=AgentRole.CRITIC,
+                error_specialty=error,
+                model_path=base_model,
+                lora_path=path,
+                system_prompt="",
+            ))
+            if path:
+                lora_paths[name] = path
+    else:
+        logger.warning(f"Phase critic registry not found: {critic_reg_file}")
+
+    return actor_configs, critic_configs, lora_paths
 
 
 def _run_deliberation_on_samples(
@@ -395,8 +477,30 @@ def run_all_evaluations(
     dtype: str,
     gpu_memory_utilization: float,
     run_ablations: bool,
+    max_model_len: int = 4096,
+    max_lora_rank: int = 256,
+    router_top_k: int = 2,
+    phase_actor_dir: str = "output/society/actors",
+    phase_critic_dir: str = "output/society/critics",
 ) -> Dict[str, EvalResult]:
-    """Load base model ONCE, run all evaluations sharing the same engine."""
+    """Load base model ONCE, run all evaluations sharing the same engine.
+
+    Ablation design (clean causal isolation):
+      A0: Base model only (no LoRA, no training) — zero-training reference
+      A1: 1 Actor + 1 Critic from PHASE 3/4 diversification (pre-society-training)
+          → Isolates basic diversification effect vs base model
+      A2: 3 diverse Actors (phase 3) + 1 Critic (phase 4) — Actor diversity only
+          → Isolates Actor diversity contribution vs A1
+      A3: 1 Actor (phase 3) + 4 Critics (phase 4) + Router — Critic specialization only
+          → Isolates Critic specialization contribution vs A1
+      A4: 3 Actors + 4 Critics from FINAL registry, uniform weights — full agents, no routing
+          → Shows society training + diversity effect without Router
+      A5: 3 Actors + 4 Critics from FINAL registry + Router — complete system
+          → Full system with all components
+
+    Key: A1-A3 use pre-society-training LoRA (phase 3/4 registries),
+         A4-A5 use post-society-training LoRA (final joint registry).
+    """
     from src.inference.vllm_server import VLLMInference
 
     base_model = registry.get("training_config", {}).get("base_model", "Qwen/Qwen2.5-7B-Instruct")
@@ -416,10 +520,23 @@ def run_all_evaluations(
         cuda_device=device,
         dtype=dtype,
         gpu_memory_utilization=gpu_memory_utilization,
-        max_model_len=4096,
+        max_model_len=max_model_len,
         enable_lora=True,
         max_loras=total_agents_with_lora,
-        max_lora_rank=256,
+        max_lora_rank=max_lora_rank,
+    )
+
+    # Load phase registries for A1-A3 ablations (pre-society-training LoRA)
+    phase_actors, phase_critics, phase_lora = _build_agent_configs_from_phase_registries(
+        actor_phase_dir=phase_actor_dir,
+        critic_phase_dir=phase_critic_dir,
+        base_model=base_model,
+    )
+    phase_actor_names = [a.name for a in phase_actors]
+    phase_critic_names = [c.name for c in phase_critics]
+    logger.info(
+        f"  Phase registries: {len(phase_actors)} actors, {len(phase_critics)} critics "
+        f"(for A1-A3 ablations)"
     )
 
     try:
@@ -434,69 +551,102 @@ def run_all_evaluations(
             )
             logger.info(f"  A0: initial={results['A0_base_model'].initial_accuracy:.3f} final={results['A0_base_model'].final_accuracy:.3f}")
 
-            # A1: 1 trained Actor + 1 trained Critic (ACC-Collab baseline)
-            # Uses the FIRST actor's and FIRST critic's trained LoRA adapters.
-            # This represents what ACC-Collab achieves with a single agent pair,
-            # NOT the untrained base model.
-            logger.info("[A1] 1 trained Actor + 1 trained Critic (ACC-Collab baseline)...")
-            a_configs, c_configs, lora = _build_agent_configs(
-                registry,
-                actor_names=[all_actor_names[0]],
-                critic_names=[all_critic_names[0]],
-            )
-            results["A1_acc_collab"] = _run_deliberation_on_samples(
-                engine, a_configs, c_configs, samples, dataset_name,
-                lora, num_rounds, max_tokens, temperature,
-                router_top_k=1,
-            )
+            # A1: 1 Actor + 1 Critic from phase registries (pre-society-training)
+            # This is the true ACC-Collab baseline: independently diversified
+            # single agent pair, NOT a subset of the jointly trained system.
+            logger.info("[A1] 1 phase-diversified Actor + 1 phase-diversified Critic (ACC-Collab baseline)...")
+            if phase_actors and phase_critics:
+                results["A1_acc_collab"] = _run_deliberation_on_samples(
+                    engine,
+                    [phase_actors[0]],
+                    [phase_critics[0]],
+                    samples, dataset_name,
+                    phase_lora, num_rounds, max_tokens, temperature,
+                    router_top_k=1,
+                )
+            else:
+                logger.warning("  Phase registries empty, falling back to first agent from final registry")
+                a_configs, c_configs, lora = _build_agent_configs(
+                    registry,
+                    actor_names=[all_actor_names[0]],
+                    critic_names=[all_critic_names[0]],
+                )
+                results["A1_acc_collab"] = _run_deliberation_on_samples(
+                    engine, a_configs, c_configs, samples, dataset_name,
+                    lora, num_rounds, max_tokens, temperature,
+                    router_top_k=1,
+                )
             logger.info(f"  A1: initial={results['A1_acc_collab'].initial_accuracy:.3f} final={results['A1_acc_collab'].final_accuracy:.3f}")
 
-            # A2: 3 trained Actors + 1 trained Critic (Actor diversity only)
-            # Uses all 3 Actors' LoRA + 1 Critic's LoRA.
-            # Measures the isolated contribution of Actor diversity:
-            #   (3 diverse trained Actors) vs (1 trained Actor)
-            logger.info("[A2] 3 trained Actors + 1 trained Critic (Actor diversity)...")
-            a_configs, _, a_lora = _build_agent_configs(
-                registry,
-                actor_names=all_actor_names[:3],
-            )
-            _, c_configs, c_lora = _build_agent_configs(
-                registry,
-                critic_names=[all_critic_names[0]],
-            )
-            merged_lora = {**a_lora, **c_lora}
-            results["A2_actor_diversity"] = _run_deliberation_on_samples(
-                engine, a_configs, c_configs, samples, dataset_name,
-                merged_lora, num_rounds, max_tokens, temperature,
-                router_top_k=1,
-            )
+            # A2: 3 diverse Actors (phase 3) + 1 Critic (phase 4) — Actor diversity only
+            # Uses PRE-society-training LoRA from phase 3/4 diversification.
+            # Causal question: does having 3 diverse Actors improve over 1 Actor?
+            logger.info("[A2] 3 phase-diversified Actors + 1 phase-diversified Critic (Actor diversity)...")
+            if phase_actors and phase_critics:
+                a2_lora = dict(phase_lora)
+                # Keep only the first critic's lora
+                for cn in phase_critic_names[1:]:
+                    a2_lora.pop(cn, None)
+                results["A2_actor_diversity"] = _run_deliberation_on_samples(
+                    engine,
+                    phase_actors,
+                    [phase_critics[0]],
+                    samples, dataset_name,
+                    a2_lora, num_rounds, max_tokens, temperature,
+                    router_top_k=1,
+                )
+            else:
+                logger.warning("  Phase registries empty, falling back to final registry subset")
+                a_configs, _, a_lora = _build_agent_configs(
+                    registry, actor_names=all_actor_names[:3],
+                )
+                _, c_configs, c_lora = _build_agent_configs(
+                    registry, critic_names=[all_critic_names[0]],
+                )
+                results["A2_actor_diversity"] = _run_deliberation_on_samples(
+                    engine, a_configs, c_configs, samples, dataset_name,
+                    {**a_lora, **c_lora}, num_rounds, max_tokens, temperature,
+                    router_top_k=1,
+                )
             logger.info(f"  A2: initial={results['A2_actor_diversity'].initial_accuracy:.3f} final={results['A2_actor_diversity'].final_accuracy:.3f}")
 
-            # A3: 1 trained Actor + 4 trained Critics + Router (Critic specialization only)
-            # Uses 1 Actor's LoRA + all 4 Critics' LoRA + MoE Router.
-            # Measures the isolated contribution of Critic specialization:
-            #   (4 specialized trained Critics + Router) vs (1 trained Critic)
-            logger.info("[A3] 1 trained Actor + 4 trained Critics + Router (Critic specialization)...")
-            a_configs, _, a_lora = _build_agent_configs(
-                registry,
-                actor_names=[all_actor_names[0]],
-            )
-            _, c_configs, c_lora = _build_agent_configs(
-                registry,
-                critic_names=all_critic_names,
-            )
-            merged_lora = {**a_lora, **c_lora}
-            results["A3_critic_specialization"] = _run_deliberation_on_samples(
-                engine, a_configs, c_configs, samples, dataset_name,
-                merged_lora, num_rounds, max_tokens, temperature,
-                router_top_k=2,
-            )
+            # A3: 1 Actor (phase 3) + 4 Critics (phase 4) + Router — Critic specialization only
+            # Uses PRE-society-training LoRA from phase 3/4 diversification.
+            # Causal question: does Critic specialization + Router improve over 1 Critic?
+            logger.info("[A3] 1 phase-diversified Actor + 4 phase-diversified Critics + Router (Critic specialization)...")
+            if phase_actors and phase_critics:
+                a3_lora = dict(phase_lora)
+                # Keep only the first actor's lora
+                for an in phase_actor_names[1:]:
+                    a3_lora.pop(an, None)
+                results["A3_critic_specialization"] = _run_deliberation_on_samples(
+                    engine,
+                    [phase_actors[0]],
+                    phase_critics,
+                    samples, dataset_name,
+                    a3_lora, num_rounds, max_tokens, temperature,
+                    router_top_k=2,
+                )
+            else:
+                logger.warning("  Phase registries empty, falling back to final registry subset")
+                a_configs, _, a_lora = _build_agent_configs(
+                    registry, actor_names=[all_actor_names[0]],
+                )
+                _, c_configs, c_lora = _build_agent_configs(
+                    registry, critic_names=all_critic_names,
+                )
+                results["A3_critic_specialization"] = _run_deliberation_on_samples(
+                    engine, a_configs, c_configs, samples, dataset_name,
+                    {**a_lora, **c_lora}, num_rounds, max_tokens, temperature,
+                    router_top_k=2,
+                )
             logger.info(f"  A3: initial={results['A3_critic_specialization'].initial_accuracy:.3f} final={results['A3_critic_specialization'].final_accuracy:.3f}")
 
-            # A4: 3 Actors + 4 Critics, UNIFORM weights (no routing)
+            # A4: 3 Actors + 4 Critics from FINAL registry, uniform weights (no routing)
+            # Uses POST-society-training LoRA — shows joint training + diversity effect.
             # Key difference from A5: uniform_weights=True means all critics
             # contribute equally (no softmax confidence gating)
-            logger.info("[A4] 3 Actors + 4 Critics (no routing, uniform weights)...")
+            logger.info("[A4] 3 Actors + 4 Critics from final registry (no routing, uniform weights)...")
             a_configs, c_configs, lora = _build_agent_configs(
                 registry,
                 actor_names=all_actor_names[:3],
@@ -510,7 +660,7 @@ def run_all_evaluations(
             )
             logger.info(f"  A4: initial={results['A4_no_routing'].initial_accuracy:.3f} final={results['A4_no_routing'].final_accuracy:.3f}")
 
-            # A5: 3 Actors + 4 Critics + Router (full system)
+            # A5: 3 Actors + 4 Critics from FINAL registry + Router (full system)
             logger.info("[A5] 3 Actors + 4 Critics + Router (full system)...")
             a_configs, c_configs, lora = _build_agent_configs(
                 registry,
@@ -520,8 +670,8 @@ def run_all_evaluations(
             results["A5_full_system"] = _run_deliberation_on_samples(
                 engine, a_configs, c_configs, samples, dataset_name,
                 lora, num_rounds, max_tokens, temperature,
-                router_top_k=2,        # Top-2 confident critics
-                router_uniform=False,  # Softmax confidence weighting
+                router_top_k=router_top_k,  # From config
+                router_uniform=False,       # Softmax confidence weighting
             )
             logger.info(f"  A5: initial={results['A5_full_system'].initial_accuracy:.3f} final={results['A5_full_system'].final_accuracy:.3f}")
         else:
@@ -531,7 +681,7 @@ def run_all_evaluations(
             results["main"] = _run_deliberation_on_samples(
                 engine, a_configs, c_configs, samples, dataset_name,
                 lora, num_rounds, max_tokens, temperature,
-                router_top_k=2,
+                router_top_k=router_top_k,
             )
 
     finally:
@@ -589,6 +739,12 @@ def main():
     # Run all evaluations with shared engine
     logger.info("[Step 3] Running evaluation (shared base model)...")
     total_start = time.time()
+
+    # Resolve phase registry directories for pre-society-training ablations
+    cache_dir = getattr(args, "cache_dir", "output/society")
+    phase_actor_dir = os.path.join(cache_dir, "actors")
+    phase_critic_dir = os.path.join(cache_dir, "critics")
+
     ablation_results = run_all_evaluations(
         registry=registry,
         samples=samples,
@@ -600,6 +756,11 @@ def main():
         dtype=args.dtype,
         gpu_memory_utilization=args.gpu_memory_utilization,
         run_ablations=args.run_ablations,
+        max_model_len=args.max_model_len,
+        max_lora_rank=args.max_lora_rank,
+        router_top_k=args.router_top_k,
+        phase_actor_dir=phase_actor_dir,
+        phase_critic_dir=phase_critic_dir,
     )
     total_time = time.time() - total_start
     logger.info(f"Total evaluation time: {total_time:.1f}s")

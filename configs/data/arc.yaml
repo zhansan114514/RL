@@ -1,6 +1,0 @@
-data:
-  name: "arc"
-  hf_id: "allenai/ai2_arc"
-  subset: "ARC-Challenge"
-  task_type: "multiple_choice"
-  answer_key: "answerKey"

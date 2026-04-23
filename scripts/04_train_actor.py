@@ -13,7 +13,8 @@ from __future__ import annotations
 import logging
 import os
 
-from _utils import resolve_config, setup_logging
+from _utils import setup_logging
+from src.utils.config import ConfigManager
 
 # Apply NVML fix if needed (for PyTorch 2.10+ with old NVIDIA drivers)
 try:
@@ -24,8 +25,6 @@ except ImportError:
 
 setup_logging()
 logger = logging.getLogger(__name__)
-
-COMMON_KEYS = ("model_name", "seed", "use_wandb")
 
 STEP_DEFAULTS = {
     "model_name": "google/gemma-2-2b-it",
@@ -51,10 +50,8 @@ def parse_args():
         help="YAML config path.",
     )
     cli_args = parser.parse_args()
-    return resolve_config(
-        cli_args.config, "step04", STEP_DEFAULTS,
-        common_keys=COMMON_KEYS,
-    )
+    cfg = ConfigManager.initialize(config_path=cli_args.config)
+    return cfg.step("step04", defaults=STEP_DEFAULTS).to_namespace()
 
 
 def main():

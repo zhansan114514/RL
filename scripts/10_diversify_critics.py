@@ -30,20 +30,18 @@ from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from _utils import resolve_config, setup_logging
+from _utils import setup_logging
+from src.utils.config import ConfigManager
 
 setup_logging()
 logger = logging.getLogger(__name__)
-
-ALLOWED_DATASETS = ("boolq", "mmlu", "bbh", "sciq", "arc", "math", "gsm8k")
-COMMON_KEYS = ("model_name", "dataset", "cache_dir", "input_dir", "output_dir", "seed", "device", "dtype", "gpu_memory_utilization")
 
 STEP_DEFAULTS = {
     "model_name": "Qwen/Qwen2.5-7B-Instruct",
     "dataset": "math",
     "cache_dir": "output/society",
     "input_dir": "output/society/classified",
-    "actor_dir": "output/society/actors",
+    "actor_base_dir": "output/society/actors",
     "output_dir": "output/society/critics",
     "error_types": ["arithmetic", "logic", "hallucination", "verification"],
     "max_delib_samples": 50,
@@ -62,6 +60,8 @@ STEP_DEFAULTS = {
     "device": 0,
     "dtype": "bfloat16",
     "gpu_memory_utilization": 0.65,
+    "max_model_len": 4096,
+    "max_lora_rank": 256,
 }
 
 
@@ -74,11 +74,9 @@ def parse_args():
         help="YAML config path.",
     )
     cli_args = parser.parse_args()
-    return resolve_config(
-        cli_args.config, "step04_diversify_critics", STEP_DEFAULTS,
-        common_keys=COMMON_KEYS,
-        allowed_datasets=ALLOWED_DATASETS,
-    )
+
+    cfg = ConfigManager.initialize(config_path=cli_args.config)
+    return cfg.step("step04_diversify_critics", defaults=STEP_DEFAULTS).to_namespace()
 
 
 # ============================================================
@@ -194,6 +192,7 @@ def build_critic_preference_pairs(
     dtype: str = "bfloat16",
     gpu_memory_utilization: float = 0.65,
     max_model_len: int = 4096,
+    max_lora_rank: int = 256,
     engine=None,
 ) -> List[Dict[str, Any]]:
     """
@@ -236,7 +235,7 @@ def build_critic_preference_pairs(
                 max_model_len=max_model_len,
                 enable_lora=bool(all_lora_paths) or None,
                 max_loras=max(max_loras, 1),
-                max_lora_rank=256,
+                max_lora_rank=max_lora_rank,
             )
 
         # Build adapters for all actors
@@ -465,7 +464,7 @@ def main():
     # Setup directories
     input_dir = args.input_dir
     output_dir = args.output_dir
-    actor_dir = args.actor_dir
+    actor_dir = args.actor_base_dir
     os.makedirs(output_dir, exist_ok=True)
 
     logger.info("=" * 60)
@@ -550,10 +549,10 @@ def main():
             cuda_device=args.device,
             dtype=args.dtype,
             gpu_memory_utilization=args.gpu_memory_utilization,
-            max_model_len=4096,
+            max_model_len=args.max_model_len,
             enable_lora=bool(all_lora_paths) or None,
             max_loras=max(1, len(all_lora_paths)),
-            max_lora_rank=256,
+            max_lora_rank=args.max_lora_rank,
         )
     except Exception as e:
         logger.warning(f"Failed to create shared vLLM engine: {e}")
@@ -596,6 +595,8 @@ def main():
                 device=args.device,
                 dtype=args.dtype,
                 gpu_memory_utilization=args.gpu_memory_utilization,
+                max_model_len=args.max_model_len,
+                max_lora_rank=args.max_lora_rank,
                 engine=shared_engine,
             )
 

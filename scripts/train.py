@@ -17,7 +17,8 @@ from __future__ import annotations
 import logging
 import os
 
-from _utils import resolve_config, setup_logging
+from _utils import setup_logging
+from src.utils.config import ConfigManager
 
 # Apply NVML fix if needed (for PyTorch 2.10+ with old NVIDIA drivers)
 try:
@@ -28,8 +29,6 @@ except ImportError:
 
 setup_logging()
 logger = logging.getLogger(__name__)
-
-COMMON_KEYS = ("model_name", "seed", "use_wandb")
 
 # Defaults shared between actor and critic; only preference_dir and
 # output_dir differ and are filled in parse_args() based on --agent.
@@ -90,15 +89,9 @@ def parse_args():
     step_key = AGENT_CONFIG[agent]["step_key"]
     defaults = AGENT_DEFAULTS[agent]
 
-    return (
-        resolve_config(
-            cli_args.config,
-            step_key,
-            defaults,
-            common_keys=COMMON_KEYS,
-        ),
-        agent,
-    )
+    cfg = ConfigManager.initialize(config_path=cli_args.config)
+    args = cfg.step(step_key, defaults=defaults).to_namespace()
+    return args, agent
 
 
 def main():

@@ -16,13 +16,11 @@ import logging
 import os
 import traceback
 
-from _utils import resolve_config, setup_logging
+from _utils import setup_logging
+from src.utils.config import ConfigManager
 
 setup_logging()
 logger = logging.getLogger(__name__)
-
-ALLOWED_DATASETS = ("boolq", "mmlu", "bbh", "sciq", "arc")
-COMMON_KEYS = ("model_name", "dataset", "max_samples", "seed")
 
 STEP_DEFAULTS = {
     "model_name": "google/gemma-2-2b-it",
@@ -51,11 +49,8 @@ def parse_args():
         help="YAML config path.",
     )
     cli_args = parser.parse_args()
-    return resolve_config(
-        cli_args.config, "step01", STEP_DEFAULTS,
-        common_keys=COMMON_KEYS,
-        allowed_datasets=ALLOWED_DATASETS,
-    )
+    cfg = ConfigManager.initialize(config_path=cli_args.config)
+    return cfg.step("step01", defaults=STEP_DEFAULTS).to_namespace()
 
 
 def main():

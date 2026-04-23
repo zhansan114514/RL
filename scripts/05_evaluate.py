@@ -15,13 +15,11 @@ import json
 import logging
 import os
 
-from _utils import resolve_config, setup_logging
+from _utils import setup_logging
+from src.utils.config import ConfigManager
 
 setup_logging()
 logger = logging.getLogger(__name__)
-
-ALLOWED_DATASETS = ("boolq", "mmlu", "bbh", "sciq", "arc")
-COMMON_KEYS = ("dataset", "max_samples", "seed")
 
 STEP_DEFAULTS = {
     "actor_path": "experiments/gemma2_boolq/actor",
@@ -50,11 +48,8 @@ def parse_args():
         help="YAML config path.",
     )
     cli_args = parser.parse_args()
-    return resolve_config(
-        cli_args.config, "step05", STEP_DEFAULTS,
-        common_keys=COMMON_KEYS,
-        allowed_datasets=ALLOWED_DATASETS,
-    )
+    cfg = ConfigManager.initialize(config_path=cli_args.config)
+    return cfg.step("step05", defaults=STEP_DEFAULTS).to_namespace()
 
 
 def main():

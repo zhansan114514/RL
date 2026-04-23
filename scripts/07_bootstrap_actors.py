@@ -6,10 +6,7 @@ simulates M=2 rounds of debate, and computes consensus via majority vote.
 
 Usage:
     python scripts/07_bootstrap_actors.py \
-        --config configs/society/experiment_h100.yaml \
-        --max_samples 100 \
-        --num_agents 5 \
-        --num_debate_rounds 2
+        --config configs/society/experiment_h100.yaml
 """
 
 from __future__ import annotations
@@ -26,21 +23,18 @@ from typing import Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from _utils import resolve_config, setup_logging
+from _utils import setup_logging
+from src.utils.config import ConfigManager
 
 setup_logging()
 logger = logging.getLogger(__name__)
-
-ALLOWED_DATASETS = ("boolq", "mmlu", "bbh", "sciq", "arc", "math", "gsm8k")
-COMMON_KEYS = ("model_name", "dataset", "max_samples", "seed", "cache_dir", "device", "dtype", "gpu_memory_utilization")
 
 STEP_DEFAULTS = {
     "model_name": "Qwen/Qwen2.5-7B-Instruct",
     "dataset": "math",
     "cache_dir": "output/society",
     "output_dir": None,
-    "num_responses": 5,          # Match config key name in experiment_h100.yaml
-    "num_agents": 5,             # Alias used internally (fallback)
+    "num_agents": 5,
     "num_debate_rounds": 2,
     "temperature": 0.8,
     "max_tokens": 512,
@@ -51,25 +45,6 @@ STEP_DEFAULTS = {
     "max_model_len": 4096,
     "device": 0,
 }
-
-
-@dataclass
-class BootstrapConfig:
-    """Configuration for bootstrap process."""
-    model_name: str
-    dataset: str
-    num_agents: int
-    num_debate_rounds: int
-    temperature: float
-    max_tokens: int
-    seed: int
-    max_samples: Optional[int]
-    dtype: str
-    gpu_memory_utilization: float
-    max_model_len: int
-    device: int
-    cache_dir: str
-    output_dir: Optional[str]
 
 
 @dataclass
@@ -102,11 +77,9 @@ def parse_args():
         help="YAML config path.",
     )
     cli_args = parser.parse_args()
-    return resolve_config(
-        cli_args.config, "step01_bootstrap", STEP_DEFAULTS,
-        common_keys=COMMON_KEYS,
-        allowed_datasets=ALLOWED_DATASETS,
-    )
+
+    cfg = ConfigManager.initialize(config_path=cli_args.config)
+    return cfg.step("step01_bootstrap", defaults=STEP_DEFAULTS).to_namespace()
 
 
 def generate_initial_responses(
@@ -258,12 +231,10 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(os.path.join(cache_dir, "logs"), exist_ok=True)
 
-    # num_responses from config takes priority over num_agents
-    num_agents = getattr(args, "num_responses", None) or getattr(args, "num_agents", 5)
+    num_agents = args.num_agents
 
     logger.info("=" * 60)
     logger.info("Bootstrap Diverse Actors")
-    logger.info(f"  Config: {args.config}")
     logger.info(f"  Model: {args.model_name}")
     logger.info(f"  Dataset: {args.dataset}")
     logger.info(f"  Num agents: {num_agents}")
@@ -280,9 +251,6 @@ def main():
     test_data = data.get("test", [])
 
     # Use TRAIN data for bootstrap to avoid data leakage.
-    # Bootstrap trajectories are used to build DPO preference pairs for
-    # Actor/Critic diversification (scripts 09/10), so they must NOT
-    # contain test data that will later be used for evaluation.
     samples = train_data if train_data else test_data
 
     if args.max_samples:

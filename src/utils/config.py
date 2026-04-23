@@ -4,15 +4,19 @@ Configuration management with global ConfigManager singleton.
 Usage:
     # At program entry point (once):
     from src.utils.config import ConfigManager
-    cfg = ConfigManager.initialize(model="gemma2_2b", dataset="boolq")
+    cfg = ConfigManager.initialize(config_path="configs/society/experiment_h100.yaml")
 
-    # Anywhere in the codebase:
+    # Get global config values:
     max_len = cfg.get("inference.max_model_len", 4096)
-    model_name = cfg.require("model.name")
+
+    # Get step-specific config:
+    step_cfg = cfg.step("step01_bootstrap", defaults={"num_agents": 5})
+    args = step_cfg.to_namespace()  # argparse.Namespace for backward compat
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import logging
 from typing import Any, Optional
@@ -25,17 +29,50 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CONFIGS_DIR = os.path.join(PROJECT_ROOT, "configs")
 
+# Step-specific section key prefixes in experiment YAMLs
+_STEP_PREFIXES = ("step", "phase")
+
+
+class StepConfig:
+    """Step-specific config with attribute access and argparse.Namespace compat."""
+
+    def __init__(self, data: dict):
+        object.__setattr__(self, "_data", data)
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self._data[name]
+        except KeyError:
+            raise AttributeError(f"Config has no key '{name}'")
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._data
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._data.get(key, default)
+
+    def to_namespace(self) -> argparse.Namespace:
+        """Convert to argparse.Namespace for backward compatibility."""
+        return argparse.Namespace(**self._data)
+
+    def to_dict(self) -> dict:
+        return dict(self._data)
+
+    def __repr__(self) -> str:
+        return f"StepConfig({self._data})"
+
 
 class ConfigManager:
     """
     Global configuration manager (singleton).
 
-    Load once at program start, access everywhere via get/require.
-    All hardcoded parameters should be replaced with get_config() calls.
+    Load once at program start, access everywhere via get/require/step.
+    Supports experiment YAMLs with ``common:`` and ``stepNN_name:`` sections.
     """
 
     _instance: Optional[ConfigManager] = None
     _config: DictConfig
+    _experiment_raw: DictConfig
 
     def __init__(self):
         raise RuntimeError(
@@ -48,15 +85,13 @@ class ConfigManager:
         """Internal: create instance bypassing __init__ guard."""
         obj = object.__new__(cls)
         obj._config = OmegaConf.create()
+        obj._experiment_raw = OmegaConf.create()
         return obj
 
     @classmethod
     def initialize(
         cls,
         config_path: Optional[str] = None,
-        model: Optional[str] = None,
-        dataset: Optional[str] = None,
-        training: Optional[str] = None,
         overrides: Optional[list[str]] = None,
     ) -> ConfigManager:
         """
@@ -64,17 +99,11 @@ class ConfigManager:
 
         Merge priority (later overrides earlier):
         1. configs/default.yaml (global defaults)
-        2. configs/model/{model}.yaml
-        3. configs/data/{dataset}.yaml
-        4. configs/train/{training}.yaml
-        5. config_path (experiment config)
-        6. overrides list (CLI-style dotlist)
+        2. config_path experiment YAML ``common:`` section
+        3. overrides list (CLI-style dotlist, highest priority)
 
         Args:
-            config_path: Path to an experiment config YAML (e.g. configs/config.yaml).
-            model: Model config name (e.g. "gemma2_2b").
-            dataset: Dataset config name (e.g. "boolq").
-            training: Training config name (e.g. "dpo_actor").
+            config_path: Path to an experiment config YAML.
             overrides: List of OmegaConf override strings (e.g. ["training.lr=1e-4"]).
 
         Returns:
@@ -90,33 +119,17 @@ class ConfigManager:
             logger.warning(f"Default config not found: {default_path}")
             configs.append(OmegaConf.create())
 
-        # 2. Model config
-        if model:
-            model_cfg = _load_group("model", model)
-            if model_cfg:
-                configs.append(model_cfg)
-
-        # 3. Dataset config
-        if dataset:
-            data_cfg = _load_group("data", dataset)
-            if data_cfg:
-                configs.append(data_cfg)
-
-        # 4. Training config
-        if training:
-            train_cfg = _load_group("train", training)
-            if train_cfg:
-                configs.append(train_cfg)
-
-        # 5. Experiment config file
+        # 2. Experiment config file
         if config_path and os.path.exists(config_path):
             exp_cfg = OmegaConf.load(config_path)
             configs.append(exp_cfg)
+        elif config_path:
+            logger.warning(f"Config file not found: {config_path}")
 
-        # Merge all layers
+        # Merge base layers
         merged = OmegaConf.merge(*configs)
 
-        # 6. CLI-style overrides (highest priority)
+        # 3. CLI-style overrides (highest priority)
         if overrides:
             override_cfg = OmegaConf.from_dotlist(overrides)
             merged = OmegaConf.merge(merged, override_cfg)
@@ -124,9 +137,12 @@ class ConfigManager:
         # Store
         instance = cls._create()
         instance._config = merged
+        # Keep raw experiment for step extraction
+        if config_path and os.path.exists(config_path):
+            instance._experiment_raw = OmegaConf.load(config_path)
         cls._instance = instance
 
-        logger.debug(f"ConfigManager initialized with {len(configs)} config layers")
+        logger.debug(f"ConfigManager initialized with config_path={config_path}")
         return instance
 
     @classmethod
@@ -152,14 +168,7 @@ class ConfigManager:
     # ---- Read interface ----
 
     def get(self, key: str, default: Any = None) -> Any:
-        """
-        Get a config value by dot-notation key.
-
-        Examples:
-            cfg.get("model.name")                    -> "google/gemma-2-2b-it"
-            cfg.get("inference.max_model_len")       -> 4096
-            cfg.get("nonexistent.key", "fallback")   -> "fallback"
-        """
+        """Get a config value by dot-notation key."""
         keys = key.split(".")
         obj = self._config
         for k in keys:
@@ -179,18 +188,46 @@ class ConfigManager:
         return val
 
     def section(self, key: str) -> dict:
-        """
-        Get a config section as a plain dict.
-
-        Example:
-            cfg.section("model") -> {"name": "...", "type": "..."}
-        """
+        """Get a config section as a plain dict."""
         obj = self.get(key)
         if obj is None:
             return {}
         if isinstance(obj, dict):
             return obj
         return OmegaConf.to_container(obj, resolve=True) if hasattr(obj, "__iter__") else {}
+
+    def step(self, step_key: str, defaults: Optional[dict] = None) -> StepConfig:
+        """
+        Get merged config for a specific pipeline step.
+
+        Merge priority: ``defaults`` < ``common:`` section < step-specific section.
+
+        Args:
+            step_key: e.g. ``"step01_bootstrap"`` or ``"step01"``.
+            defaults: Dict of default values (what was STEP_DEFAULTS).
+
+        Returns:
+            StepConfig with attribute access and ``to_namespace()``.
+        """
+        merged = dict(defaults) if defaults else {}
+
+        # Extract common section from experiment raw
+        exp_dict = OmegaConf.to_container(self._experiment_raw, resolve=True)
+        if isinstance(exp_dict, dict):
+            common_cfg = exp_dict.get("common", {})
+            if isinstance(common_cfg, dict):
+                for key, value in common_cfg.items():
+                    if value is not None:
+                        merged[key] = value
+
+            # Step-specific section overrides common
+            step_cfg = exp_dict.get(step_key, {})
+            if isinstance(step_cfg, dict):
+                for key, value in step_cfg.items():
+                    if value is not None:
+                        merged[key] = value
+
+        return StepConfig(merged)
 
     @property
     def raw(self) -> DictConfig:
@@ -223,34 +260,3 @@ class ConfigManager:
 class ConfigKeyError(Exception):
     """Raised when a required config key is missing."""
     pass
-
-
-# ---- Backward-compatible function ----
-
-def load_config(
-    model: Optional[str] = None,
-    dataset: Optional[str] = None,
-    train: Optional[str] = None,
-    overrides: Optional[list[str]] = None,
-) -> DictConfig:
-    """
-    Backward-compatible config loading.
-
-    Creates a ConfigManager singleton if not already initialized,
-    then returns the raw DictConfig for legacy code.
-    """
-    mgr = ConfigManager.initialize(
-        model=model, dataset=dataset, training=train, overrides=overrides
-    )
-    return mgr.raw
-
-
-def _load_group(group: str, name: str) -> Optional[DictConfig]:
-    """Load a config file from a config group directory."""
-    path = os.path.join(CONFIGS_DIR, group, f"{name}.yaml")
-    if os.path.exists(path):
-        cfg = OmegaConf.load(path)
-        logger.debug(f"Loaded config: {group}/{name}")
-        return cfg
-    logger.warning(f"Config not found: {path}")
-    return None

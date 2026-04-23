@@ -47,15 +47,13 @@ def resolve_config(
     common_keys: tuple[str, ...] = (),
     allowed_datasets: tuple[str, ...] | None = None,
 ) -> argparse.Namespace:
-    """Merge defaults <- common section <- step-specific section.
-
-    Args:
-        config_path: Path to the YAML config file.
-        step_key: Top-level key for this step (e.g. "step01").
-        defaults: Dict of default values (STEP_DEFAULTS).
-        common_keys: Keys to read from the "common" section.
-        allowed_datasets: If set, validate the dataset key against this list.
-    """
+    """DEPRECATED: Use ConfigManager.step() instead."""
+    import warnings
+    warnings.warn(
+        "resolve_config is deprecated. Use ConfigManager.initialize().step() instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     cfg = load_yaml_config(config_path)
     common_cfg = cfg.get("common", {})
     step_cfg = cfg.get(step_key, {})
@@ -77,7 +75,7 @@ def resolve_config(
 
     if allowed_datasets and merged.get("dataset") not in allowed_datasets:
         raise ValueError(
-            f"Invalid dataset '{merged['dataset']}'. "
+            f"Invalid dataset '{merged['dataset']}. "
             f"Expected one of: {', '.join(allowed_datasets)}"
         )
 
