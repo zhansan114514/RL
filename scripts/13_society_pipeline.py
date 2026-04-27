@@ -68,6 +68,17 @@ def mark_phase_done(phase_num: int, cache_dir: str):
         f.write(f"completed at {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
 
+def _get_api_key_from_config(config_path: str) -> str | None:
+    """Extract api_key from step02_classify section of the YAML config."""
+    try:
+        import yaml
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f)
+        return cfg.get("step02_classify", {}).get("api_key")
+    except Exception:
+        return None
+
+
 def run_phase(phase_num: int, script: str, desc: str, config_path: str) -> bool:
     """Run a single phase as a subprocess. Returns True on success."""
     scripts_dir = os.path.dirname(os.path.abspath(__file__))
@@ -82,10 +93,17 @@ def run_phase(phase_num: int, script: str, desc: str, config_path: str) -> bool:
 
     start = time.time()
     try:
+        sub_env = {**os.environ, "PYTHONPATH": os.path.dirname(scripts_dir)}
+        # Phase 5 needs GLM API key for style/error classification
+        if phase_num == 5 and not sub_env.get("GLM_API_KEY"):
+            api_key = _get_api_key_from_config(config_path)
+            if api_key:
+                sub_env["GLM_API_KEY"] = api_key
+                logger.info("  Injected GLM_API_KEY from config step02_classify.api_key")
         result = subprocess.run(
             [sys.executable, script_path, "--config", config_path],
             cwd=os.path.dirname(scripts_dir),
-            env={**os.environ, "PYTHONPATH": os.path.dirname(scripts_dir)},
+            env=sub_env,
             check=True,
         )
         elapsed = time.time() - start

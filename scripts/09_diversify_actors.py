@@ -334,13 +334,25 @@ def main():
     for thinking_style in args.reasoning_styles:
         logger.info(f"\n--- Training Actor: {thinking_style} ---")
 
-        # Build preference pairs for this style
-        preference_pairs = build_preference_pairs_for_style(
-            classified_results,
-            trajectories,
-            thinking_style,
-            args.dataset,
-        )
+        # Check for cached preference pairs
+        pairs_cache = os.path.join(output_dir, f"pairs_{thinking_style}.json")
+        if os.path.exists(pairs_cache):
+            with open(pairs_cache) as f:
+                preference_pairs = json.load(f)
+            logger.info(f"  Loaded {len(preference_pairs)} cached pairs for '{thinking_style}'")
+        else:
+            # Build preference pairs for this style
+            preference_pairs = build_preference_pairs_for_style(
+                classified_results,
+                trajectories,
+                thinking_style,
+                args.dataset,
+            )
+
+            if preference_pairs:
+                with open(pairs_cache, "w") as f:
+                    json.dump(preference_pairs, f)
+                logger.info(f"  Cached {len(preference_pairs)} pairs to {pairs_cache}")
 
         if not preference_pairs:
             logger.warning(f"  No preference pairs for '{thinking_style}', skipping")

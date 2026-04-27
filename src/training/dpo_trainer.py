@@ -178,8 +178,13 @@ def train_dpo(
     # symbol by intercepting dlsym() calls at the C level.
     _fix_path = os.path.join(os.path.dirname(__file__), "libdlsym_fix.so")
     if os.path.exists(_fix_path):
-        existing_preload = env.get("LD_PRELOAD", "")
-        env["LD_PRELOAD"] = _fix_path + ((":" + existing_preload) if existing_preload else "")
+        import ctypes
+        try:
+            ctypes.CDLL(_fix_path)
+            existing_preload = env.get("LD_PRELOAD", "")
+            env["LD_PRELOAD"] = _fix_path + ((":" + existing_preload) if existing_preload else "")
+        except OSError as e:
+            logger.info(f"libdlsym_fix.so skipped (incompatible): {e}")
     # Ensure src package is importable in the subprocess
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     existing_pp = env.get("PYTHONPATH", "")

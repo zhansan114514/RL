@@ -61,6 +61,22 @@ class ClassificationResult:
 class GLMClassifier:
     """Classifier using GLM-4.5 API."""
 
+    # Word variants: non-canonical form -> canonical label
+    _STYLE_VARIANTS = {
+        "algebraic": "algebraic", "algebraically": "algebraic",
+        "algebra": "algebraic",
+        "direct": "direct", "directly": "direct",
+        "backtracking": "backtracking", "backtrack": "backtracking",
+    }
+    _ERROR_VARIANTS = {
+        "arithmetic": "arithmetic", "arithmetical": "arithmetic",
+        "logic": "logic", "logical": "logic", "logically": "logic",
+        "hallucination": "hallucination", "hallucinate": "hallucination",
+        "hallucinating": "hallucination",
+        "verification": "verification", "verify": "verification",
+        "verifying": "verification",
+    }
+
     def __init__(
         self,
         api_key: str,
@@ -79,15 +95,11 @@ class GLMClassifier:
         self.retry_delay = retry_delay
         self.temperature = temperature
 
-    # Valid fallback values per classification type
-    _STYLE_FALLBACK = "direct"
-    _ERROR_FALLBACK = "logic"
-
     def classify_reasoning_style(
         self,
         question: str,
         response: str,
-    ) -> tuple[str, float]:
+    ) -> tuple[str | None, float]:
         """Classify reasoning style using GLM API."""
         prompt = f"""Classify the reasoning style in this response into one of:
 - algebraic: symbolic manipulation, equations, variables (e.g., "let x =", solving systems)
@@ -98,39 +110,61 @@ Question: {question}
 
 Response: {response}
 
-Respond with just the style name and a confidence score (0-1), e.g., "algebraic 0.85"."""
+Respond with ONLY the style name in lowercase and a confidence score (0-1).
+Format: "stylename 0.85"
+Example: "algebraic 0.85"
+Do NOT include any other text."""
 
         try:
             return self._call_api(prompt, valid_labels={"algebraic", "direct", "backtracking"})
         except RuntimeError:
-            logger.warning("Reasoning style classification failed, using fallback 'direct'")
-            return self._STYLE_FALLBACK, 0.5
+            # Secondary retry with minimal prompt
+            return self._retry_minimal(
+                f"What is the reasoning style? Reply ONE word: algebraic, direct, or backtracking\n\nQuestion: {question}\nResponse: {response[:500]}",
+                valid_labels={"algebraic", "direct", "backtracking"},
+            )
 
     def classify_error_type(
         self,
         question: str,
         response: str,
-    ) -> tuple[str, float]:
+    ) -> tuple[str | None, float]:
         """Classify error type using GLM API."""
-        prompt = f"""Classify the type of error in this response:
+        prompt = f"""The following response to a question is KNOWN TO BE INCORRECT. Classify the primary error type.
 
 Question: {question}
 
 Response: {response}
 
-Error types:
+Error types (choose exactly one):
 - arithmetic: correct reasoning approach but numerical calculation mistake
 - logic: flawed reasoning chain, wrong formula, or logical fallacy
 - hallucination: fabricated numbers, wrong theorem, or unsupported claims
 - verification: attempted self-check but failed to catch the error
 
-Respond with just the error type and confidence (0-1), e.g., "arithmetic 0.8"."""
+IMPORTANT: The answer IS wrong. You MUST pick an error type. Do NOT say "no error".
+
+Respond with ONLY the error type name in lowercase and a confidence score (0-1).
+Format: "errortype 0.8"
+Example: "arithmetic 0.8"
+Do NOT include any other text."""
 
         try:
             return self._call_api(prompt, valid_labels={"arithmetic", "logic", "hallucination", "verification"})
         except RuntimeError:
-            logger.warning("Error type classification failed, using fallback 'logic'")
-            return self._ERROR_FALLBACK, 0.5
+            # Secondary retry with minimal prompt
+            return self._retry_minimal(
+                f"This answer is WRONG. What type of error? Reply ONE word: arithmetic, logic, hallucination, or verification\n\nQuestion: {question}\nResponse: {response[:500]}",
+                valid_labels={"arithmetic", "logic", "hallucination", "verification"},
+            )
+
+    def _retry_minimal(self, prompt: str, valid_labels: set[str]) -> tuple[str | None, float]:
+        """Secondary retry with a minimal prompt when primary classification fails."""
+        try:
+            return self._call_api(prompt, valid_labels=valid_labels)
+        except RuntimeError:
+            logger.warning("Classification failed after retry, marking as unclassified (None)")
+            return None, 0.0
 
     def _call_api(self, prompt: str, valid_labels: set[str] | None = None) -> tuple[str, float]:
         """Call GLM API with retry logic."""
@@ -154,7 +188,7 @@ Respond with just the error type and confidence (0-1), e.g., "arithmetic 0.8".""
                 )
                 response.raise_for_status()
 
-                result = response.json()["choices"][0]["message"]["content"].strip().lower()
+                result = response.json()["choices"][0]["message"]["content"].strip()
 
                 label = self._extract_label(result)
                 confidence = self._extract_confidence(result)
@@ -176,16 +210,31 @@ Respond with just the error type and confidence (0-1), e.g., "arithmetic 0.8".""
 
         raise RuntimeError(f"API classification failed after {self.max_retries} attempts: {last_error}")
 
-    @staticmethod
-    def _extract_label(text: str) -> str:
-        """Extract a known category label from API response text."""
-        known_styles = {"algebraic", "direct", "backtracking"}
-        known_errors = {"arithmetic", "logic", "hallucination", "verification"}
-        words = text.replace(",", " ").replace(".", " ").split()
-        for w in words:
-            w_lower = w.lower().strip()
-            if w_lower in known_styles or w_lower in known_errors:
-                return w_lower
+    @classmethod
+    def _extract_label(cls, text: str) -> str:
+        """Extract a known category label from API response text.
+
+        Handles markdown bold (``**logic**``), word variants ("logical"),
+        verbose responses, and punctuation.
+        """
+        # Strip markdown bold/italic markers, quotes, brackets
+        clean = re.sub(r'[*_`"\'\(\)\[\]{}]', ' ', text.lower())
+        # Strip "the error type is" / "the response contains a X error" boilerplate
+
+        # 1. Try regex word-boundary match for exact canonical labels
+        all_labels = set(cls._STYLE_VARIANTS.values()) | set(cls._ERROR_VARIANTS.values())
+        for label in all_labels:
+            if re.search(r'\b' + re.escape(label) + r'\b', clean):
+                return label
+
+        # 2. Try variant matching (e.g., "logical" -> "logic")
+        words = re.findall(r'\b[a-z]+\b', clean)
+        for word in words:
+            if word in cls._STYLE_VARIANTS:
+                return cls._STYLE_VARIANTS[word]
+            if word in cls._ERROR_VARIANTS:
+                return cls._ERROR_VARIANTS[word]
+
         return ""
 
     @staticmethod
@@ -397,21 +446,25 @@ def main():
                 per_response_labels[-1]["error_type_confidence"] = conf
 
         # Aggregate classifications for backward compat (sample-level summary)
+        # Filter out None labels (unclassified) from aggregation
         from collections import Counter
+
+        valid_styles = [(s, c) for s, c in reasoning_styles if s is not None]
+        valid_errors = [(e, c) for e, c in error_types if e is not None]
 
         reasoning_style = None
         reasoning_confidence = 0.0
-        if reasoning_styles:
-            style_counter = Counter([s for s, _ in reasoning_styles])
+        if valid_styles:
+            style_counter = Counter([s for s, _ in valid_styles])
             reasoning_style = style_counter.most_common(1)[0][0]
-            reasoning_confidence = sum(c for s, c in reasoning_styles if s == reasoning_style) / len(reasoning_styles)
+            reasoning_confidence = sum(c for s, c in valid_styles if s == reasoning_style) / len(valid_styles)
 
         error_type = None
         error_confidence = 0.0
-        if error_types:
-            error_counter = Counter([e for e, _ in error_types])
+        if valid_errors:
+            error_counter = Counter([e for e, _ in valid_errors])
             error_type = error_counter.most_common(1)[0][0]
-            error_confidence = sum(c for e, c in error_types if e == error_type) / len(error_types)
+            error_confidence = sum(c for e, c in valid_errors if e == error_type) / len(valid_errors)
 
         result = ClassificationResult(
             sample_id=sample_id,

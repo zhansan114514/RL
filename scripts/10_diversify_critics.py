@@ -194,6 +194,7 @@ def build_critic_preference_pairs(
     max_model_len: int = 4096,
     max_lora_rank: int = 256,
     engine=None,
+    input_dir: str = "output/society/classified",
 ) -> List[Dict[str, Any]]:
     """
     Build DPO preference pairs for Critic training using Algorithm 1.
@@ -493,9 +494,15 @@ def main():
     from src.data.loader import load_dataset
     dataset = load_dataset(args.dataset)
 
+    # Flatten all splits into a single list
+    all_samples = []
+    for split_data in dataset.values():
+        all_samples.extend(split_data)
+    logger.info(f"  Total samples across all splits: {len(all_samples)}")
+
     # Build sample lookup and filter to classified error samples
     sample_lookup = {}
-    for sample in dataset:
+    for sample in all_samples:
         q = sample.get("question", "")
         if q:
             sample_lookup[q] = sample
@@ -518,7 +525,7 @@ def main():
         logger.info(f"  Loaded {len(id_to_sample)} trajectory samples")
     else:
         # Fallback: use dataset samples directly
-        for sample in dataset:
+        for sample in all_samples:
             q = sample.get("question", "")
             id_to_sample[q] = sample
         logger.info(f"  Using {len(id_to_sample)} dataset samples directly")
@@ -558,10 +565,22 @@ def main():
         logger.warning(f"Failed to create shared vLLM engine: {e}")
         logger.warning("Will attempt per-error-type engine creation")
 
+    def _pairs_cache_path(error_type):
+        return os.path.join(output_dir, f"pairs_{error_type}.json")
+
     try:
-        # Phase 1: Generate preference pairs for ALL error types
+        # Phase 1: Generate preference pairs for ALL error types (with disk cache)
         all_pairs = {}
         for error_type in args.error_types:
+            cache_file = _pairs_cache_path(error_type)
+            if os.path.exists(cache_file):
+                logger.info(f"\n--- Loading cached pairs for Critic: {error_type} ---")
+                with open(cache_file) as f:
+                    cached = json.load(f)
+                all_pairs[error_type] = cached
+                logger.info(f"  Loaded {len(cached)} cached pairs for '{error_type}'")
+                continue
+
             logger.info(f"\n--- Building pairs for Critic: {error_type} ---")
 
             # Collect samples with this error type
@@ -598,9 +617,14 @@ def main():
                 max_model_len=args.max_model_len,
                 max_lora_rank=args.max_lora_rank,
                 engine=shared_engine,
+                input_dir=input_dir,
             )
 
             if preference_pairs:
+                # Save to disk for crash recovery
+                with open(cache_file, "w") as f:
+                    json.dump(preference_pairs, f)
+                logger.info(f"  Cached {len(preference_pairs)} pairs to {cache_file}")
                 all_pairs[error_type] = preference_pairs
             else:
                 logger.warning(f"  No preference pairs for '{error_type}', skipping")

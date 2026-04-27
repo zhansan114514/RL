@@ -19,6 +19,7 @@ import gc
 import json
 import logging
 import os
+import random
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -246,6 +247,7 @@ def society_alternating_train(
                 gpu_memory_utilization=gpu_memory_utilization,
                 max_model_len=max_model_len,
                 engine=phase_a_engine,
+                classifications_cache_dir=classifications_cache_dir,
             )
 
             if not preference_pairs:
@@ -554,6 +556,7 @@ def _generate_critic_pairs_algorithm1(
     gpu_memory_utilization: float,
     max_model_len: int,
     engine: Any = None,
+    classifications_cache_dir: str = "output/society/classified",
 ) -> list[dict]:
     """Generate Critic DPO preference pairs using Algorithm 1 from trajectory.py.
 
@@ -569,19 +572,18 @@ def _generate_critic_pairs_algorithm1(
     Error-type filtering via DiversitySplit ensures data-level diversification.
     """
     from src.inference.vllm_server import VLLMInference
-    from src.algorithms.trajectory import generate_trajectories
+    from src.algorithms.deliberation import deliberate_batch
+    from src.algorithms.trajectory import _generate_guided_pairs_for_sample, generate_wrong_answer
 
     model_name = registry.base_model_path or "Qwen/Qwen2.5-7B-Instruct"
     specialty = critic.error_specialty
 
-    # Build adapters for ALL actors (not just one) so we can round-robin
-    # across them per sample.  Each generate_trajectories call still uses
-    # only 1 actor + 1 critic LoRA concurrently, keeping max_loras=2.
     all_agents = list(actors) + [critic]
 
     n_samples = min(len(dataset), max_samples)
     preference_pairs: list[dict] = []
     _owns_engine = engine is None
+    BATCH_SIZE = 10
 
     try:
         if _owns_engine:
@@ -601,66 +603,81 @@ def _generate_critic_pairs_algorithm1(
         adapters = _build_lora_adapters(engine, all_agents)
         critic_adapter = adapters[critic.name]
 
-        # Round-robin actors so the critic sees diverse partner styles,
-        # matching the multi-actor inference setting.
         actors_with_lora = [a for a in actors if a.lora_path]
         actors_pool = actors_with_lora if actors_with_lora else actors
 
-        # Step 1: Run Algorithm 1 for each sample
-        raw_pairs: list[dict] = []
-        for i, sample in enumerate(dataset[:n_samples]):
-            if (i + 1) % 10 == 0:
-                logger.info(
-                    f"  [{critic.name}] Algorithm 1: sample {i + 1}/{n_samples}"
-                )
+        samples_subset = dataset[:n_samples]
 
-            # Pick actor via round-robin (deterministic, sample-index based)
+        # Group samples by their round-robin actor for batched deliberation.
+        actor_groups: dict[str, list[tuple[int, dict]]] = {}
+        for i, sample in enumerate(samples_subset):
             ref_actor = actors_pool[i % len(actors_pool)]
-            actor_adapter = adapters[ref_actor.name]
+            actor_groups.setdefault(ref_actor.name, []).append((i, sample))
 
-            task_type = sample.get("task_type", "math")
-            correct_answer = sample.get("answer", "")
+        raw_pairs: list[dict] = []
 
-            algo_pairs = generate_trajectories(
-                actor_model=actor_adapter,
-                critic_model=critic_adapter,
-                sample=sample,
-                dataset_name=dataset_name,
-                num_rounds=num_rounds,
-                num_simulations=num_simulations,
-                reward_threshold=reward_threshold,
-                seed=seed + i,
+        for actor_name, indexed_samples in actor_groups.items():
+            actor_adapter = adapters[actor_name]
+            group_samples = [s for _, s in indexed_samples]
+
+            logger.info(
+                f"  [{critic.name}] Batched with actor {actor_name}: "
+                f"{len(group_samples)} samples"
             )
 
-            # Extract critic preference pairs from Algorithm 1 results
-            for pair in algo_pairs:
-                # pair has: positive, negative (actor), positive_critic, negative_critic
-                # For critic DPO: chosen = guided-correct feedback, rejected = natural/wrong feedback
-                negative_actor = pair["negative"]
-                negative_answer = extract_answer(negative_actor, task_type)
+            # Batched natural deliberation (biggest speedup: N*2*T → 2*T calls)
+            trajectories = deliberate_batch(
+                actor_adapter, critic_adapter, group_samples, dataset_name,
+                num_rounds=num_rounds, max_tokens=512, temperature=0.7,
+            )
 
-                # Only keep pairs where the actor's response was wrong (error scenario)
-                if task_type == "math":
-                    is_wrong = not math_answers_equal(
-                        negative_answer or "", correct_answer,
+            # Per-sample guided trajectories + MC roll-out
+            for j, (sample, natural_traj) in enumerate(zip(group_samples, trajectories)):
+                if (len(raw_pairs) + 1) % 10 == 0:
+                    logger.info(
+                        f"  [{critic.name}] Guided pairs: {len(raw_pairs)} so far"
                     )
-                else:
-                    is_wrong = normalize_answer(
-                        negative_answer or "", task_type,
-                    ) != normalize_answer(correct_answer, task_type)
 
-                if is_wrong:
-                    raw_pairs.append({
-                        "sample": sample,
-                        "chosen": pair["positive_critic"],
-                        "rejected": pair["negative_critic"],
-                        "actor_response": negative_actor,
-                        "actor_answer": negative_answer,
-                        "correct_answer": correct_answer,
-                        "task_type": task_type,
-                        "delta": pair["delta"],
-                        "direction": pair["direction"],
-                    })
+                rng = random.Random(seed + indexed_samples[j][0])
+                task_type = sample.get("task_type", "math")
+                correct_answer = sample.get("answer", "")
+                wrong_answer = generate_wrong_answer(
+                    correct_answer, sample.get("choices"),
+                    task_type=task_type, rng=rng,
+                )
+
+                algo_pairs = _generate_guided_pairs_for_sample(
+                    actor_adapter, critic_adapter, sample, natural_traj,
+                    dataset_name, correct_answer, wrong_answer,
+                    reward_threshold=reward_threshold,
+                    num_simulations=num_simulations,
+                )
+
+                for pair in algo_pairs:
+                    negative_actor = pair["negative"]
+                    negative_answer = extract_answer(negative_actor, task_type)
+
+                    if task_type == "math":
+                        is_wrong = not math_answers_equal(
+                            negative_answer or "", correct_answer,
+                        )
+                    else:
+                        is_wrong = normalize_answer(
+                            negative_answer or "", task_type,
+                        ) != normalize_answer(correct_answer, task_type)
+
+                    if is_wrong:
+                        raw_pairs.append({
+                            "sample": sample,
+                            "chosen": pair["positive_critic"],
+                            "rejected": pair["negative_critic"],
+                            "actor_response": negative_actor,
+                            "actor_answer": negative_answer,
+                            "correct_answer": correct_answer,
+                            "task_type": task_type,
+                            "delta": pair["delta"],
+                            "direction": pair["direction"],
+                        })
 
         logger.info(
             f"  [{critic.name}] Algorithm 1 produced {len(raw_pairs)} raw critic pairs"
@@ -674,7 +691,7 @@ def _generate_critic_pairs_algorithm1(
                 classifications_cache_dir, "classified_data.json"
             )
             splitter = DiversitySplit(
-                balance=True, seed=seed, use_api=True,
+                balance=False, seed=seed, use_api=True,
                 cache_dir=classifications_cache_dir,
                 pre_classified_file=pre_classified if os.path.exists(pre_classified) else None,
             )
@@ -762,13 +779,11 @@ def _generate_actor_pairs_algorithm1(
     Reasoning-style filtering ensures data-level diversification.
     """
     from src.inference.vllm_server import VLLMInference
-    from src.algorithms.trajectory import generate_trajectories
+    from src.algorithms.deliberation import deliberate_batch
+    from src.algorithms.trajectory import _generate_guided_pairs_for_sample, generate_wrong_answer
 
     model_name = registry.base_model_path or "Qwen/Qwen2.5-7B-Instruct"
 
-    # Build adapters for ALL critics (not just one) so we can round-robin
-    # across them per sample.  Each generate_trajectories call still uses
-    # only 1 actor + 1 critic LoRA concurrently, keeping max_loras=2.
     all_agents = [actor] + list(critics)
 
     n_samples = min(len(dataset), max_samples)
@@ -793,43 +808,64 @@ def _generate_actor_pairs_algorithm1(
         adapters = _build_lora_adapters(engine, all_agents)
         actor_adapter = adapters[actor.name]
 
-        # Round-robin critics so the actor sees diverse feedback styles,
-        # matching the MoE Top-K routing at inference.
         critics_with_lora = [c for c in critics if c.lora_path]
         critics_pool = critics_with_lora if critics_with_lora else critics
 
-        # Step 1: Run Algorithm 1 for each sample
-        raw_pairs: list[dict] = []
-        for i, sample in enumerate(dataset[:n_samples]):
-            if (i + 1) % 10 == 0:
-                logger.info(
-                    f"  [{actor.name}] Algorithm 1: sample {i + 1}/{n_samples}"
-                )
+        samples_subset = dataset[:n_samples]
 
-            # Pick critic via round-robin (deterministic, sample-index based)
+        # Group samples by their round-robin critic for batched deliberation.
+        critic_groups: dict[str, list[tuple[int, dict]]] = {}
+        for i, sample in enumerate(samples_subset):
             ref_critic = critics_pool[i % len(critics_pool)]
-            critic_adapter = adapters[ref_critic.name]
+            critic_groups.setdefault(ref_critic.name, []).append((i, sample))
 
-            algo_pairs = generate_trajectories(
-                actor_model=actor_adapter,
-                critic_model=critic_adapter,
-                sample=sample,
-                dataset_name=dataset_name,
-                num_rounds=num_rounds,
-                num_simulations=num_simulations,
-                reward_threshold=reward_threshold,
-                seed=seed + i,
+        raw_pairs: list[dict] = []
+
+        for critic_name, indexed_samples in critic_groups.items():
+            critic_adapter = adapters[critic_name]
+            group_samples = [s for _, s in indexed_samples]
+
+            logger.info(
+                f"  [{actor.name}] Batched with critic {critic_name}: "
+                f"{len(group_samples)} samples"
             )
 
-            # Extract actor preference pairs from Algorithm 1 results
-            for pair in algo_pairs:
-                raw_pairs.append({
-                    "sample": sample,
-                    "chosen": pair["positive"],
-                    "rejected": pair["negative"],
-                    "delta": pair["delta"],
-                    "direction": pair["direction"],
-                })
+            # Batched natural deliberation
+            trajectories = deliberate_batch(
+                actor_adapter, critic_adapter, group_samples, dataset_name,
+                num_rounds=num_rounds, max_tokens=512, temperature=0.7,
+            )
+
+            # Per-sample guided trajectories + MC roll-out
+            for j, (sample, natural_traj) in enumerate(zip(group_samples, trajectories)):
+                if (len(raw_pairs) + 1) % 10 == 0:
+                    logger.info(
+                        f"  [{actor.name}] Guided pairs: {len(raw_pairs)} so far"
+                    )
+
+                rng = random.Random(seed + indexed_samples[j][0])
+                correct_answer = sample.get("answer", "")
+                task_type = sample.get("task_type", "math")
+                wrong_answer = generate_wrong_answer(
+                    correct_answer, sample.get("choices"),
+                    task_type=task_type, rng=rng,
+                )
+
+                algo_pairs = _generate_guided_pairs_for_sample(
+                    actor_adapter, critic_adapter, sample, natural_traj,
+                    dataset_name, correct_answer, wrong_answer,
+                    reward_threshold=reward_threshold,
+                    num_simulations=num_simulations,
+                )
+
+                for pair in algo_pairs:
+                    raw_pairs.append({
+                        "sample": sample,
+                        "chosen": pair["positive"],
+                        "rejected": pair["negative"],
+                        "delta": pair["delta"],
+                        "direction": pair["direction"],
+                    })
 
         logger.info(
             f"  [{actor.name}] Algorithm 1 produced {len(raw_pairs)} raw actor pairs"

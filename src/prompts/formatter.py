@@ -78,16 +78,18 @@ def format_prompt(
         return result
 
 
-def _format_responses(responses: list[str] | dict[int, str]) -> str:
+def _format_responses(responses: list[str] | dict[int, str] | str) -> str:
     """
     Format multi-agent responses for deliberation prompts.
 
     Args:
-        responses: List or dict of agent responses.
+        responses: List or dict of agent responses, or a pre-formatted string.
 
     Returns:
         Formatted response text (Person 1 said: ..., Person 2 said: ...).
     """
+    if isinstance(responses, str):
+        return responses
     if isinstance(responses, dict):
         items = sorted(responses.items())
     else:

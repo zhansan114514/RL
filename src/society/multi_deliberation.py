@@ -193,10 +193,13 @@ def _load_lora_adapter(engine: Any, lora_path: str) -> Any:
     resolved_path = _resolve_adapter_path(lora_path)
 
     try:
-        from vllm import LoRARequest
+        try:
+            from vllm.lora.request import LoRARequest
+        except ImportError:
+            from vllm import LoRARequest
         lora_name = Path(resolved_path).name or "adapter"
         lora_id = _get_stable_lora_id(resolved_path)
-        lora_request = LoRARequest(lora_name, lora_id=lora_id, lora_path=resolved_path)
+        lora_request = LoRARequest(lora_name, lora_id, resolved_path)
         logger.info(f"Created LoRARequest: name={lora_name}, id={lora_id}, path={resolved_path}")
         return lora_request
     except ImportError as e:
@@ -592,6 +595,7 @@ def _build_critic_prompt(
         question=sample.get("question", ""),
         passage=sample.get("passage", ""),
         actor_response=actor_response,
+        responses_text="",
         choice_a=sample.get("choices", ["", "", "", ""])[0] if len(sample.get("choices", [])) >= 1 else "",
         choice_b=sample.get("choices", ["", "", "", ""])[1] if len(sample.get("choices", [])) >= 2 else "",
         choice_c=sample.get("choices", ["", "", "", ""])[2] if len(sample.get("choices", [])) >= 3 else "",

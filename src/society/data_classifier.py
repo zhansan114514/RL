@@ -207,34 +207,62 @@ def _call_api(
 def _parse_style_response(response: str) -> Optional[ReasoningStyle]:
     """Parse API response into ReasoningStyle.
 
+    Handles markdown bold, word variants, and verbose responses.
     Uses word-boundary matching to avoid false positives like
     'NOT ALGEBRAIC' matching ALGEBRAIC.
     """
     if not response:
         return None
     import re
-    response_upper = response.upper().strip()
-    # Try exact word match first
+    # Strip markdown bold/italic, quotes, brackets
+    clean = re.sub(r'[*_`"\'\(\)\[\]{}]', ' ', response.upper().strip())
     for style in ReasoningStyle:
         pattern = r'\b' + re.escape(style.value.upper()) + r'\b'
-        if re.search(pattern, response_upper):
+        if re.search(pattern, clean):
             return style
+    # Variant matching (e.g., ALGEBRAICALLY -> ALGEBRAIC)
+    variants = {
+        "ALGEBRAICALLY": ReasoningStyle.ALGEBRAIC,
+        "ALGEBRA": ReasoningStyle.ALGEBRAIC,
+        "DIRECTLY": ReasoningStyle.DIRECT,
+        "BACKTRACK": ReasoningStyle.BACKTRACKING,
+    }
+    words = re.findall(r'\b[A-Z]+\b', clean)
+    for word in words:
+        if word in variants:
+            return variants[word]
     return None
 
 
 def _parse_error_response(response: str) -> Optional[ErrorType]:
     """Parse API response into ErrorType.
 
-    Uses word-boundary matching to avoid false positives.
+    Handles markdown bold, word variants ("LOGICAL" -> LOGIC),
+    and verbose responses.
     """
     if not response:
         return None
     import re
-    response_upper = response.upper().strip()
+    # Strip markdown bold/italic, quotes, brackets
+    clean = re.sub(r'[*_`"\'\(\)\[\]{}]', ' ', response.upper().strip())
     for et in ErrorType:
         pattern = r'\b' + re.escape(et.value.upper()) + r'\b'
-        if re.search(pattern, response_upper):
+        if re.search(pattern, clean):
             return et
+    # Variant matching (e.g., LOGICAL -> LOGIC)
+    variants = {
+        "LOGICAL": ErrorType.LOGIC,
+        "LOGICALLY": ErrorType.LOGIC,
+        "ARITHMETICAL": ErrorType.ARITHMETIC,
+        "HALLUCINATE": ErrorType.HALLUCINATION,
+        "HALLUCINATING": ErrorType.HALLUCINATION,
+        "VERIFY": ErrorType.VERIFICATION,
+        "VERIFYING": ErrorType.VERIFICATION,
+    }
+    words = re.findall(r'\b[A-Z]+\b', clean)
+    for word in words:
+        if word in variants:
+            return variants[word]
     return None
 
 

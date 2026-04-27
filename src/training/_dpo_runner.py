@@ -150,6 +150,11 @@ def _run():
     else:
         trainer_kwargs["tokenizer"] = tokenizer
 
+    # Compatibility shim: trl >=0.24 tries to set model.warnings_issued
+    # but PEFT-wrapped models may not expose it from the underlying PreTrainedModel.
+    if not hasattr(model, "warnings_issued"):
+        model.warnings_issued = {}
+
     trainer = DPOTrainer(**trainer_kwargs)
 
     logger.info("Starting DPO training...")

@@ -92,6 +92,9 @@ def parse_args():
     cfg = ConfigManager.initialize(config_path=cli_args.config)
     args = cfg.step("step06_evaluate", defaults=STEP_DEFAULTS).to_namespace()
 
+    # Preserve config path for logging
+    args.config = cli_args.config
+
     if cli_args.no_ablations:
         args.run_ablations = False
 

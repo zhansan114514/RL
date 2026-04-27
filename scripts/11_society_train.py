@@ -50,6 +50,7 @@ STEP_DEFAULTS = {
     "device": 0,
     "dtype": "bfloat16",
     "gpu_memory_utilization": 0.85,
+    "max_model_len": 8192,
     "checkpoint_dir": "output/society/checkpoints",
     "actor_temperature": 0.7,
     "actor_max_tokens": 512,
@@ -77,6 +78,9 @@ def parse_args():
 
     cfg = ConfigManager.initialize(config_path=cli_args.config)
     args = cfg.step("step05_train_society", defaults=STEP_DEFAULTS).to_namespace()
+
+    # Preserve config path for logging
+    args.config = cli_args.config
 
     # CLI overrides
     if cli_args.num_iterations is not None:
@@ -218,6 +222,10 @@ def main():
 
     data = load_dataset(args.dataset, seed=args.seed)
     train_data = data.get("train", [])
+    # For datasets without a train split (e.g. MMLU), flatten all splits
+    if not train_data:
+        for split_data in data.values():
+            train_data.extend(split_data)
 
     if args.max_samples:
         train_data = train_data[:args.max_samples]
@@ -271,6 +279,7 @@ def main():
         device=args.device,
         dtype=args.dtype,
         gpu_memory_utilization=args.gpu_memory_utilization,
+        max_model_len=args.max_model_len,
         max_samples=len(train_data),
         classifications_cache_dir=args.cache_dir + "/classified",
     )
@@ -307,6 +316,15 @@ def main():
     logger.info(f"  Trained actors: {len(result.actor_paths)}")
     logger.info(f"  Trained critics: {len(result.critic_paths)}")
     logger.info("=" * 60)
+
+    # Fail if no agents were actually trained (prevents empty Phase 5 from being marked done)
+    total_pairs = sum(
+        v.get("pairs", 0) for v in result.metrics.values()
+        if isinstance(v, dict)
+    )
+    if total_pairs == 0:
+        logger.error("No preference pairs generated for any agent. Exiting with error.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

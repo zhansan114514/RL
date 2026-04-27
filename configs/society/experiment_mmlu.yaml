@@ -7,10 +7,10 @@ common:
   dataset: "mmlu"
   cache_dir: "output/society_mmlu"
   seed: 42
-  max_samples: 300
-  device: 4
+  max_samples: 50
+  device: 6
   dtype: "bfloat16"
-  gpu_memory_utilization: 0.65
+  gpu_memory_utilization: 0.60
   max_model_len: 8192
 
 # Phase 1: Bootstrap data generation
@@ -62,7 +62,7 @@ step05_train_society:
   critic_base_dir: "output/society_mmlu/critics"
   output_dir: "output/society_mmlu/society"
   num_iterations: 1
-  num_rounds: 5
+  num_rounds: 3
   num_simulations: 5
   reward_threshold: 0.0
   lora_r: 256
