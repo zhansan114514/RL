@@ -49,7 +49,7 @@ from src.society.data_classifier import (
     ReasoningStyleResult,
     ErrorProfileResult,
 )
-from src.society.diversity_split import DiversitySplit
+from src.society.diversity_split import DiversitySplit, RoutedTrainingItem
 from src.society.inference_pipeline import (
     society_inference,
     InferenceResult,
@@ -920,6 +920,79 @@ class TestDiversitySplit:
         # Should distribute across all styles via round-robin
         total = sum(len(v) for v in splits.values())
         assert total == 9  # Due to how the split works, one sample gets filtered
+
+    def test_adaptive_critic_mix_skips_sparse_specialty(self):
+        """Should not train specialists when target data is too sparse."""
+        splitter = DiversitySplit(seed=123)
+        items = [
+            RoutedTrainingItem(
+                sample={"question": f"Q{i}"},
+                response=f"R{i}",
+                skill=CriticSkill.REASONING,
+                weight=1.0,
+                profile={},
+            )
+            for i in range(10)
+        ]
+        items.append(RoutedTrainingItem(
+            sample={"question": "Qc"},
+            response="Rc",
+            skill=CriticSkill.COMPUTATION,
+            weight=1.0,
+            profile={},
+        ))
+
+        selected = splitter.build_critic_training_mix(
+            all_items=items,
+            target_skill=CriticSkill.COMPUTATION,
+            max_items=8,
+            min_specialty_items=4,
+            min_specialty_ratio=0.2,
+        )
+
+        assert selected == []
+
+    def test_adaptive_critic_mix_prefers_specialty_and_tracks_source_bucket(self):
+        """Should select a specialty-heavy mix when target data is sufficient."""
+        splitter = DiversitySplit(seed=123)
+        items = []
+        for i in range(10):
+            items.append(RoutedTrainingItem(
+                sample={"question": f"C{i}"},
+                response=f"RC{i}",
+                skill=CriticSkill.COMPUTATION,
+                weight=1.0,
+                profile={},
+            ))
+        for i in range(10):
+            items.append(RoutedTrainingItem(
+                sample={"question": f"R{i}"},
+                response=f"RR{i}",
+                skill=CriticSkill.REASONING,
+                weight=1.0,
+                profile={},
+            ))
+
+        selected = splitter.build_critic_training_mix(
+            all_items=items,
+            target_skill=CriticSkill.COMPUTATION,
+            max_items=10,
+            min_specialty_items=4,
+            min_specialty_ratio=0.2,
+            specialty_ratio=0.6,
+            general_ratio=0.3,
+            calibration_ratio=0.1,
+        )
+
+        buckets = {item.source_bucket for item in selected}
+        specialty_items = [
+            item for item in selected
+            if item.source_bucket == "specialty"
+        ]
+
+        assert len(selected) == 10
+        assert len(specialty_items) >= 6
+        assert {"specialty", "general", "calibration"} <= buckets
 
 
 # ============================================================

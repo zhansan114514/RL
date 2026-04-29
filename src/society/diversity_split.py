@@ -15,7 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
 
@@ -49,6 +49,7 @@ class RoutedTrainingItem:
     skill: CriticSkill | None
     weight: float
     profile: dict
+    source_bucket: str = "unknown"
 
 
 class DiversitySplit:
@@ -317,16 +318,42 @@ class DiversitySplit:
         self,
         all_items: list[RoutedTrainingItem],
         target_skill: CriticSkill,
-        general_ratio: float = 0.6,
-        specialty_ratio: float = 0.3,
-        calibration_ratio: float = 0.1,
         max_items: int = 512,
+        min_specialty_items: int = 64,
+        min_specialty_ratio: float = 0.08,
+        specialty_ratio: float = 0.6,
+        general_ratio: float = 0.3,
+        calibration_ratio: float = 0.1,
     ) -> list[RoutedTrainingItem]:
-        """Build shared-base + specialty + calibration training items."""
+        """
+        Build a specialist-heavy training mix only when enough target data exists.
+
+        The specialty pool is the gate for specialist training. If the target
+        skill is too sparse, callers should skip or freeze that critic rather
+        than train it on mostly unrelated general data.
+        """
         if not all_items or max_items <= 0:
             return []
 
         specialty_pool = [item for item in all_items if item.skill == target_skill]
+        specialty_count = len(specialty_pool)
+        specialty_ratio_actual = specialty_count / max(len(all_items), 1)
+        if (
+            specialty_count < min_specialty_items
+            or specialty_ratio_actual < min_specialty_ratio
+        ):
+            logger.info(
+                "Skipping specialist mix for %s: specialty=%s/%s (%.3f), "
+                "thresholds min_items=%s min_ratio=%.3f",
+                target_skill.value,
+                specialty_count,
+                len(all_items),
+                specialty_ratio_actual,
+                min_specialty_items,
+                min_specialty_ratio,
+            )
+            return []
+
         general_pool = list(all_items)
         calibration_pool = [
             item for item in all_items
@@ -338,29 +365,39 @@ class DiversitySplit:
             quota_total = 1.0
 
         quotas = {
-            "general": int(round(max_items * general_ratio / quota_total)),
             "specialty": int(round(max_items * specialty_ratio / quota_total)),
+            "general": int(round(max_items * general_ratio / quota_total)),
             "calibration": int(round(max_items * calibration_ratio / quota_total)),
         }
         quota_sum = sum(quotas.values())
         if quota_sum != max_items:
-            quotas["general"] += max_items - quota_sum
+            quotas["specialty"] += max_items - quota_sum
 
-        selected = []
-        selected.extend(self._sample_pool(general_pool, quotas["general"], replace=len(general_pool) < quotas["general"]))
-        selected.extend(self._sample_pool(specialty_pool, quotas["specialty"], replace=len(specialty_pool) < quotas["specialty"]))
-        selected.extend(self._sample_pool(calibration_pool, quotas["calibration"], replace=len(calibration_pool) < quotas["calibration"]))
+        selected: list[RoutedTrainingItem] = []
+        selected.extend(self._sample_bucket(specialty_pool, quotas["specialty"], "specialty"))
+        selected.extend(self._sample_bucket(general_pool, quotas["general"], "general"))
+        selected.extend(self._sample_bucket(calibration_pool, quotas["calibration"], "calibration"))
 
         if len(selected) < max_items:
             filler = specialty_pool or general_pool
-            selected.extend(self._sample_pool(
+            selected.extend(self._sample_bucket(
                 filler,
                 max_items - len(selected),
-                replace=len(filler) < (max_items - len(selected)),
+                "specialty" if filler is specialty_pool else "general",
             ))
 
         self.rng.shuffle(selected)
         return selected[:max_items]
+
+    def _sample_bucket(
+        self,
+        pool: list[RoutedTrainingItem],
+        n: int,
+        source_bucket: str,
+    ) -> list[RoutedTrainingItem]:
+        """Sample a pool and annotate copies with their source bucket."""
+        sampled = self._sample_pool(pool, n, replace=len(pool) < n)
+        return [replace(item, source_bucket=source_bucket) for item in sampled]
 
     def _sample_pool(
         self,

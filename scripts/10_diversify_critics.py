@@ -25,6 +25,7 @@ import json
 import logging
 import os
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -56,6 +57,12 @@ STEP_DEFAULTS = {
     "num_epochs": 1,
     "max_length": 2048,
     "beta": 0.1,
+    "min_pairs_per_critic": 64,
+    "min_specialty_items": 64,
+    "min_specialty_ratio": 0.08,
+    "specialty_ratio": 0.6,
+    "general_ratio": 0.3,
+    "calibration_ratio": 0.1,
     "seed": 42,
     "device": 0,
     "dtype": "bfloat16",
@@ -201,6 +208,11 @@ def build_critic_preference_pairs(
     api_key: str = "",
     api_base: str = "",
     api_model: str = "",
+    min_specialty_items: int = 64,
+    min_specialty_ratio: float = 0.08,
+    specialty_ratio: float = 0.6,
+    general_ratio: float = 0.3,
+    calibration_ratio: float = 0.1,
 ) -> List[Dict[str, Any]]:
     """
     Build DPO preference pairs for Critic training using Algorithm 1.
@@ -334,14 +346,40 @@ def build_critic_preference_pairs(
                 dataset_name=dataset_name,
             )
 
+            raw_skill_dist = Counter(
+                item.skill.value if item.skill else "general"
+                for item in routed_items
+            )
+            unique_raw_pairs = {
+                (item.sample.get("question", ""), item.response)
+                for item in routed_items
+            }
+            logger.info(
+                f"  [{critic_skill}] raw routed profile distribution: "
+                f"{dict(raw_skill_dist)}"
+            )
+            logger.info(
+                f"  [{critic_skill}] raw unique_pairs: "
+                f"{len(unique_raw_pairs)} / {len(routed_items)}"
+            )
+
             critic_items = splitter.build_critic_training_mix(
                 all_items=routed_items,
                 target_skill=skill,
-                general_ratio=0.6,
-                specialty_ratio=0.3,
-                calibration_ratio=0.1,
                 max_items=max_samples,
+                min_specialty_items=min_specialty_items,
+                min_specialty_ratio=min_specialty_ratio,
+                specialty_ratio=specialty_ratio,
+                general_ratio=general_ratio,
+                calibration_ratio=calibration_ratio,
             )
+
+            if not critic_items:
+                logger.info(
+                    f"  [{critic_skill}] inactive: specialty pool below "
+                    f"threshold; no specialist DPO pairs selected"
+                )
+                return []
 
             # O(1) lookup by (question, actor_response)
             pair_index: Dict[tuple, Dict] = {}
@@ -361,6 +399,7 @@ def build_critic_preference_pairs(
                         "metadata": {
                             "target_skill": skill.value,
                             "assigned_skill": item.skill.value if item.skill else "general",
+                            "source_bucket": item.source_bucket,
                             "routing_weight": item.weight,
                             "error_profile": item.profile,
                             "delta": p["delta"],
@@ -373,16 +412,31 @@ def build_critic_preference_pairs(
                 f"selected for skill '{skill.value}'"
             )
 
-            # Log assigned_skill distribution to verify routing is working
+            # Log source-bucket and assigned-skill distributions to verify routing.
             if preference_pairs:
-                from collections import Counter
                 skill_dist = Counter(
                     p["metadata"]["assigned_skill"]
                     for p in preference_pairs
                 )
+                bucket_dist = Counter(
+                    p["metadata"]["source_bucket"]
+                    for p in preference_pairs
+                )
+                selected_unique_pairs = {
+                    (p["sample"].get("question", ""), p.get("actor_response", ""))
+                    for p in preference_pairs
+                }
+                logger.info(
+                    f"  [{critic_skill}] source_bucket distribution: "
+                    f"{dict(bucket_dist)}"
+                )
                 logger.info(
                     f"  [{critic_skill}] assigned_skill distribution: "
                     f"{dict(skill_dist)}"
+                )
+                logger.info(
+                    f"  [{critic_skill}] selected unique_pairs: "
+                    f"{len(selected_unique_pairs)} / {len(preference_pairs)}"
                 )
         else:
             logger.warning(f"  No raw pairs produced for '{critic_skill}'")
@@ -519,6 +573,18 @@ def main():
     logger.info(f"  Actor dir: {actor_dir}")
     logger.info(f"  Output dir: {output_dir}")
     logger.info(f"  Critic skills: {args.critic_skills}")
+    logger.info(
+        "  Active critic thresholds: "
+        f"min_pairs={args.min_pairs_per_critic}, "
+        f"min_specialty_items={args.min_specialty_items}, "
+        f"min_specialty_ratio={args.min_specialty_ratio}"
+    )
+    logger.info(
+        "  Training mix ratios: "
+        f"specialty={args.specialty_ratio}, "
+        f"general={args.general_ratio}, "
+        f"calibration={args.calibration_ratio}"
+    )
     logger.info("=" * 60)
 
     # Load classified data to get sample list
@@ -594,6 +660,7 @@ def main():
     logger.info("[Step 4] Generating preference pairs & training Critics...")
 
     critic_paths = {}
+    inactive_critics = {}
 
     # Create a single vLLM engine shared across all critic skills
     from src.inference.vllm_server import VLLMInference
@@ -616,7 +683,7 @@ def main():
         logger.warning("Will attempt per-error-type engine creation")
 
     def _pairs_cache_path(critic_skill):
-        return os.path.join(output_dir, f"pairs_{critic_skill}.json")
+        return os.path.join(output_dir, f"pairs_{critic_skill}_adaptive.json")
 
     try:
         # Phase 1: Generate preference pairs for ALL critic skills (with disk cache)
@@ -671,15 +738,38 @@ def main():
                 api_key=api_key,
                 api_base=api_base,
                 api_model=api_model,
+                min_specialty_items=args.min_specialty_items,
+                min_specialty_ratio=args.min_specialty_ratio,
+                specialty_ratio=args.specialty_ratio,
+                general_ratio=args.general_ratio,
+                calibration_ratio=args.calibration_ratio,
             )
 
             if preference_pairs:
+                if len(preference_pairs) < args.min_pairs_per_critic:
+                    inactive_critics[critic_skill] = {
+                        "reason": "selected_pairs_below_min_pairs_per_critic",
+                        "selected_pairs": len(preference_pairs),
+                        "min_pairs_per_critic": args.min_pairs_per_critic,
+                    }
+                    logger.info(
+                        f"  Critic '{critic_skill}' inactive: "
+                        f"{len(preference_pairs)} selected pairs < "
+                        f"{args.min_pairs_per_critic} minimum"
+                    )
+                    continue
+
                 # Save to disk for crash recovery
                 with open(cache_file, "w") as f:
                     json.dump(preference_pairs, f)
                 logger.info(f"  Cached {len(preference_pairs)} pairs to {cache_file}")
                 all_pairs[critic_skill] = preference_pairs
             else:
+                inactive_critics[critic_skill] = {
+                    "reason": "specialty_pool_below_active_threshold",
+                    "min_specialty_items": args.min_specialty_items,
+                    "min_specialty_ratio": args.min_specialty_ratio,
+                }
                 logger.warning(f"  No preference pairs for '{critic_skill}', skipping")
 
         # Clean up shared engine before DPO training (GPU memory intensive)
@@ -691,6 +781,18 @@ def main():
         # Phase 2: Train each critic (no engine needed, DPO runs in subprocess)
         for critic_skill, preference_pairs in all_pairs.items():
             logger.info(f"\n--- Training Critic: {critic_skill} ---")
+
+            if len(preference_pairs) < args.min_pairs_per_critic:
+                inactive_critics[critic_skill] = {
+                    "reason": "cached_pairs_below_min_pairs_per_critic",
+                    "selected_pairs": len(preference_pairs),
+                    "min_pairs_per_critic": args.min_pairs_per_critic,
+                }
+                logger.info(
+                    f"  Skipping '{critic_skill}': {len(preference_pairs)} pairs < "
+                    f"{args.min_pairs_per_critic} minimum"
+                )
+                continue
 
             checkpoint_path = train_critic_dpo(
                 model_name=args.model_name,
@@ -722,19 +824,42 @@ def main():
     logger.info("\n[Step 5] Saving critic registry...")
 
     registry_file = os.path.join(output_dir, "critic_registry.json")
+    registry_critics = {}
+    for critic_skill in args.critic_skills:
+        if critic_skill in critic_paths:
+            registry_critics[critic_skill] = {
+                "critic_skill": critic_skill,
+                "model_path": critic_paths[critic_skill],
+                "base_model": args.model_name,
+                "status": "active",
+            }
+        else:
+            registry_critics[critic_skill] = {
+                "critic_skill": critic_skill,
+                "model_path": "",
+                "base_model": args.model_name,
+                "status": "frozen_base",
+                "inactive_reason": inactive_critics.get(critic_skill, {}),
+            }
+
     with open(registry_file, "w") as f:
         json.dump({
-            "critics": {
-                critic_skill: {
-                    "critic_skill": critic_skill,
-                    "model_path": path,
-                    "base_model": args.model_name,
-                }
-                for critic_skill, path in critic_paths.items()
-            },
+            "critics": registry_critics,
             "metadata": {
                 "base_model": args.model_name,
-                "num_critics": len(critic_paths),
+                "num_critics": len(registry_critics),
+                "num_active_critics": len(critic_paths),
+                "inactive_critics": inactive_critics,
+                "active_selection": {
+                    "min_pairs_per_critic": args.min_pairs_per_critic,
+                    "min_specialty_items": args.min_specialty_items,
+                    "min_specialty_ratio": args.min_specialty_ratio,
+                },
+                "training_mix": {
+                    "specialty_ratio": args.specialty_ratio,
+                    "general_ratio": args.general_ratio,
+                    "calibration_ratio": args.calibration_ratio,
+                },
             },
         }, f, indent=2)
 
@@ -745,6 +870,8 @@ def main():
     logger.info(f"  Trained {len(critic_paths)} critics:")
     for critic_skill, path in critic_paths.items():
         logger.info(f"    {critic_skill}: {path}")
+    if inactive_critics:
+        logger.info(f"  Inactive critics: {inactive_critics}")
     logger.info("=" * 60)
 
 

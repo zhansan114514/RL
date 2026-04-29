@@ -26,6 +26,7 @@ import json
 import logging
 import os
 import random
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -129,6 +130,12 @@ def society_alternating_train(
     gpu_memory_utilization: float = 0.85,
     max_model_len: int = 4096,
     max_samples: int = 200,
+    min_pairs_per_critic: int = 64,
+    min_specialty_items: int = 64,
+    min_specialty_ratio: float = 0.08,
+    specialty_ratio: float = 0.6,
+    general_ratio: float = 0.3,
+    calibration_ratio: float = 0.1,
     classifications_cache_dir: str = "output/society/classified",
     api_key: str = "",
     api_base: str = "",
@@ -170,6 +177,9 @@ def society_alternating_train(
         dtype: Model dtype.
         gpu_memory_utilization: vLLM GPU memory utilization.
         max_model_len: Max model sequence length.
+        min_pairs_per_critic: Minimum selected DPO pairs required to train a critic.
+        min_specialty_items: Minimum target-skill routed items required to activate a critic.
+        min_specialty_ratio: Minimum target-skill share required to activate a critic.
 
     Returns:
         SocietyTrainingResult with checkpoint paths and metrics.
@@ -268,12 +278,25 @@ def society_alternating_train(
                 api_key=api_key,
                 api_base=api_base,
                 api_model=api_model,
+                min_specialty_items=min_specialty_items,
+                min_specialty_ratio=min_specialty_ratio,
+                specialty_ratio=specialty_ratio,
+                general_ratio=general_ratio,
+                calibration_ratio=calibration_ratio,
             )
 
-            if not preference_pairs:
-                logger.warning(f"  No preference pairs for {critic.name}, skipping")
-                critic_paths[critic.name] = critic_iter_dir
-                metrics[f"critic_{critic.name}_iter{iteration}"] = {"status": "skipped", "pairs": 0}
+            if len(preference_pairs) < min_pairs_per_critic:
+                logger.warning(
+                    f"  Skipping {critic.name}: {len(preference_pairs)} pairs < "
+                    f"{min_pairs_per_critic} minimum"
+                )
+                critic_paths[critic.name] = critic.lora_path or ""
+                metrics[f"critic_{critic.name}_iter{iteration}"] = {
+                    "status": "skipped",
+                    "pairs": len(preference_pairs),
+                    "reason": "below_min_pairs_per_critic",
+                    "min_pairs_per_critic": min_pairs_per_critic,
+                }
                 continue
 
             # Run DPO training
@@ -583,6 +606,11 @@ def _generate_critic_pairs_algorithm1(
     api_key: str = "",
     api_base: str = "",
     api_model: str = "",
+    min_specialty_items: int = 64,
+    min_specialty_ratio: float = 0.08,
+    specialty_ratio: float = 0.6,
+    general_ratio: float = 0.3,
+    calibration_ratio: float = 0.1,
 ) -> list[dict]:
     """Generate Critic DPO preference pairs using Algorithm 1 from trajectory.py.
 
@@ -712,7 +740,7 @@ def _generate_critic_pairs_algorithm1(
             f"  [{critic.name}] Algorithm 1 produced {len(raw_pairs)} raw critic pairs"
         )
 
-        # Step 2: Route by error profile, then build a general/specialty/calibration mix.
+        # Step 2: Route by error profile, then build an adaptive specialist mix.
         if raw_pairs:
             # Try to use pre-classified data from phase 2 to ensure
             # single source of truth across all training phases
@@ -738,14 +766,32 @@ def _generate_critic_pairs_algorithm1(
             if specialty is None:
                 raise ValueError(f"Critic '{critic.name}' has no error_specialty set")
 
+            raw_skill_dist = Counter(
+                item.skill.value if item.skill else "general"
+                for item in routed_items
+            )
+            logger.info(
+                f"  [{critic.name}] raw routed profile distribution: "
+                f"{dict(raw_skill_dist)}"
+            )
+
             critic_items = splitter.build_critic_training_mix(
                 all_items=routed_items,
                 target_skill=specialty,
-                general_ratio=0.6,
-                specialty_ratio=0.3,
-                calibration_ratio=0.1,
                 max_items=max_samples,
+                min_specialty_items=min_specialty_items,
+                min_specialty_ratio=min_specialty_ratio,
+                specialty_ratio=specialty_ratio,
+                general_ratio=general_ratio,
+                calibration_ratio=calibration_ratio,
             )
+
+            if not critic_items:
+                logger.info(
+                    f"  [{critic.name}] inactive: specialty pool below "
+                    f"threshold; no specialist DPO pairs selected"
+                )
+                return []
 
             # Build lookup dict for O(1) matching instead of O(N*M) scan
             pair_index: dict[tuple[str, str], dict] = {}
@@ -765,6 +811,7 @@ def _generate_critic_pairs_algorithm1(
                         "metadata": {
                             "target_skill": specialty.value,
                             "assigned_skill": item.skill.value if item.skill else "general",
+                            "source_bucket": item.source_bucket,
                             "routing_weight": item.weight,
                             "error_profile": item.profile,
                             "delta": p["delta"],
@@ -779,14 +826,29 @@ def _generate_critic_pairs_algorithm1(
 
         # Log assigned_skill distribution to verify routing is effective
         if preference_pairs:
-            from collections import Counter
             skill_dist = Counter(
                 p["metadata"]["assigned_skill"]
                 for p in preference_pairs
             )
+            bucket_dist = Counter(
+                p["metadata"]["source_bucket"]
+                for p in preference_pairs
+            )
+            selected_unique_pairs = {
+                (p["sample"].get("question", ""), p.get("actor_response", ""))
+                for p in preference_pairs
+            }
+            logger.info(
+                f"  [{critic.name}] source_bucket distribution: "
+                f"{dict(bucket_dist)}"
+            )
             logger.info(
                 f"  [{critic.name}] assigned_skill distribution: "
                 f"{dict(skill_dist)}"
+            )
+            logger.info(
+                f"  [{critic.name}] selected unique_pairs: "
+                f"{len(selected_unique_pairs)} / {len(preference_pairs)}"
             )
 
         if _owns_engine:
