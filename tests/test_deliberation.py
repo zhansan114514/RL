@@ -1,6 +1,5 @@
 """Tests for deliberation engine."""
 
-import pytest
 
 
 class MockInference:

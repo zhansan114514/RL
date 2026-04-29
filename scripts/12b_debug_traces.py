@@ -89,13 +89,11 @@ def main():
             critic_names=all_critic_names,
         )
 
-        from src.algorithms.reward import extract_answer
         from src.society.multi_deliberation import multi_agent_deliberate_single_gpu
         from src.society.router import CriticRouter
         from collections import Counter
 
         router = CriticRouter(top_k=args.router_top_k, uniform_weights=False)
-        task_type = samples[0].get("task_type", "yes_no")
 
         # Run on all samples, collect wrong ones
         wrong_samples = []

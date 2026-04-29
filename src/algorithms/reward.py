@@ -125,9 +125,9 @@ def _extract_math(text: str) -> Optional[str]:
     """Extract mathematical answer from response (supports \\boxed{} and numeric answers)."""
     # First try to extract from \boxed{...} with balanced brace matching
     boxed_prefixes = [
-        r'\\boxed\{',
-        r'boxed\{',
-        r'\{\\boxed\{',
+        r'\\boxed\s*\{',
+        r'boxed\s*\{',
+        r'\{\\boxed\s*\{',
     ]
     for prefix in boxed_prefixes:
         for m in re.finditer(prefix, text):
@@ -264,13 +264,13 @@ def compute_accuracy(
 
     if task_type == "math":
         correct = sum(
-            math_answers_equal(p, l)
-            for p, l in zip(predictions, labels)
+            math_answers_equal(prediction, label)
+            for prediction, label in zip(predictions, labels)
         )
     else:
         correct = sum(
-            normalize_answer(p, task_type) == normalize_answer(l, task_type)
-            for p, l in zip(predictions, labels)
+            normalize_answer(prediction, task_type) == normalize_answer(label, task_type)
+            for prediction, label in zip(predictions, labels)
         )
     return correct / len(predictions)
 
@@ -301,7 +301,6 @@ def compute_accuracy_with_ci(
 
     z = scipy_stats.norm.ppf(1 - (1 - confidence) / 2)
     denom = 1 + z**2 / n
-    center = (acc + z**2 / (2 * n)) / denom
     spread = z * np.sqrt(acc * (1 - acc) / n + z**2 / (4 * n**2)) / denom
 
     margin = spread

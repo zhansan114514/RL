@@ -5,7 +5,10 @@ Preference data builder: filters and formats trajectory pairs for DPO training.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from datasets import Dataset
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +60,7 @@ def build_preference_dataset(
 
 def convert_to_hf_dataset(
     preference_data: list[dict],
-) -> "datasets.Dataset":
+) -> "Dataset":
     """Convert preference data list to HuggingFace Dataset."""
     from datasets import Dataset
     return Dataset.from_list(preference_data)

@@ -218,7 +218,7 @@ class DiversitySplit:
             splits = self._balance_splits(splits)
 
         logger.info(
-            f"Reasoning style split: "
+            "Reasoning style split: "
             + ", ".join(f"{s.value}={len(v)}" for s, v in splits.items())
         )
         return splits
@@ -309,7 +309,7 @@ class DiversitySplit:
                 ))
 
         logger.info(
-            f"Error profile routing: "
+            "Error profile routing: "
             + ", ".join(f"{k}={v}" for k, v in profile_counts.items())
         )
         return routed_items

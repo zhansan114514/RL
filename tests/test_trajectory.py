@@ -1,7 +1,5 @@
 """Tests for trajectory generation and preference data."""
 
-import pytest
-from unittest.mock import MagicMock
 
 from src.trajectory.preference import build_preference_dataset
 

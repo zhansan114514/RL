@@ -20,9 +20,7 @@ import json
 import logging
 import os
 import sys
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -183,7 +181,6 @@ def build_preference_pairs_for_style(
         incorrect_responses = []
         for ri, resp in enumerate(all_responses):
             response_text = resp.get("response", "")
-            answer = resp.get("answer")
             extracted_answer = extract_answer(response_text, task_type)
 
             from src.algorithms.reward import math_answers_equal

@@ -1,4 +1,4 @@
-.PHONY: test lint clean setup
+.PHONY: setup install test test-data test-prompts test-deliberation test-evaluation lint clean
 
 # 项目根目录
 PROJECT_DIR := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
@@ -26,12 +26,12 @@ test-prompts:
 test-deliberation:
 	python -m pytest tests/test_deliberation.py -v
 
-test-reward:
-	python -m pytest tests/test_reward.py -v
+test-evaluation:
+	python -m pytest tests/test_evaluation.py -v
 
 # 代码检查
 lint:
-	ruff check src/ tests/
+	python -m ruff check src/ scripts/ tests/
 
 # 清理
 clean:

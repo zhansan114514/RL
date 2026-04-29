@@ -18,8 +18,7 @@ import random
 import sys
 from collections import Counter
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -190,7 +189,7 @@ def simulate_debate_round(
 
 def compute_consensus(responses: list[AgentResponse], task_type: str = "math") -> tuple[str, float]:
     """Compute consensus answer via majority vote with math-aware comparison."""
-    from src.algorithms.reward import math_answers_equal, normalize_answer
+    from src.algorithms.reward import math_answers_equal
 
     answers = [r.answer for r in responses if r.answer]
 

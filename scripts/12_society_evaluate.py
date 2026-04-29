@@ -28,7 +28,6 @@ import sys
 import time
 from collections import Counter
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -179,8 +178,7 @@ def _build_agent_configs(
     Returns (actor_configs, critic_configs, lora_paths).
     """
     from src.society.agent_registry import (
-        AgentConfig, AgentRole, ReasoningStyle, CriticSkill,
-        resolve_reasoning_style, resolve_critic_skill,
+        AgentConfig, AgentRole, resolve_reasoning_style, resolve_critic_skill,
     )
 
     actors_info = registry.get("actors", {})

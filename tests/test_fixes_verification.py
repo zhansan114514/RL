@@ -6,11 +6,10 @@ These tests verify the following fixes:
 2. trajectory.py: guided trajectories start from t=1 (skip t=0)
 3. trajectory.py: preference pairs use independent ifs (both towards and away pairs can be generated per round)
 4. dpo_trainer.py: DPO includes NLL regularization via loss_type=[loss_type, "sft"]
-5. rollout.py: sim_responses contains interleaved actor and critic responses
+5. trajectory.py: guided pair simulation keeps actor and critic responses interleaved
 """
 
-import pytest
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 
 class TestFix1DeliberationPreviousResponses:
@@ -152,7 +151,7 @@ class TestFix2TrajectoryStartsFromT1:
             "choices": None,
         }
 
-        pairs = generate_trajectories(
+        generate_trajectories(
             actor, critic, sample, "boolq",
             num_rounds=3,
             reward_threshold=0.0,

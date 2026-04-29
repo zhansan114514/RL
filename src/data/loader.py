@@ -124,7 +124,7 @@ def _load_math_all(
     cache_dir: Optional[str] = None,
 ) -> DatasetDict:
     """Load all MATH subconfigs and merge into a single DatasetDict."""
-    from datasets import concatenate_datasets, Dataset
+    from datasets import concatenate_datasets
 
     subconfigs = [
         "algebra", "counting_and_probability", "geometry",

@@ -6,9 +6,8 @@ Implements the iterative best-response optimization:
 2. Fix critic -> train actor
 3. Repeat (ACC-Collab+ does 2 rounds)
 
-Refactored from alternating.py to use model_manager and trainer.
-All hardcoded parameters (max_model_len, gpu_memory_utilization, etc.)
-are now read from ConfigManager.
+Coordinates model lifecycle, trajectory generation, DPO training, and optional
+validation without keeping vLLM and training models resident at the same time.
 """
 
 from __future__ import annotations

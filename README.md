@@ -13,12 +13,10 @@ src/
 ├── algorithms/          # 算法核心层（论文算法的权威实现）
 │   ├── reward.py        # extract_answer (zeta 函数) + accuracy + reward_delta
 │   ├── deliberation.py  # 自然审议 + 引导审议循环
-│   ├── rollout.py       # One-step MC Roll-out 奖励估计
 │   └── trajectory.py    # Algorithm 1 轨迹生成与偏好对构建
 ├── data/                # 数据加载与预处理
 │   ├── loader.py        # HuggingFace 数据集加载（BoolQ/MMLU/BBH/SCIQ/ARC）
-│   ├── preprocessor.py  # standardize_sample, generate_wrong_answer
-│   └── utils.py         # compute_dataset_stats, log_dataset_summary
+│   └── preprocessor.py  # standardize_sample, generate_wrong_answer
 ├── prompts/             # Prompt 模板系统
 │   ├── templates.py     # 6 类 PromptType 枚举与模板（论文 Appendix C）
 │   └── formatter.py     # format_prompt 变量注入
@@ -26,7 +24,7 @@ src/
 │   ├── scheduler.py     # alternating_train 交替训练调度
 │   ├── trainer.py       # train_agent 单 agent 轨迹生成 + DPO
 │   ├── dpo_trainer.py   # train_dpo (基于 trl)
-│   ├── model_manager.py # create_inference_model, create_model_pair, release_gpu_memory
+│   ├── model_manager.py # create_inference_model, create_model_pair, cleanup_models
 │   └── lora_config.py   # get_lora_config (rank=256, alpha=512)
 ├── evaluation/          # 评估
 │   └── benchmarks.py    # evaluate_benchmark 逐轮准确率 + Wilson 置信区间
@@ -108,7 +106,7 @@ training:
   beta: 0.1
 ```
 
-运行时通过 `get_config("inference.max_model_len")` 读取，无需硬编码。
+运行时通过 `ConfigManager.instance().get("inference.max_model_len")` 读取，无需硬编码。
 
 ---
 
@@ -116,8 +114,8 @@ training:
 
 ```bash
 export PYTHONPATH=$(pwd)
-pytest tests/ -v     # 189 tests
-make lint             # ruff check
+pytest tests/ -v
+make lint             # ruff check src/ scripts/ tests/
 ```
 
 ---
@@ -127,11 +125,22 @@ make lint             # ruff check
 ```
 数据集加载 (data/loader)
   → 自然审议 + 引导审议 (algorithms/deliberation)
-  → MC Roll-out 奖励估计 (algorithms/rollout)
+  → 轨迹生成与奖励差筛选 (algorithms/trajectory + algorithms/reward)
   → 偏好对构建 (trajectory/preference)
   → DPO 训练 (training/trainer + training/dpo_trainer)
   → 评估 (evaluation/benchmarks)
 ```
+
+---
+
+## 维护约定
+
+- `scripts/train.py --agent {actor,critic}` 是唯一的单 Agent DPO 训练入口。
+- `src.training.scheduler.alternating_train` 是 Actor-Critic 交替训练的公共 API。
+- `src.algorithms.reward` 是答案抽取、归一化、准确率和奖励差的权威实现。
+- 实验产物、模型权重、缓存和机器相关二进制补丁不进入源码树。
+
+更详细的模块边界和长期维护规则见 `docs/architecture.md`。
 
 ---
 

@@ -1,7 +1,6 @@
 """
 Single-agent training: trajectory generation + DPO.
 
-Extracted from alternating.py to separate concerns:
 - This module handles training ONE agent (actor or critic)
 - The alternating schedule is in scheduler.py
 """

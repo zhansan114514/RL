@@ -15,13 +15,6 @@ import os
 from _utils import setup_logging
 from src.utils.config import ConfigManager
 
-# Apply NVML fix if needed (for PyTorch 2.10+ with old NVIDIA drivers)
-try:
-    from src.utils import nvml_fix
-    nvml_fix.auto_apply_nvml_fix()
-except ImportError:
-    pass  # NVML fix module not available
-
 setup_logging()
 logger = logging.getLogger(__name__)
 
@@ -207,7 +200,6 @@ def main():
 
 def _print_final_summary(args, results: dict, output_dir: str) -> None:
     """Print a comprehensive final experiment summary."""
-    import time
     sep = "#" * 70
 
     logger.info("")

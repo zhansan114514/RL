@@ -12,10 +12,9 @@ Tests cover:
 
 import json
 import pytest
-from unittest.mock import patch, MagicMock, Mock
+from unittest.mock import patch, MagicMock
 from pathlib import Path
 import tempfile
-import numpy as np
 
 # Import all society modules
 from src.society.agent_registry import (
@@ -24,8 +23,6 @@ from src.society.agent_registry import (
     AgentRole,
     ReasoningStyle,
     CriticSkill,
-    ACTOR_STYLE_PROMPTS,
-    CRITIC_SPECIALTY_PROMPTS,
     CRITIC_CONFIDENCE_SUFFIX,
 )
 from src.society.router import (
@@ -35,7 +32,6 @@ from src.society.router import (
     parse_confidence,
     parse_answer_correct,
     build_critic_feedback,
-    CONFIDENCE_PATTERN,
 )
 from src.society.data_classifier import (
     DataClassifier,
@@ -46,13 +42,9 @@ from src.society.data_classifier import (
     _parse_style_response,
     _parse_error_profile_response,
     _compute_sample_hash,
-    ReasoningStyleResult,
-    ErrorProfileResult,
 )
 from src.society.diversity_split import DiversitySplit, RoutedTrainingItem
 from src.society.inference_pipeline import (
-    society_inference,
-    InferenceResult,
     _majority_vote,
     _weighted_vote,
     _best_actor,
@@ -1028,7 +1020,6 @@ class TestVotingStrategies:
 
     def test_best_actor_with_consensus(self):
         """Should select the actor with highest Critic confidence."""
-        from src.society.router import RoutedFeedback
 
         mock_result = MagicMock()
         mock_result.consensus_answer = "42"

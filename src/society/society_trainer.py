@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from src.society.agent_registry import AgentRegistry, AgentConfig, AgentRole, ReasoningStyle
+from src.society.agent_registry import AgentRegistry, AgentConfig, ReasoningStyle
 from src.society.data_classifier import (
     classify_reasoning_style, ClassificationError,
 )
@@ -640,7 +640,6 @@ def _generate_critic_pairs_algorithm1(
     n_samples = min(len(dataset), max_samples)
     preference_pairs: list[dict] = []
     _owns_engine = engine is None
-    BATCH_SIZE = 10
 
     try:
         if _owns_engine:

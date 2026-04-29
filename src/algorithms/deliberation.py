@@ -8,7 +8,6 @@ Optimized: batches actor and critic calls within each round for vLLM throughput.
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 from src.prompts.templates import PromptType
 from src.prompts.formatter import format_prompt

@@ -6,13 +6,9 @@ Implements the DPO loss from Eq. 6 of the ACC-Collab paper.
 
 from __future__ import annotations
 
-import gc
 import logging
-from typing import Optional
 
 import torch
-
-from src.training.lora_config import get_lora_config
 
 logger = logging.getLogger(__name__)
 
@@ -81,10 +77,6 @@ def train_dpo(
     Returns:
         Path to saved model.
     """
-    from transformers import AutoModelForCausalLM, AutoTokenizer, TrainingArguments
-    from trl import DPOTrainer, DPOConfig
-
-    lora_config = get_lora_config(model_type, r=lora_r, lora_alpha=lora_alpha)
 
     # Detect hardware capabilities for dtype selection
     # V100 (cc 7.0) doesn't support bf16. Gemma2 doesn't support fp16
@@ -126,7 +118,6 @@ def train_dpo(
     _temp_dir = None
     if preference_dataset is not None:
         import tempfile
-        from datasets import load_from_disk
         _temp_dir = tempfile.mkdtemp(prefix="dpo_data_")
         dataset_path = os.path.join(_temp_dir, "preference_dataset")
         preference_dataset.save_to_disk(dataset_path)
@@ -173,18 +164,6 @@ def train_dpo(
     _runner_script = os.path.join(os.path.dirname(__file__), "_dpo_runner.py")
     env = os.environ.copy()
     env["CUDA_VISIBLE_DEVICES"] = target_physical
-    # Bypass NVML driver compatibility issues on older drivers (V100 etc.)
-    # The dlsym interceptor provides the missing nvmlDeviceGetNvLinkRemoteDeviceType
-    # symbol by intercepting dlsym() calls at the C level.
-    _fix_path = os.path.join(os.path.dirname(__file__), "libdlsym_fix.so")
-    if os.path.exists(_fix_path):
-        import ctypes
-        try:
-            ctypes.CDLL(_fix_path)
-            existing_preload = env.get("LD_PRELOAD", "")
-            env["LD_PRELOAD"] = _fix_path + ((":" + existing_preload) if existing_preload else "")
-        except OSError as e:
-            logger.info(f"libdlsym_fix.so skipped (incompatible): {e}")
     # Ensure src package is importable in the subprocess
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
     existing_pp = env.get("PYTHONPATH", "")

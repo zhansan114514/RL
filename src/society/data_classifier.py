@@ -169,7 +169,7 @@ def check_api_available(
         # Accept both 200 (success) and 4xx (auth/rate-limit but server is reachable)
         # A connection error would have thrown before this point.
         if resp.status_code == 401:
-            return False, f"API key is invalid (HTTP 401)"
+            return False, "API key is invalid (HTTP 401)"
         return True, ""
     except requests.exceptions.ConnectionError as e:
         return False, f"Cannot connect to API: {e}"

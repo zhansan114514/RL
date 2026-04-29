@@ -1,7 +1,7 @@
 """Tests for DPO training components."""
 
 import pytest
-from unittest.mock import patch, MagicMock, call
+from unittest.mock import patch, MagicMock
 
 
 class TestLoRAConfig:
@@ -34,7 +34,7 @@ class TestAlternatingTrain:
 
     def test_alternating_returns_paths(self):
         """The function should return dict with actor_path and critic_path."""
-        from src.training.alternating import alternating_train
+        from src.training.scheduler import alternating_train
         # This is a structural test - actual training requires GPU
         # We verify the function signature accepts expected args
         import inspect
@@ -56,7 +56,7 @@ class TestAlternatingTrainModelPaths:
         self, mock_gen_traj, mock_train_dpo, mock_vllm
     ):
         """Single iteration should use original paths."""
-        from src.training.alternating import alternating_train
+        from src.training.scheduler import alternating_train
 
         # Setup mocks
         mock_model = MagicMock()
@@ -94,7 +94,7 @@ class TestAlternatingTrainModelPaths:
         self, mock_gen_traj, mock_train_dpo, mock_vllm
     ):
         """Two iterations should use updated paths in second iteration."""
-        from src.training.alternating import alternating_train
+        from src.training.scheduler import alternating_train
 
         # Setup mocks
         mock_model = MagicMock()
@@ -119,7 +119,7 @@ class TestAlternatingTrainModelPaths:
             {"question": "Q?", "passage": "P.", "answer": "yes", "task_type": "yes_no"}
         ]
 
-        result = alternating_train(
+        alternating_train(
             actor_path="/base/actor",
             critic_path="/base/critic",
             dataset=dataset,
@@ -145,7 +145,7 @@ class TestAlternatingTrainModelPaths:
     @patch("src.training.trainer.generate_trajectories")
     def test_empty_dataset_handling(self, mock_gen_traj, mock_train_dpo, mock_vllm):
         """Empty dataset should raise ValueError."""
-        from src.training.alternating import alternating_train
+        from src.training.scheduler import alternating_train
 
         mock_model = MagicMock()
         mock_vllm.return_value = mock_model
@@ -167,7 +167,7 @@ class TestAlternatingTrainModelPaths:
         self, mock_gen_traj, mock_train_dpo, mock_vllm
     ):
         """When no preference pairs generated, should raise ValueError."""
-        from src.training.alternating import alternating_train
+        from src.training.scheduler import alternating_train
 
         mock_model = MagicMock()
         mock_vllm.return_value = mock_model
@@ -201,7 +201,7 @@ class TestAlternatingTrainModelPathsFixVerification:
         self, mock_gen_traj, mock_train_dpo, mock_vllm
     ):
         """Verify that second iteration uses paths from first iteration (the fix)."""
-        from src.training.alternating import alternating_train
+        from src.training.scheduler import alternating_train
 
         mock_model = MagicMock()
         mock_vllm.return_value = mock_model
@@ -243,7 +243,7 @@ class TestAlternatingTrainModelPathsFixVerification:
         self, mock_gen_traj, mock_train_dpo, mock_vllm
     ):
         """Verify VLLMInference is called with updated paths in second iteration."""
-        from src.training.alternating import alternating_train
+        from src.training.scheduler import alternating_train
 
         mock_model = MagicMock()
         vllm_calls = []
@@ -295,7 +295,7 @@ class TestAlternatingTrainModelPathsFixVerification:
         self, mock_gen_traj, mock_train_dpo, mock_vllm
     ):
         """Test path progression across 3 iterations (ACC-Collab+ scenario)."""
-        from src.training.alternating import alternating_train
+        from src.training.scheduler import alternating_train
 
         mock_model = MagicMock()
         mock_vllm.return_value = mock_model
@@ -313,7 +313,7 @@ class TestAlternatingTrainModelPathsFixVerification:
 
         dataset = [{"question": "Q?", "passage": "P.", "answer": "yes", "task_type": "yes_no"}]
 
-        result = alternating_train(
+        alternating_train(
             actor_path="/base/actor",
             critic_path="/base/critic",
             dataset=dataset,
@@ -377,7 +377,7 @@ class TestDPOBetaParameterFixVerification:
         self, mock_train_dpo, mock_gen, mock_vllm
     ):
         """Verify beta parameter flows from alternating_train to train_dpo."""
-        from src.training.alternating import alternating_train
+        from src.training.scheduler import alternating_train
 
         # Track beta values passed to train_dpo
         beta_values = []
@@ -396,7 +396,7 @@ class TestDPOBetaParameterFixVerification:
 
         dataset = [{"question": "Q?", "passage": "P.", "answer": "yes", "task_type": "yes_no"}]
 
-        result = alternating_train(
+        alternating_train(
             actor_path="/base/actor",
             critic_path="/base/critic",
             dataset=dataset,
@@ -413,7 +413,7 @@ class TestDPOBetaParameterFixVerification:
     def test_beta_default_value_matches_paper(self):
         """Verify default beta matches paper specification."""
         from src.training.dpo_trainer import train_dpo
-        from src.training.alternating import alternating_train
+        from src.training.scheduler import alternating_train
         import inspect
 
         # Check train_dpo default
@@ -429,7 +429,7 @@ class TestDPOBetaParameterFixVerification:
     def test_beta_parameter_in_function_signature(self):
         """Verify beta parameter exists in both train_dpo and alternating_train."""
         from src.training.dpo_trainer import train_dpo
-        from src.training.alternating import alternating_train
+        from src.training.scheduler import alternating_train
         import inspect
 
         # Check train_dpo has beta parameter

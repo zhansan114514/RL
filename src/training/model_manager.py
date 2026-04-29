@@ -9,10 +9,14 @@ from __future__ import annotations
 
 import gc
 import logging
+from typing import TYPE_CHECKING
 
 import torch
 
 from src.utils.config import ConfigManager
+
+if TYPE_CHECKING:
+    from src.inference.vllm_server import VLLMInference
 
 logger = logging.getLogger(__name__)
 

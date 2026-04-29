@@ -61,11 +61,11 @@ def main():
     critic_path = args.critic_path
     if not os.path.exists(actor_path):
         logger.error(f"Actor model not found: {actor_path}")
-        logger.error("Please run scripts/04_train_actor.py first")
+        logger.error("Please run scripts/train.py --agent actor first")
         raise FileNotFoundError(f"Actor model not found: {actor_path}")
     if not os.path.exists(critic_path):
         logger.error(f"Critic model not found: {critic_path}")
-        logger.error("Please run scripts/03_train_critic.py first")
+        logger.error("Please run scripts/train.py --agent critic first")
         raise FileNotFoundError(f"Critic model not found: {critic_path}")
 
     logger.info(f"Loading dataset: {args.dataset}")

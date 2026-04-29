@@ -38,8 +38,6 @@ import subprocess
 import sys
 import time
 import traceback
-from pathlib import Path
-from typing import Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 

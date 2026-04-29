@@ -1,14 +1,8 @@
 """
 Unified training entry point for Actor and Critic DPO training.
 
-Merges the former 03_train_critic.py and 04_train_actor.py into a single
-script distinguished by the --agent flag.
-
 Usage:
-    # Train Critic (equivalent to old 03_train_critic.py)
     python scripts/train.py --agent critic --config configs/config.yaml
-
-    # Train Actor (equivalent to old 04_train_actor.py)
     python scripts/train.py --agent actor --config configs/config.yaml
 """
 
@@ -19,13 +13,6 @@ import os
 
 from _utils import setup_logging
 from src.utils.config import ConfigManager
-
-# Apply NVML fix if needed (for PyTorch 2.10+ with old NVIDIA drivers)
-try:
-    from src.utils import nvml_fix
-    nvml_fix.auto_apply_nvml_fix()
-except ImportError:
-    pass  # NVML fix module not available
 
 setup_logging()
 logger = logging.getLogger(__name__)

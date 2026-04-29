@@ -27,6 +27,7 @@ checkpoints/
 models/
 *.bin
 *.safetensors
+*.so
 
 # 数据缓存
 data/cache/

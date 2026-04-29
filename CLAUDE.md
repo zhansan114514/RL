@@ -15,7 +15,7 @@ ACC-Collab 复现项目 -- 实现 ICLR 2025 论文《ACC-Collab: An Actor-Critic
 ```
 数据集加载 (src.data)
   -> 自然审议 + 引导审议 (src.algorithms.deliberation)
-  -> MC Roll-out 奖励估计 (src.algorithms.rollout)
+  -> 轨迹生成与奖励差筛选 (src.algorithms.trajectory + src.algorithms.reward)
   -> 偏好对构建 (src.trajectory)
   -> DPO 训练 (src.training)
   -> 评估 (src.evaluation)
@@ -32,7 +32,7 @@ ACC-Collab 复现项目 -- 实现 ICLR 2025 论文《ACC-Collab: An Actor-Critic
 |------|------|----------|----------|
 | `src.data` | 数据加载与预处理，统一 7 个基准的格式 | `loader.py`, `preprocessor.py` | datasets (HuggingFace) |
 | `src.prompts` | 6 类 Prompt 模板（single_shot / guided / deliberation_actor / deliberation_critic 及其 guided 变体），按数据集分派 | `templates.py`, `formatter.py` | 无外部依赖 |
-| `src.algorithms` | 审议引擎、奖励计算、MC roll-out、Algorithm 1 轨迹生成 | `deliberation.py`, `reward.py`, `rollout.py`, `trajectory.py` | prompts, scipy, numpy |
+| `src.algorithms` | 审议引擎、奖励计算、Algorithm 1 轨迹生成 | `deliberation.py`, `reward.py`, `trajectory.py` | prompts, scipy, numpy |
 | `src.trajectory` | 偏好数据集构建 | `preference.py` | algorithms |
 | `src.training` | DPO 训练(trl)、LoRA 配置(peft)、交替训练调度 | `dpo_trainer.py`, `_dpo_runner.py`, `trainer.py`, `scheduler.py`, `model_manager.py`, `lora_config.py` | trl, peft, transformers |
 | `src.inference` | vLLM 推理封装（懒加载） | `vllm_server.py` | vllm |
@@ -44,7 +44,7 @@ ACC-Collab 复现项目 -- 实现 ICLR 2025 论文《ACC-Collab: An Actor-Critic
 
 ### 训练架构（重构后）
 
-训练系统已重构为分层模块，`alternating.py` 保留为兼容层：
+训练系统分为调度、单 Agent 训练、DPO 子进程和模型生命周期管理：
 
 | 文件 | 职责 |
 |------|------|
@@ -129,7 +129,7 @@ export PYTHONPATH=$(pwd)
 # 一键全流程（参数在 YAML 配置中设置，如 model_name/dataset/max_samples 等）
 python scripts/06_full_pipeline.py --config configs/experiment_gpu1.yaml
 
-# 统一训练入口（合并了原 03_train_critic 和 04_train_actor）
+# 统一训练入口
 python scripts/train.py --config configs/verify.yaml --agent critic
 python scripts/train.py --config configs/verify.yaml --agent actor
 

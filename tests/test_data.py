@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import patch, MagicMock
 
-from src.data.preprocessor import extract_answer, normalize_answer
+from src.algorithms.reward import extract_answer, normalize_answer
 from src.data.loader import load_dataset
 
 
@@ -234,21 +234,21 @@ class TestDataPreprocessorEdgeCases:
 
     def test_normalize_answer_with_none(self):
         """normalize_answer should handle None input."""
-        from src.data.preprocessor import normalize_answer
+        from src.algorithms.reward import normalize_answer
 
         result = normalize_answer(None)
         assert result == ""
 
     def test_normalize_answer_with_empty_string(self):
         """Empty string should return empty."""
-        from src.data.preprocessor import normalize_answer
+        from src.algorithms.reward import normalize_answer
 
         result = normalize_answer("")
         assert result == ""
 
     def test_normalize_answer_with_whitespace(self):
         """Should strip whitespace."""
-        from src.data.preprocessor import normalize_answer
+        from src.algorithms.reward import normalize_answer
 
         result = normalize_answer("  YES  ")
         # Takes first char and upper: "YES" -> "Y"
@@ -256,14 +256,14 @@ class TestDataPreprocessorEdgeCases:
 
     def test_extract_answer_with_whitespace_only(self):
         """Whitespace-only response should return None."""
-        from src.data.preprocessor import extract_answer
+        from src.algorithms.reward import extract_answer
 
         result = extract_answer("   \n\t  ", task_type="yes_no")
         assert result is None
 
     def test_extract_answer_with_very_long_text(self):
         """Should handle very long responses."""
-        from src.data.preprocessor import extract_answer
+        from src.algorithms.reward import extract_answer
 
         long_text = " ".join(["word"] * 10000) + " The answer is Yes."
         result = extract_answer(long_text, task_type="yes_no")
@@ -271,14 +271,14 @@ class TestDataPreprocessorEdgeCases:
 
     def test_extract_answer_mixed_type_fallback(self):
         """Mixed type should fallback to yes_no when MC fails."""
-        from src.data.preprocessor import extract_answer
+        from src.algorithms.reward import extract_answer
 
         result = extract_answer("The answer is Yes.", task_type="mixed")
         assert result == "YES"
 
     def test_extract_answer_invalid_task_type(self):
         """Invalid task type should return None."""
-        from src.data.preprocessor import extract_answer
+        from src.algorithms.reward import extract_answer
 
         result = extract_answer("The answer is Yes.", task_type="invalid")
         assert result is None

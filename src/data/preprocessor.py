@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import re
 import logging
-from typing import Any, Optional
+import random
+from typing import Any
 
-from src.algorithms.reward import extract_answer, normalize_answer, math_answers_equal, extract_balanced_braces
+from src.algorithms.reward import extract_balanced_braces
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +156,7 @@ def generate_wrong_answer(
     correct_answer: str,
     choices: list[str] | None = None,
     task_type: str = "multiple_choice",
-    rng: "random.Random | None" = None,
+    rng: random.Random | None = None,
 ) -> str:
     """
     Generate a wrong answer for guided trajectory (!y).
@@ -173,8 +174,6 @@ def generate_wrong_answer(
     Returns:
         A wrong answer string.
     """
-    import random
-
     if rng is None:
         rng = random.Random()
 

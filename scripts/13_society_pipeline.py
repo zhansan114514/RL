@@ -12,13 +12,11 @@ Usage:
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import subprocess
 import sys
 import time
-from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -100,7 +98,7 @@ def run_phase(phase_num: int, script: str, desc: str, config_path: str) -> bool:
             if api_key:
                 sub_env["GLM_API_KEY"] = api_key
                 logger.info("  Injected GLM_API_KEY from config step02_classify.api_key")
-        result = subprocess.run(
+        subprocess.run(
             [sys.executable, script_path, "--config", config_path],
             cwd=os.path.dirname(scripts_dir),
             env=sub_env,

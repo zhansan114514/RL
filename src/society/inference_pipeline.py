@@ -16,8 +16,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from src.algorithms.reward import extract_answer
-from src.society.agent_registry import AgentRegistry, AgentConfig
+from src.society.agent_registry import AgentRegistry
 from src.society.multi_deliberation import (
     multi_agent_deliberate_single_gpu,
     MultiDeliberationResult,

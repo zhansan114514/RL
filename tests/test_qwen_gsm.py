@@ -1,11 +1,9 @@
 """Tests for Qwen2.5 LoRA configuration and MATH/GSM answer extraction."""
 
 import pytest
-from unittest.mock import patch, MagicMock
-import re
 
 from src.training.lora_config import get_lora_config, MODEL_TARGET_MODULES, DEFAULT_TARGET_MODULES
-from src.algorithms.reward import extract_answer, normalize_answer, _extract_math, math_answers_equal
+from src.algorithms.reward import extract_answer, normalize_answer, math_answers_equal
 from src.data.preprocessor import standardize_sample
 
 
@@ -326,7 +324,7 @@ class TestMathExtractionEdgeCases:
         """Should handle \\boxed with spaces before brace."""
         response = r"The answer is \boxed {42}."
         result = extract_answer(response, task_type="math")
-        # Pattern \boxed\{ doesn't match with space, tries other patterns
+        assert result == "42"
 
     def test_extract_boxed_empty(self):
         """Should handle empty \\boxed{}."""

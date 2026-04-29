@@ -7,8 +7,6 @@ from src.prompts.templates import (
     get_prompt_template,
     get_available_datasets,
     get_available_prompt_types,
-    BOOLQ_TEMPLATES,
-    MMLU_TEMPLATES,
 )
 from src.prompts.formatter import format_prompt, _format_responses
 

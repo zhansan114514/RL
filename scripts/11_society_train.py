@@ -17,13 +17,15 @@ import json
 import logging
 import os
 import sys
-from pathlib import Path
-from typing import Any, Dict, List
+from typing import TYPE_CHECKING, Dict
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from _utils import setup_logging
 from src.utils.config import ConfigManager
+
+if TYPE_CHECKING:
+    from src.society.agent_registry import AgentRegistry
 
 setup_logging()
 logger = logging.getLogger(__name__)

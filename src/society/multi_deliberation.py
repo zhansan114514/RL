@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.algorithms.reward import extract_answer
-from src.society.agent_registry import AgentConfig, AgentRole
+from src.society.agent_registry import AgentConfig
 from src.society.router import CriticRouter, build_critic_feedback, RoutedFeedback
 
 logger = logging.getLogger(__name__)
