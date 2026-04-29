@@ -4,10 +4,16 @@ Society trainer: Multi-Agent alternating training scheduler.
 Extends ACC-Collab's alternating training from 1 Actor + 1 Critic
 to N Actors + M Critics with data-level diversification.
 
-From experiment plan:
-  For each iteration:
-    Phase A: Fix all Actors -> Train all Critics (each on its error-type data)
-    Phase B: Fix all Critics -> Train all Actors (each on its style data)
+For each iteration:
+  Phase A: Fix all Actors -> Train each Critic on a mixture of general,
+           specialty, and calibration data routed by multi-dimensional error profiles.
+  Phase B: Fix all Critics -> Train each Actor on its reasoning-style subset.
+
+Data routing uses error-profile classification to construct critic-specific
+mixture datasets (general/specialty/calibration).  The routing_weight stored
+in metadata reflects the mixture sampling probability — it is NOT applied
+directly to the DPO loss.  Actual DPO training uses unweighted loss on the
+mixture dataset.
 
 Preference pairs are generated using the LLM itself (guided vs natural trajectories),
 following the ACC-Collab paper's approach, NOT hardcoded template strings.
@@ -124,13 +130,21 @@ def society_alternating_train(
     max_model_len: int = 4096,
     max_samples: int = 200,
     classifications_cache_dir: str = "output/society/classified",
+    api_key: str = "",
+    api_base: str = "",
+    api_model: str = "",
 ) -> SocietyTrainingResult:
     """
     Train N Actors + M Critics in alternating fashion.
 
     Each iteration:
-      Phase A: Fix all Actors, train each Critic on its error-type subset
-      Phase B: Fix all Critics, train each Actor on its reasoning-style subset
+      Phase A: Fix all Actors -> Train each Critic on a mixture of general,
+               specialty, and calibration data routed by error profiles.
+      Phase B: Fix all Critics -> Train each Actor on its reasoning-style subset.
+
+    Data routing constructs critic-specific mixture datasets via error-profile
+    classification.  The routing_weight in metadata reflects mixture sampling
+    probability, NOT a direct DPO loss weighting.
 
     Crash recovery via checkpoint_dir: resumes from last completed phase.
 
@@ -197,7 +211,10 @@ def society_alternating_train(
         model_name = registry.base_model_path or "Qwen/Qwen2.5-7B-Instruct"
 
         # ---- Phase A: Train all Critics (fix Actors) ----
-        logger.info(f"Phase A: Training {len(critics)} Critics (Actors frozen)")
+        logger.info(
+            f"Phase A: Training {len(critics)} Critics "
+            f"(Actors frozen, error-profile mixture routing)"
+        )
 
         # Create a shared engine for all critics in this phase.
         # Each critic's Algorithm 1 uses at most 1 actor LoRA + 1 critic LoRA
@@ -248,6 +265,9 @@ def society_alternating_train(
                 max_model_len=max_model_len,
                 engine=phase_a_engine,
                 classifications_cache_dir=classifications_cache_dir,
+                api_key=api_key,
+                api_base=api_base,
+                api_model=api_model,
             )
 
             if not preference_pairs:
@@ -367,6 +387,9 @@ def society_alternating_train(
                 max_model_len=max_model_len,
                 engine=phase_b_engine,
                 classifications_cache_dir=classifications_cache_dir,
+                api_key=api_key,
+                api_base=api_base,
+                api_model=api_model,
             )
 
             if not preference_pairs:
@@ -557,6 +580,9 @@ def _generate_critic_pairs_algorithm1(
     max_model_len: int,
     engine: Any = None,
     classifications_cache_dir: str = "output/society/classified",
+    api_key: str = "",
+    api_base: str = "",
+    api_model: str = "",
 ) -> list[dict]:
     """Generate Critic DPO preference pairs using Algorithm 1 from trajectory.py.
 
@@ -569,8 +595,10 @@ def _generate_critic_pairs_algorithm1(
       chosen  = positive_critic (guided toward correct answer)
       rejected = negative_critic (natural / guided toward wrong answer)
 
-    Error-profile routing via DiversitySplit ensures data-level diversification
-    without collapsing ambiguous MMLU-style errors into a single label.
+    Error-profile routing via DiversitySplit constructs a critic-specific mixture
+    dataset (general/specialty/calibration).  The routing_weight stored in
+    metadata reflects mixture sampling probability, NOT a direct DPO loss
+    weighting — actual DPO training uses unweighted loss on the mixture.
     """
     from src.inference.vllm_server import VLLMInference
     from src.algorithms.deliberation import deliberate_batch
@@ -695,6 +723,9 @@ def _generate_critic_pairs_algorithm1(
                 balance=False, seed=seed, use_api=True,
                 cache_dir=classifications_cache_dir,
                 pre_classified_file=pre_classified if os.path.exists(pre_classified) else None,
+                api_key=api_key,
+                api_base=api_base,
+                api_model=api_model,
             )
             routed_items = splitter.split_by_error_profile(
                 samples=[p["sample"] for p in raw_pairs],
@@ -746,6 +777,18 @@ def _generate_critic_pairs_algorithm1(
             f"selected for skill '{specialty.value if specialty else 'none'}'"
         )
 
+        # Log assigned_skill distribution to verify routing is effective
+        if preference_pairs:
+            from collections import Counter
+            skill_dist = Counter(
+                p["metadata"]["assigned_skill"]
+                for p in preference_pairs
+            )
+            logger.info(
+                f"  [{critic.name}] assigned_skill distribution: "
+                f"{dict(skill_dist)}"
+            )
+
         if _owns_engine:
             del engine
             _cleanup_gpu()
@@ -779,6 +822,9 @@ def _generate_actor_pairs_algorithm1(
     max_model_len: int,
     engine: Any = None,
     classifications_cache_dir: str = "output/society/classified",
+    api_key: str = "",
+    api_base: str = "",
+    api_model: str = "",
 ) -> list[dict]:
     """Generate Actor DPO preference pairs using Algorithm 1 from trajectory.py.
 
@@ -919,6 +965,9 @@ def _generate_actor_pairs_algorithm1(
                         correct_answer=correct_answer,
                         use_api=True,
                         cache_dir=classifications_cache_dir,
+                        api_key=api_key,
+                        api_base=api_base,
+                        api_model=api_model,
                     )
                     style_cache[key] = result.style
                     n_ok += 1

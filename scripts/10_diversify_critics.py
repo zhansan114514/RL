@@ -62,6 +62,9 @@ STEP_DEFAULTS = {
     "gpu_memory_utilization": 0.65,
     "max_model_len": 4096,
     "max_lora_rank": 256,
+    "api_key": "",
+    "api_base": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+    "api_model": "glm-4-flash",
 }
 
 
@@ -195,6 +198,9 @@ def build_critic_preference_pairs(
     max_lora_rank: int = 256,
     engine=None,
     input_dir: str = "output/society/classified",
+    api_key: str = "",
+    api_base: str = "",
+    api_model: str = "",
 ) -> List[Dict[str, Any]]:
     """
     Build DPO preference pairs for Critic training using Algorithm 1.
@@ -316,6 +322,9 @@ def build_critic_preference_pairs(
                 balance=False, seed=seed, use_api=True,
                 cache_dir=input_dir,
                 pre_classified_file=os.path.join(input_dir, "classified_data.json"),
+                api_key=api_key,
+                api_base=api_base,
+                api_model=api_model,
             )
             routed_items = splitter.split_by_error_profile(
                 samples=[p["sample"] for p in raw_pairs],
@@ -363,6 +372,18 @@ def build_critic_preference_pairs(
                 f"  {len(preference_pairs)}/{len(raw_pairs)} pairs "
                 f"selected for skill '{skill.value}'"
             )
+
+            # Log assigned_skill distribution to verify routing is working
+            if preference_pairs:
+                from collections import Counter
+                skill_dist = Counter(
+                    p["metadata"]["assigned_skill"]
+                    for p in preference_pairs
+                )
+                logger.info(
+                    f"  [{critic_skill}] assigned_skill distribution: "
+                    f"{dict(skill_dist)}"
+                )
         else:
             logger.warning(f"  No raw pairs produced for '{critic_skill}'")
 
@@ -470,6 +491,20 @@ def train_critic_dpo(
 
 def main():
     args = parse_args()
+
+    # Handle API key for live error-profile classification
+    api_key = args.api_key
+    if not api_key:
+        api_key = os.environ.get("GLM_API_KEY", "")
+    if api_key:
+        os.environ["GLM_API_KEY"] = api_key
+    else:
+        logger.warning(
+            "GLM_API_KEY not set (neither config nor env var). "
+            "Unseen raw pairs from Algorithm 1 will be routed to general pool."
+        )
+    api_base = getattr(args, "api_base", "https://open.bigmodel.cn/api/paas/v4/chat/completions")
+    api_model = getattr(args, "api_model", "glm-4-flash")
 
     # Setup directories
     input_dir = args.input_dir
@@ -633,6 +668,9 @@ def main():
                 max_lora_rank=args.max_lora_rank,
                 engine=shared_engine,
                 input_dir=input_dir,
+                api_key=api_key,
+                api_base=api_base,
+                api_model=api_model,
             )
 
             if preference_pairs:

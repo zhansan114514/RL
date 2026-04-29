@@ -356,9 +356,38 @@ def _parse_error_profile_response(response: str) -> Optional[ErrorProfileResult]
 # ============================================================
 
 def _compute_sample_hash(question: str, response: str) -> str:
-    """Compute a hash for caching."""
+    """Compute a hash for caching reasoning style (question + response only)."""
     import hashlib
     content = f"{question}||{response}"
+    return hashlib.md5(content.encode()).hexdigest()[:12]
+
+
+def _compute_error_profile_hash(
+    question: str,
+    response: str,
+    correct_answer: str = "",
+    choices: str = "",
+    dataset_name: str = "",
+    task_type: str = "",
+    subject: str = "",
+) -> str:
+    """Compute a hash for caching error profiles (includes full context).
+
+    Unlike reasoning style, error profiles depend on the full problem context
+    (choices, correct answer, dataset, task type, subject).  Using only
+    question+response would cause cache pollution across datasets with
+    different choices or task types.
+    """
+    import hashlib
+    content = json.dumps({
+        "dataset_name": dataset_name,
+        "task_type": task_type,
+        "subject": subject,
+        "question": question,
+        "choices": choices,
+        "response": response,
+        "correct_answer": correct_answer,
+    }, sort_keys=True, ensure_ascii=False)
     return hashlib.md5(content.encode()).hexdigest()[:12]
 
 
@@ -392,6 +421,9 @@ def classify_reasoning_style(
     correct_answer: str = "",
     use_api: bool = True,
     cache_dir: str = "output/society/classified",
+    api_key: str = "",
+    api_base: str = "",
+    api_model: str = "",
 ) -> ReasoningStyleResult:
     """
     Classify the reasoning style of a correct response.
@@ -419,7 +451,12 @@ def classify_reasoning_style(
             response=response[:2000],
             answer=correct_answer,
         )
-        api_response = _call_api(prompt)
+        api_response = _call_api(
+            prompt,
+            api_url=api_base or DEFAULT_API_URL,
+            api_key=api_key or DEFAULT_API_KEY,
+            model=api_model or DEFAULT_API_MODEL,
+        )
         style = _parse_style_response(api_response)
 
         if style is not None:
@@ -456,15 +493,34 @@ def classify_error_profile(
     subject: str = "",
     use_api: bool = True,
     cache_dir: str = "output/society/classified",
+    api_key: str = "",
+    api_base: str = "",
+    api_model: str = "",
 ) -> ErrorProfileResult:
     """
     Classify the multi-dimensional error profile of an incorrect response.
 
-    Uses GLM API with local caching.
+    Uses GLM API with local caching.  The cache key includes the full problem
+    context (dataset_name, task_type, subject, choices, correct_answer) to
+    avoid cache pollution across datasets with different contexts.
+
     Raises ClassificationError if use_api=True but API is unavailable
     and no cached result exists.
     """
-    sample_hash = _compute_sample_hash(question, response)
+    if isinstance(choices, (list, dict)):
+        choices_text = json.dumps(choices, ensure_ascii=False)
+    else:
+        choices_text = str(choices or "")
+
+    sample_hash = _compute_error_profile_hash(
+        question=question,
+        response=response,
+        correct_answer=correct_answer,
+        choices=choices_text,
+        dataset_name=dataset_name,
+        task_type=task_type,
+        subject=subject,
+    )
     cache_path = Path(cache_dir) / f"error_profile_{sample_hash}.json"
 
     # Check cache first
@@ -482,11 +538,6 @@ def classify_error_profile(
 
     # API classification
     if use_api:
-        if isinstance(choices, (list, dict)):
-            choices_text = json.dumps(choices, ensure_ascii=False)
-        else:
-            choices_text = str(choices or "")
-
         prompt = ERROR_PROFILE_PROMPT.format(
             dataset_name=dataset_name or "unknown",
             task_type=task_type or "unknown",
@@ -497,7 +548,13 @@ def classify_error_profile(
             extracted_answer=extracted_answer,
             correct_answer=correct_answer,
         )
-        api_response = _call_api(prompt, max_tokens=512)
+        api_response = _call_api(
+            prompt,
+            api_url=api_base or DEFAULT_API_URL,
+            api_key=api_key or DEFAULT_API_KEY,
+            model=api_model or DEFAULT_API_MODEL,
+            max_tokens=512,
+        )
         profile = _parse_error_profile_response(api_response)
 
         if profile is not None:
@@ -525,12 +582,25 @@ def classify_error_profile(
 class DataClassifier:
     """Convenience wrapper for classification functions."""
 
+    def __init__(
+        self,
+        api_key: str = "",
+        api_base: str = "",
+        api_model: str = "",
+    ):
+        self._api_key = api_key
+        self._api_base = api_base
+        self._api_model = api_model
+
     def classify_reasoning_style(
         self, response: str, question: str, correct_answer: str = "",
         use_api: bool = True, cache_dir: str = "output/society/classified",
     ) -> ReasoningStyleResult:
         return classify_reasoning_style(
-            response, question, correct_answer, use_api, cache_dir
+            response, question, correct_answer, use_api, cache_dir,
+            api_key=self._api_key,
+            api_base=self._api_base,
+            api_model=self._api_model,
         )
 
     def classify_error_profile(
@@ -551,4 +621,7 @@ class DataClassifier:
             subject=subject,
             use_api=use_api,
             cache_dir=cache_dir,
+            api_key=self._api_key,
+            api_base=self._api_base,
+            api_model=self._api_model,
         )

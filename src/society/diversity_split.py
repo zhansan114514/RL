@@ -69,6 +69,9 @@ class DiversitySplit:
         use_api: bool = True,
         cache_dir: str = "output/society/classified",
         pre_classified_file: Optional[str] = None,
+        api_key: str = "",
+        api_base: str = "",
+        api_model: str = "",
     ):
         self.balance = balance
         self.rng = np.random.default_rng(seed)
@@ -76,6 +79,9 @@ class DiversitySplit:
         self.cache_dir = cache_dir
         self.pre_classified_file = pre_classified_file
         self._pre_classified: Optional[dict] = None
+        self._api_key = api_key
+        self._api_base = api_base
+        self._api_model = api_model
 
         if pre_classified_file:
             self._pre_classified = self._load_pre_classified(pre_classified_file)
@@ -190,6 +196,9 @@ class DiversitySplit:
                         correct_answer=answer,
                         use_api=self.use_api,
                         cache_dir=self.cache_dir,
+                        api_key=self._api_key,
+                        api_base=self._api_base,
+                        api_model=self._api_model,
                     )
                     style = result.style
                 except ClassificationError as e:
@@ -264,6 +273,9 @@ class DiversitySplit:
                         subject=sample.get("subject", sample.get("category", "")),
                         use_api=self.use_api,
                         cache_dir=self.cache_dir,
+                        api_key=self._api_key,
+                        api_base=self._api_base,
+                        api_model=self._api_model,
                     )
                     profile = {
                         "scores": result.scores,

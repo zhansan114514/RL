@@ -55,6 +55,9 @@ STEP_DEFAULTS = {
     "actor_temperature": 0.7,
     "actor_max_tokens": 512,
     "critic_max_tokens": 256,
+    "api_key": "",
+    "api_base": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
+    "api_model": "glm-4-flash",
 }
 
 
@@ -258,6 +261,19 @@ def main():
     logger.info("[Step 4] Running society alternating training...")
     from src.society.society_trainer import society_alternating_train
 
+    # Resolve API key for live error-profile classification
+    api_key = getattr(args, "api_key", "")
+    if not api_key:
+        api_key = os.environ.get("GLM_API_KEY", "")
+    if api_key:
+        os.environ["GLM_API_KEY"] = api_key
+    else:
+        logger.warning(
+            "GLM_API_KEY not set. Unseen raw pairs will be routed to general pool."
+        )
+    api_base = getattr(args, "api_base", "https://open.bigmodel.cn/api/paas/v4/chat/completions")
+    api_model = getattr(args, "api_model", "glm-4-flash")
+
     result = society_alternating_train(
         registry=registry,
         dataset=train_data,
@@ -282,6 +298,9 @@ def main():
         max_model_len=args.max_model_len,
         max_samples=len(train_data),
         classifications_cache_dir=args.cache_dir + "/classified",
+        api_key=api_key,
+        api_base=api_base,
+        api_model=api_model,
     )
 
     # Save final registry
