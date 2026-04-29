@@ -319,10 +319,10 @@ class DiversitySplit:
         all_items: list[RoutedTrainingItem],
         target_skill: CriticSkill,
         max_items: int = 512,
-        min_specialty_items: int = 64,
+        min_specialty_items: int = 32,
         min_specialty_ratio: float = 0.08,
-        specialty_ratio: float = 0.6,
-        general_ratio: float = 0.3,
+        specialty_ratio: float = 0.7,
+        general_ratio: float = 0.2,
         calibration_ratio: float = 0.1,
     ) -> list[RoutedTrainingItem]:
         """

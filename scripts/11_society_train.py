@@ -49,10 +49,10 @@ STEP_DEFAULTS = {
     "max_length": 2048,
     "beta": 0.1,
     "min_pairs_per_critic": 64,
-    "min_specialty_items": 64,
+    "min_specialty_items": 32,
     "min_specialty_ratio": 0.08,
-    "specialty_ratio": 0.6,
-    "general_ratio": 0.3,
+    "specialty_ratio": 0.7,
+    "general_ratio": 0.2,
     "calibration_ratio": 0.1,
     "seed": 42,
     "device": 0,
@@ -127,11 +127,24 @@ def load_agent_registry(
     if os.path.exists(critic_registry_file):
         with open(critic_registry_file) as f:
             data = json.load(f)
-            critic_paths = {
-                skill_name: info["model_path"]
-                for skill_name, info in data["critics"].items()
-            }
-        logger.info(f"Loaded {len(critic_paths)} critics from registry")
+            trained_count = 0
+            frozen_count = 0
+            for skill_name, info in data["critics"].items():
+                path = info.get("model_path", "")
+                status = info.get("status", "active" if path else "frozen_base")
+                critic_paths[skill_name] = path
+                if path:
+                    trained_count += 1
+                else:
+                    frozen_count += 1
+                    logger.info(
+                        f"critic_{skill_name}: {status}, participates with "
+                        "base model only"
+                    )
+        logger.info(
+            f"Loaded {len(critic_paths)} critics from registry "
+            f"({trained_count} trained LoRA, {frozen_count} frozen_base)"
+        )
     else:
         logger.warning(f"Critic registry not found: {critic_registry_file}")
 
@@ -200,6 +213,11 @@ def create_agent_registry(
             max_tokens=critic_max_tokens,
         )
         registry.register(config)
+        if not path:
+            logger.info(
+                f"critic_{skill.value}: frozen_base, participates with base "
+                "model only (no LoRA)"
+            )
 
     logger.info(f"Created registry with {len(registry.list_actors())} actors and {len(registry.list_critics())} critics")
 

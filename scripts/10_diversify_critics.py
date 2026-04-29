@@ -43,8 +43,8 @@ STEP_DEFAULTS = {
     "input_dir": "output/society/classified",
     "actor_base_dir": "output/society/actors",
     "output_dir": "output/society/critics",
-    "critic_skills": ["computation", "reasoning", "knowledge", "verification"],
-    "max_delib_samples": 50,
+    "critic_skills": ["reasoning", "knowledge", "computation", "verification"],
+    "max_delib_samples": 300,
     "num_rounds": 5,
     "num_simulations": 5,
     "reward_threshold": 0.0,
@@ -57,10 +57,10 @@ STEP_DEFAULTS = {
     "max_length": 2048,
     "beta": 0.1,
     "min_pairs_per_critic": 64,
-    "min_specialty_items": 64,
+    "min_specialty_items": 32,
     "min_specialty_ratio": 0.08,
-    "specialty_ratio": 0.6,
-    "general_ratio": 0.3,
+    "specialty_ratio": 0.7,
+    "general_ratio": 0.2,
     "calibration_ratio": 0.1,
     "seed": 42,
     "device": 0,
@@ -207,10 +207,10 @@ def build_critic_preference_pairs(
     api_key: str = "",
     api_base: str = "",
     api_model: str = "",
-    min_specialty_items: int = 64,
+    min_specialty_items: int = 32,
     min_specialty_ratio: float = 0.08,
-    specialty_ratio: float = 0.6,
-    general_ratio: float = 0.3,
+    specialty_ratio: float = 0.7,
+    general_ratio: float = 0.2,
     calibration_ratio: float = 0.1,
 ) -> List[Dict[str, Any]]:
     """
@@ -578,6 +578,13 @@ def main():
         f"min_specialty_items={args.min_specialty_items}, "
         f"min_specialty_ratio={args.min_specialty_ratio}"
     )
+    if args.min_pairs_per_critic > args.max_delib_samples:
+        logger.warning(
+            "min_pairs_per_critic > max_delib_samples; no critic can become "
+            "trained unless the selected training mix can exceed the sample cap. "
+            "Current mix uses max_items=max_delib_samples, so this configuration "
+            "will freeze every critic that relies on generated pairs."
+        )
     logger.info(
         "  Training mix ratios: "
         f"specialty={args.specialty_ratio}, "
@@ -754,7 +761,8 @@ def main():
                     logger.info(
                         f"  Critic '{critic_skill}' inactive: "
                         f"{len(preference_pairs)} selected pairs < "
-                        f"{args.min_pairs_per_critic} minimum"
+                        f"{args.min_pairs_per_critic} minimum; will participate "
+                        "as frozen_base with base model only"
                     )
                     continue
 
@@ -789,7 +797,8 @@ def main():
                 }
                 logger.info(
                     f"  Skipping '{critic_skill}': {len(preference_pairs)} pairs < "
-                    f"{args.min_pairs_per_critic} minimum"
+                    f"{args.min_pairs_per_critic} minimum; will participate as "
+                    "frozen_base with base model only"
                 )
                 continue
 
@@ -831,6 +840,8 @@ def main():
                 "model_path": critic_paths[critic_skill],
                 "base_model": args.model_name,
                 "status": "active",
+                "participates": True,
+                "base_model_only": False,
             }
         else:
             registry_critics[critic_skill] = {
@@ -838,6 +849,8 @@ def main():
                 "model_path": "",
                 "base_model": args.model_name,
                 "status": "frozen_base",
+                "participates": True,
+                "base_model_only": True,
                 "inactive_reason": inactive_critics.get(critic_skill, {}),
             }
 
@@ -866,11 +879,18 @@ def main():
 
     logger.info("=" * 60)
     logger.info("Critic diversification complete!")
-    logger.info(f"  Trained {len(critic_paths)} critics:")
+    logger.info(f"  Trained LoRA critics: {len(critic_paths)}")
     for critic_skill, path in critic_paths.items():
         logger.info(f"    {critic_skill}: {path}")
     if inactive_critics:
-        logger.info(f"  Inactive critics: {inactive_critics}")
+        logger.info("  Frozen-base critics participate with base model only:")
+        for critic_skill in args.critic_skills:
+            if critic_skill not in critic_paths:
+                logger.info(
+                    f"    critic_{critic_skill}: frozen_base, "
+                    "participates with base model only"
+                )
+        logger.info(f"  Frozen-base reasons: {inactive_critics}")
     logger.info("=" * 60)
 
 

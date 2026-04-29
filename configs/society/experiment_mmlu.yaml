@@ -7,7 +7,7 @@ common:
   dataset: "mmlu"
   cache_dir: "output/society_mmlu"
   seed: 42
-  max_samples: 50
+  max_samples: 300
   device: 6
   dtype: "bfloat16"
   gpu_memory_utilization: 0.60
@@ -47,7 +47,14 @@ step04_diversify_critics:
   input_dir: "output/society_mmlu/classified"
   actor_base_dir: "output/society_mmlu/actors"
   output_dir: "output/society_mmlu/critics"
-  critic_skills: ["computation", "reasoning", "knowledge", "verification"]
+  critic_skills: ["reasoning", "knowledge", "computation", "verification"]
+  max_delib_samples: 300
+  min_pairs_per_critic: 64
+  min_specialty_items: 32
+  min_specialty_ratio: 0.08
+  specialty_ratio: 0.7
+  general_ratio: 0.2
+  calibration_ratio: 0.1
   lora_r: 256
   lora_alpha: 512
   learning_rate: 5.0e-5

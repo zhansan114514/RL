@@ -26,8 +26,14 @@ step04_diversify_critics:
   input_dir: "output/society_mmlu/classified_v2"
   actor_base_dir: "output/society_mmlu/actors"
   output_dir: "output/society_mmlu/critics_v2"
-  critic_skills: ["computation", "reasoning", "knowledge", "verification"]
-  max_delib_samples: 5
+  critic_skills: ["reasoning", "knowledge", "computation", "verification"]
+  max_delib_samples: 20
+  min_pairs_per_critic: 5
+  min_specialty_items: 3
+  min_specialty_ratio: 0.05
+  specialty_ratio: 0.7
+  general_ratio: 0.2
+  calibration_ratio: 0.1
   num_rounds: 2
   num_simulations: 1
   lora_r: 256

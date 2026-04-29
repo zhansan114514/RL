@@ -46,7 +46,14 @@ step03_diversify_actors:
 step04_diversify_critics:
   input_dir: "output/society/classified"
   output_dir: "output/society/critics"
-  critic_skills: ["computation", "reasoning", "knowledge", "verification"]
+  critic_skills: ["reasoning", "knowledge", "computation", "verification"]
+  max_delib_samples: 300
+  min_pairs_per_critic: 64
+  min_specialty_items: 32
+  min_specialty_ratio: 0.08
+  specialty_ratio: 0.7
+  general_ratio: 0.2
+  calibration_ratio: 0.1
   lora_r: 128
   lora_alpha: 256
   learning_rate: 5.0e-5
