@@ -5,7 +5,7 @@ Tests cover:
 1. agent_registry.py - AgentRegistry, AgentConfig, enums
 2. router.py - CriticRouter, parse_confidence, build_critic_feedback
 3. data_classifier.py - DataClassifier, API classification, ClassificationError
-4. diversity_split.py - DiversitySplit, style/error type splitting
+4. diversity_split.py - DiversitySplit, style/error profile splitting
 5. inference_pipeline.py - InferencePipeline, voting strategies, ABLATION_CONFIGS
 6. Phase 0.1 integration - MATH/GSM answer extraction
 """
@@ -23,7 +23,7 @@ from src.society.agent_registry import (
     AgentConfig,
     AgentRole,
     ReasoningStyle,
-    ErrorType,
+    CriticSkill,
     ACTOR_STYLE_PROMPTS,
     CRITIC_SPECIALTY_PROMPTS,
     CRITIC_CONFIDENCE_SUFFIX,
@@ -41,13 +41,13 @@ from src.society.data_classifier import (
     DataClassifier,
     ClassificationError,
     classify_reasoning_style,
-    classify_error_type,
+    classify_error_profile,
     check_api_available,
     _parse_style_response,
-    _parse_error_response,
+    _parse_error_profile_response,
     _compute_sample_hash,
     ReasoningStyleResult,
-    ErrorTypeResult,
+    ErrorProfileResult,
 )
 from src.society.diversity_split import DiversitySplit
 from src.society.inference_pipeline import (
@@ -85,13 +85,13 @@ class TestAgentConfig:
     def test_create_critic_config(self):
         """Should create Critic config with error specialty."""
         config = AgentConfig(
-            name="critic_arithmetic",
+            name="critic_computation",
             role=AgentRole.CRITIC,
             model_path="/models/base",
-            error_specialty=ErrorType.ARITHMETIC,
+            error_specialty=CriticSkill.COMPUTATION,
         )
         assert config.role == AgentRole.CRITIC
-        assert config.error_specialty == ErrorType.ARITHMETIC
+        assert config.error_specialty == CriticSkill.COMPUTATION
         assert config.reasoning_style is None
 
     def test_display_name_actor(self):
@@ -110,9 +110,9 @@ class TestAgentConfig:
             name="critic_1",
             role=AgentRole.CRITIC,
             model_path="/models/base",
-            error_specialty=ErrorType.LOGIC,
+            error_specialty=CriticSkill.REASONING,
         )
-        assert config.display_name == "Critic-logic"
+        assert config.display_name == "Critic-reasoning"
 
     def test_system_prompt_actor(self):
         """Actor system prompt should be built from style."""
@@ -130,7 +130,7 @@ class TestAgentConfig:
             name="critic_1",
             role=AgentRole.CRITIC,
             model_path="/models/base",
-            error_specialty=ErrorType.VERIFICATION,
+            error_specialty=CriticSkill.VERIFICATION,
         )
         assert CRITIC_CONFIDENCE_SUFFIX in config.system_prompt
         assert "[Confidence: 0.X]" in config.system_prompt
@@ -159,7 +159,7 @@ class TestAgentConfig:
             "role": "critic",
             "model_path": "/models/base",
             "lora_path": "/models/lora",
-            "error_specialty": "arithmetic",
+            "error_specialty": "computation",
             "temperature": 0.8,
             "max_tokens": 512,
             "system_prompt": "Test prompt",
@@ -167,7 +167,7 @@ class TestAgentConfig:
         config = AgentConfig.from_dict(d)
         assert config.name == "test_critic"
         assert config.role == AgentRole.CRITIC
-        assert config.error_specialty == ErrorType.ARITHMETIC
+        assert config.error_specialty == CriticSkill.COMPUTATION
         assert config.lora_path == "/models/lora"
 
 
@@ -195,7 +195,7 @@ class TestAgentRegistry:
         ))
         registry.register(AgentConfig(
             name="critic_1", role=AgentRole.CRITIC, model_path="/models/base",
-            error_specialty=ErrorType.ARITHMETIC,
+            error_specialty=CriticSkill.COMPUTATION,
         ))
         actors = registry.list_actors()
         assert len(actors) == 1
@@ -210,7 +210,7 @@ class TestAgentRegistry:
         ))
         registry.register(AgentConfig(
             name="critic_1", role=AgentRole.CRITIC, model_path="/models/base",
-            error_specialty=ErrorType.LOGIC,
+            error_specialty=CriticSkill.REASONING,
         ))
         critics = registry.list_critics()
         assert len(critics) == 1
@@ -238,11 +238,11 @@ class TestAgentRegistry:
         registry = AgentRegistry()
         registry.register(AgentConfig(
             name="critic_1", role=AgentRole.CRITIC, model_path="/models/base",
-            error_specialty=ErrorType.HALLUCINATION,
+            error_specialty=CriticSkill.KNOWLEDGE,
         ))
-        critic = registry.get_critic_by_specialty(ErrorType.HALLUCINATION)
+        critic = registry.get_critic_by_specialty(CriticSkill.KNOWLEDGE)
         assert critic is not None
-        assert critic.error_specialty == ErrorType.HALLUCINATION
+        assert critic.error_specialty == CriticSkill.KNOWLEDGE
 
     def test_get_all_pairs(self):
         """Should get all actor-critic pairs."""
@@ -257,11 +257,11 @@ class TestAgentRegistry:
         ))
         registry.register(AgentConfig(
             name="critic_1", role=AgentRole.CRITIC, model_path="/models/base",
-            error_specialty=ErrorType.ARITHMETIC,
+            error_specialty=CriticSkill.COMPUTATION,
         ))
         registry.register(AgentConfig(
             name="critic_2", role=AgentRole.CRITIC, model_path="/models/base",
-            error_specialty=ErrorType.LOGIC,
+            error_specialty=CriticSkill.REASONING,
         ))
         pairs = registry.get_all_pairs()
         assert len(pairs) == 4  # 2 actors * 2 critics
@@ -279,7 +279,7 @@ class TestAgentRegistry:
             name="critic_1",
             role=AgentRole.CRITIC,
             model_path="/models/qwen",
-            error_specialty=ErrorType.ARITHMETIC,
+            error_specialty=CriticSkill.COMPUTATION,
         ))
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
@@ -309,10 +309,10 @@ class TestAgentRegistry:
         actor_styles = {a.reasoning_style for a in actors}
         assert actor_styles == set(ReasoningStyle)
 
-        # Check all error types are present
+        # Check all error profiles are present
         critics = registry.list_critics()
         critic_specialties = {c.error_specialty for c in critics}
-        assert critic_specialties == set(ErrorType)
+        assert critic_specialties == set(CriticSkill)
 
     def test_repr(self):
         """String representation should show actor/critic counts."""
@@ -323,7 +323,7 @@ class TestAgentRegistry:
         ))
         registry.register(AgentConfig(
             name="critic_1", role=AgentRole.CRITIC, model_path="/models/base",
-            error_specialty=ErrorType.ARITHMETIC,
+            error_specialty=CriticSkill.COMPUTATION,
         ))
         assert "1 actors" in repr(registry)
         assert "1 critics" in repr(registry)
@@ -338,12 +338,12 @@ class TestEnums:
         assert ReasoningStyle.DIRECT.value == "direct"
         assert ReasoningStyle.BACKTRACKING.value == "backtracking"
 
-    def test_error_type_values(self):
-        """ErrorType should have correct values."""
-        assert ErrorType.ARITHMETIC.value == "arithmetic"
-        assert ErrorType.LOGIC.value == "logic"
-        assert ErrorType.HALLUCINATION.value == "hallucination"
-        assert ErrorType.VERIFICATION.value == "verification"
+    def test_critic_skill_values(self):
+        """CriticSkill should have correct values."""
+        assert CriticSkill.COMPUTATION.value == "computation"
+        assert CriticSkill.REASONING.value == "reasoning"
+        assert CriticSkill.KNOWLEDGE.value == "knowledge"
+        assert CriticSkill.VERIFICATION.value == "verification"
 
 
 # ============================================================
@@ -397,7 +397,7 @@ class TestParseAnswerCorrect:
         assert parse_answer_correct("[ANSWER_CORRECT: No]") is False
 
     def test_parse_with_surrounding_text(self):
-        text = "The solution has a logic error.\n[Answer_Correct: no]\n[Confidence: 0.85]"
+        text = "The solution has a reasoning error.\n[Answer_Correct: no]\n[Confidence: 0.85]"
         assert parse_answer_correct(text) is False
 
     def test_parse_missing_tag(self):
@@ -417,13 +417,13 @@ class TestBuildCriticFeedback:
             name="critic_1",
             role=AgentRole.CRITIC,
             model_path="/models/base",
-            error_specialty=ErrorType.ARITHMETIC,
+            error_specialty=CriticSkill.COMPUTATION,
         )
         response = "Check your math [Confidence: 0.8]"
         feedback = build_critic_feedback(config, response)
 
         assert feedback.critic_name == "critic_1"
-        assert feedback.error_specialty == ErrorType.ARITHMETIC
+        assert feedback.error_specialty == CriticSkill.COMPUTATION
         assert feedback.confidence == 0.8
         assert feedback.feedback_text == "Check your math"
         assert feedback.answer_correct is None
@@ -435,13 +435,13 @@ class TestBuildCriticFeedback:
             name="critic_1",
             role=AgentRole.CRITIC,
             model_path="/models/base",
-            error_specialty=ErrorType.LOGIC,
+            error_specialty=CriticSkill.REASONING,
         )
-        response = "Check your logic"
+        response = "Check your reasoning"
         feedback = build_critic_feedback(config, response)
 
         assert feedback.confidence == 0.5
-        assert feedback.feedback_text == "Check your logic"
+        assert feedback.feedback_text == "Check your reasoning"
         assert feedback.answer_correct is None
 
     def test_build_with_answer_correct(self):
@@ -450,7 +450,7 @@ class TestBuildCriticFeedback:
             name="critic_1",
             role=AgentRole.CRITIC,
             model_path="/models/base",
-            error_specialty=ErrorType.ARITHMETIC,
+            error_specialty=CriticSkill.COMPUTATION,
         )
         response = "The answer is wrong.\n[Answer_Correct: no]\n[Confidence: 0.9]"
         feedback = build_critic_feedback(config, response)
@@ -478,7 +478,7 @@ class TestCriticRouter:
         feedbacks = [
             CriticFeedback(
                 critic_name="critic_1",
-                error_specialty=ErrorType.ARITHMETIC,
+                error_specialty=CriticSkill.COMPUTATION,
                 feedback_text="Check math",
                 confidence=0.8,
             )
@@ -492,10 +492,10 @@ class TestCriticRouter:
         """Should select top-k by confidence."""
         router = CriticRouter(top_k=2)
         feedbacks = [
-            CriticFeedback("c1", ErrorType.ARITHMETIC, "f1", 0.5),
-            CriticFeedback("c2", ErrorType.LOGIC, "f2", 0.9),
-            CriticFeedback("c3", ErrorType.HALLUCINATION, "f3", 0.7),
-            CriticFeedback("c4", ErrorType.VERIFICATION, "f4", 0.6),
+            CriticFeedback("c1", CriticSkill.COMPUTATION, "f1", 0.5),
+            CriticFeedback("c2", CriticSkill.REASONING, "f2", 0.9),
+            CriticFeedback("c3", CriticSkill.KNOWLEDGE, "f3", 0.7),
+            CriticFeedback("c4", CriticSkill.VERIFICATION, "f4", 0.6),
         ]
         result = router.route(feedbacks)
 
@@ -507,8 +507,8 @@ class TestCriticRouter:
         """Should filter by min_confidence."""
         router = CriticRouter(min_confidence=0.5)
         feedbacks = [
-            CriticFeedback("c1", ErrorType.ARITHMETIC, "f1", 0.3),
-            CriticFeedback("c2", ErrorType.LOGIC, "f2", 0.7),
+            CriticFeedback("c1", CriticSkill.COMPUTATION, "f1", 0.3),
+            CriticFeedback("c2", CriticSkill.REASONING, "f2", 0.7),
         ]
         result = router.route(feedbacks)
 
@@ -519,8 +519,8 @@ class TestCriticRouter:
         """Should fallback to uniform when all below min_confidence."""
         router = CriticRouter(min_confidence=0.8, fallback_to_uniform=True)
         feedbacks = [
-            CriticFeedback("c1", ErrorType.ARITHMETIC, "f1", 0.3),
-            CriticFeedback("c2", ErrorType.LOGIC, "f2", 0.5),
+            CriticFeedback("c1", CriticSkill.COMPUTATION, "f1", 0.3),
+            CriticFeedback("c2", CriticSkill.REASONING, "f2", 0.5),
         ]
         result = router.route(feedbacks)
 
@@ -531,7 +531,7 @@ class TestCriticRouter:
         """Should return empty when all below min_confidence and no fallback."""
         router = CriticRouter(min_confidence=0.8, fallback_to_uniform=False)
         feedbacks = [
-            CriticFeedback("c1", ErrorType.ARITHMETIC, "f1", 0.3),
+            CriticFeedback("c1", CriticSkill.COMPUTATION, "f1", 0.3),
         ]
         result = router.route(feedbacks)
 
@@ -542,8 +542,8 @@ class TestCriticRouter:
         router_low = CriticRouter(temperature=0.1)
         router_high = CriticRouter(temperature=5.0)
         feedbacks = [
-            CriticFeedback("c1", ErrorType.ARITHMETIC, "f1", 0.9),
-            CriticFeedback("c2", ErrorType.LOGIC, "f2", 0.1),
+            CriticFeedback("c1", CriticSkill.COMPUTATION, "f1", 0.9),
+            CriticFeedback("c2", CriticSkill.REASONING, "f2", 0.1),
         ]
 
         result_low = router_low.route(feedbacks)
@@ -584,13 +584,13 @@ class TestClassificationError:
                             cache_dir=tmpdir,
                         )
 
-    def test_error_type_raises_when_no_api_key(self):
+    def test_error_profile_raises_when_no_api_key(self):
         """Should raise ClassificationError when GLM_API_KEY is not set."""
         with patch("src.society.data_classifier.DEFAULT_API_KEY", ""):
             with patch("src.society.data_classifier._compute_sample_hash", return_value="unique_hash"):
                 with tempfile.TemporaryDirectory() as tmpdir:
                     with pytest.raises(ClassificationError, match="GLM_API_KEY"):
-                        classify_error_type(
+                        classify_error_profile(
                             response="Some response",
                             question="Some question",
                             use_api=True,
@@ -653,23 +653,48 @@ class TestParseStyleResponse:
 
 
 class TestParseErrorResponse:
-    """Test parsing API response to ErrorType."""
+    """Test parsing API response to error profile."""
 
-    def test_parse_arithmetic(self):
-        assert _parse_error_response("ARITHMETIC") == ErrorType.ARITHMETIC
-        assert _parse_error_response("arithmetic") == ErrorType.ARITHMETIC
+    def test_parse_computation(self):
+        result = _parse_error_profile_response(json.dumps({
+            "scores": {"computation": 0.9, "reasoning": 0.1, "knowledge": 0.0, "grounding": 0.0, "verification": 0.0},
+            "primary": "computation",
+            "secondary": [],
+            "confidence": 0.8,
+            "evidence": "calc",
+        }))
+        assert result.primary == "computation"
+        assert result.scores["computation"] == 0.9
 
-    def test_parse_logic(self):
-        assert _parse_error_response("LOGIC") == ErrorType.LOGIC
+    def test_parse_reasoning(self):
+        result = _parse_error_profile_response(json.dumps({
+            "scores": {"reasoning": 0.8},
+            "primary": "reasoning",
+            "secondary": [],
+            "confidence": 0.7,
+        }))
+        assert result.primary == "reasoning"
 
-    def test_parse_hallucination(self):
-        assert _parse_error_response("HALLUCINATION") == ErrorType.HALLUCINATION
+    def test_parse_knowledge(self):
+        result = _parse_error_profile_response(json.dumps({
+            "scores": {"knowledge": 0.8},
+            "primary": "knowledge",
+            "secondary": ["grounding"],
+            "confidence": 0.7,
+        }))
+        assert result.primary == "knowledge"
 
     def test_parse_verification(self):
-        assert _parse_error_response("VERIFICATION") == ErrorType.VERIFICATION
+        result = _parse_error_profile_response(json.dumps({
+            "scores": {"verification": 0.8},
+            "primary": "verification",
+            "secondary": [],
+            "confidence": 0.7,
+        }))
+        assert result.primary == "verification"
 
     def test_parse_invalid(self):
-        assert _parse_error_response("INVALID") is None
+        assert _parse_error_profile_response("INVALID") is None
 
 
 class TestComputeSampleHash:
@@ -706,19 +731,31 @@ class TestDataClassifier:
                 assert result.style == ReasoningStyle.ALGEBRAIC
                 assert result.confidence == 0.9
 
-    def test_classify_error_type_with_api_mock(self):
-        """Should use API response for error type."""
+    def test_classify_error_profile_with_api_mock(self):
+        """Should use API response for error profile."""
         with patch("src.society.data_classifier._call_api") as mock_api:
-            mock_api.return_value = "LOGIC"
+            mock_api.return_value = json.dumps({
+                "scores": {
+                    "computation": 0.0,
+                    "reasoning": 0.9,
+                    "knowledge": 0.1,
+                    "grounding": 0.0,
+                    "verification": 0.0,
+                },
+                "primary": "reasoning",
+                "secondary": [],
+                "confidence": 0.9,
+                "evidence": "bad inference",
+            })
             with tempfile.TemporaryDirectory() as tmpdir:
                 classifier = DataClassifier()
-                result = classifier.classify_error_type(
-                    response="Wrong logic",
+                result = classifier.classify_error_profile(
+                    response="Wrong reasoning",
                     question="Problem",
                     use_api=True,
                     cache_dir=tmpdir,
                 )
-                assert result.error_type == ErrorType.LOGIC
+                assert result.primary == "reasoning"
                 assert result.confidence == 0.9
 
     def test_classify_with_cache(self):
@@ -765,7 +802,7 @@ class TestDataClassifier:
 # ============================================================
 
 class TestDiversitySplit:
-    """Test data splitting by reasoning style and error type."""
+    """Test data splitting by reasoning style and error profile."""
 
     def test_split_by_reasoning_style(self):
         """Should split samples by reasoning style."""
@@ -805,8 +842,8 @@ class TestDiversitySplit:
         assert len(splits[ReasoningStyle.BACKTRACKING]) == 3
         assert len(splits[ReasoningStyle.DIRECT]) == 3
 
-    def test_split_by_error_type(self):
-        """Should split by error type."""
+    def test_split_by_error_profile(self):
+        """Should split by error profile."""
         splitter = DiversitySplit(balance=False)
         samples = [
             {"question": f"Q{i}", "answer": "42"}
@@ -817,18 +854,43 @@ class TestDiversitySplit:
             "Logical fallacy here",
             "Calculation error",
             "Should have verified",
-            "Wrong arithmetic",
+            "Wrong computation",
         ]
+
+        def profile_json(primary):
+            scores = {
+                "computation": 0.0,
+                "reasoning": 0.0,
+                "knowledge": 0.0,
+                "grounding": 0.0,
+                "verification": 0.0,
+            }
+            scores[primary] = 0.9
+            return json.dumps({
+                "scores": scores,
+                "primary": primary,
+                "secondary": [],
+                "confidence": 0.9,
+                "evidence": primary,
+            })
 
         api_responses = [
-            "HALLUCINATION", "LOGIC", "ARITHMETIC", "VERIFICATION", "ARITHMETIC",
+            profile_json("knowledge"),
+            profile_json("reasoning"),
+            profile_json("computation"),
+            profile_json("verification"),
+            profile_json("computation"),
         ]
         with patch("src.society.data_classifier._call_api", side_effect=api_responses):
-            splits = splitter.split_by_error_type(samples, responses)
+            splits = splitter.split_by_error_profile(samples, responses)
 
-        # All error types should have some samples
-        total = sum(len(v) for v in splits.values())
-        assert total == 5
+        assert len(splits) == 5
+        assert {item.skill for item in splits} == {
+            CriticSkill.COMPUTATION,
+            CriticSkill.REASONING,
+            CriticSkill.KNOWLEDGE,
+            CriticSkill.VERIFICATION,
+        }
 
     def test_split_balancing(self):
         """Should balance splits when enabled."""

@@ -19,7 +19,7 @@ from typing import Optional
 
 import numpy as np
 
-from src.society.agent_registry import AgentConfig, ErrorType
+from src.society.agent_registry import AgentConfig, CriticSkill
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 class CriticFeedback:
     """Feedback from a single Critic."""
     critic_name: str
-    error_specialty: ErrorType
+    error_specialty: CriticSkill
     feedback_text: str
     confidence: float  # 0.0 to 1.0
     answer_correct: Optional[bool] = None  # Critic's judgment on Actor answer correctness
@@ -186,11 +186,7 @@ def build_critic_feedback(
 
     error_specialty = critic_config.error_specialty
     if error_specialty is None:
-        logger.warning(
-            f"Critic '{critic_config.name}' has no error_specialty set, "
-            f"defaulting to LOGIC. This may cause incorrect routing."
-        )
-        error_specialty = ErrorType.LOGIC
+        raise ValueError(f"Critic '{critic_config.name}' has no error_specialty set")
 
     return CriticFeedback(
         critic_name=critic_config.name,

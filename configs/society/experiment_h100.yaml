@@ -42,7 +42,7 @@ step03_diversify_actors:
 step04_diversify_critics:
   input_dir: "output/society/classified"
   output_dir: "output/society/critics"
-  error_types: ["arithmetic", "logic", "hallucination", "verification"]
+  critic_skills: ["computation", "reasoning", "knowledge", "verification"]
   lora_r: 256
   lora_alpha: 512
   learning_rate: 5.0e-5

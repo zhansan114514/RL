@@ -117,8 +117,8 @@ def load_agent_registry(
         with open(critic_registry_file) as f:
             data = json.load(f)
             critic_paths = {
-                error_type: info["model_path"]
-                for error_type, info in data["critics"].items()
+                skill_name: info["model_path"]
+                for skill_name, info in data["critics"].items()
             }
         logger.info(f"Loaded {len(critic_paths)} critics from registry")
     else:
@@ -145,7 +145,7 @@ def create_agent_registry(
         AgentConfig,
         AgentRole,
         resolve_reasoning_style,
-        resolve_error_type,
+        resolve_critic_skill,
     )
 
     registry = AgentRegistry(base_model_path=base_model)
@@ -171,17 +171,17 @@ def create_agent_registry(
         registry.register(config)
 
     # Register critics: model_path=base model, lora_path=LoRA checkpoint
-    for error_type, path in critic_paths.items():
+    for skill_name, path in critic_paths.items():
         try:
-            error = resolve_error_type(error_type)
+            skill = resolve_critic_skill(skill_name)
         except ValueError as e:
-            logger.error(f"Cannot resolve critic error type '{error_type}': {e}")
+            logger.error(f"Cannot resolve critic skill '{skill_name}': {e}")
             raise
 
         config = AgentConfig(
-            name=f"critic_{error.value}",
+            name=f"critic_{skill.value}",
             role=AgentRole.CRITIC,
-            error_specialty=error,
+            error_specialty=skill,
             model_path=base_model,
             lora_path=path,
             system_prompt="",

@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from src.society.agent_registry import AgentRegistry, AgentConfig, AgentRole, ReasoningStyle, ErrorType, CRITIC_SPECIALTY_PROMPTS
+from src.society.agent_registry import AgentRegistry, AgentConfig, AgentRole, ReasoningStyle
 from src.society.data_classifier import (
     classify_reasoning_style, ClassificationError,
 )
@@ -569,7 +569,8 @@ def _generate_critic_pairs_algorithm1(
       chosen  = positive_critic (guided toward correct answer)
       rejected = negative_critic (natural / guided toward wrong answer)
 
-    Error-type filtering via DiversitySplit ensures data-level diversification.
+    Error-profile routing via DiversitySplit ensures data-level diversification
+    without collapsing ambiguous MMLU-style errors into a single label.
     """
     from src.inference.vllm_server import VLLMInference
     from src.algorithms.deliberation import deliberate_batch
@@ -683,7 +684,7 @@ def _generate_critic_pairs_algorithm1(
             f"  [{critic.name}] Algorithm 1 produced {len(raw_pairs)} raw critic pairs"
         )
 
-        # Step 2: Filter by error type via DiversitySplit
+        # Step 2: Route by error profile, then build a general/specialty/calibration mix.
         if raw_pairs:
             # Try to use pre-classified data from phase 2 to ensure
             # single source of truth across all training phases
@@ -695,14 +696,25 @@ def _generate_critic_pairs_algorithm1(
                 cache_dir=classifications_cache_dir,
                 pre_classified_file=pre_classified if os.path.exists(pre_classified) else None,
             )
-            error_splits = splitter.split_by_error_type(
+            routed_items = splitter.split_by_error_profile(
                 samples=[p["sample"] for p in raw_pairs],
                 responses=[p["actor_response"] for p in raw_pairs],
                 correct_answers=[p["correct_answer"] for p in raw_pairs],
                 extracted_answers=[p["actor_answer"] or "" for p in raw_pairs],
+                dataset_name=dataset_name,
             )
 
-            specialty_items = error_splits.get(specialty, [])
+            if specialty is None:
+                raise ValueError(f"Critic '{critic.name}' has no error_specialty set")
+
+            critic_items = splitter.build_critic_training_mix(
+                all_items=routed_items,
+                target_skill=specialty,
+                general_ratio=0.6,
+                specialty_ratio=0.3,
+                calibration_ratio=0.1,
+                max_items=max_samples,
+            )
 
             # Build lookup dict for O(1) matching instead of O(N*M) scan
             pair_index: dict[tuple[str, str], dict] = {}
@@ -710,8 +722,8 @@ def _generate_critic_pairs_algorithm1(
                 key = (p["sample"].get("question", ""), p["actor_response"])
                 pair_index[key] = p
 
-            for sample, _response in specialty_items:
-                key = (sample.get("question", ""), _response)
+            for item in critic_items:
+                key = (item.sample.get("question", ""), item.response)
                 p = pair_index.get(key)
                 if p is not None:
                     preference_pairs.append({
@@ -720,7 +732,10 @@ def _generate_critic_pairs_algorithm1(
                         "rejected": p["rejected"],
                         "actor_response": p.get("actor_response", ""),
                         "metadata": {
-                            "error_type": specialty.value,
+                            "target_skill": specialty.value,
+                            "assigned_skill": item.skill.value if item.skill else "general",
+                            "routing_weight": item.weight,
+                            "error_profile": item.profile,
                             "delta": p["delta"],
                             "direction": p["direction"],
                         },
@@ -728,7 +743,7 @@ def _generate_critic_pairs_algorithm1(
 
         logger.info(
             f"  [{critic.name}] {len(preference_pairs)}/{len(raw_pairs)} pairs "
-            f"matched specialty '{specialty.value}'"
+            f"selected for skill '{specialty.value if specialty else 'none'}'"
         )
 
         if _owns_engine:

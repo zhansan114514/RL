@@ -3,7 +3,7 @@ Agent Registry for managing diverse Actor-Critic Society.
 
 Defines agent types with specialized roles:
 - 3 Actors with different reasoning styles (ALGEBRAIC, DIRECT, BACKTRACKING)
-- 4 Critics with different error-type specialties (ARITHMETIC, LOGIC, HALLUCINATION, VERIFICATION)
+- 4 Critics with different critic-skill specialties (COMPUTATION, REASONING, KNOWLEDGE, VERIFICATION)
 
 Each Agent has its own LoRA adapter on top of a shared base model (Qwen2.5-7B-Instruct).
 """
@@ -41,17 +41,17 @@ class ReasoningStyle(Enum):
     BACKTRACKING = "backtracking"  # Try-verify-revise approach
 
 
-class ErrorType(Enum):
+class CriticSkill(Enum):
     """
-    Critic error-type specialties for targeted feedback.
+    Critic skill specialties for targeted feedback.
 
-    From experiment plan: each Critic specializes in detecting and correcting
-    a specific category of errors.
+    These skills are dataset-independent.  They avoid using a single "logic"
+    label as the catch-all bucket for broad knowledge and multiple-choice tasks.
     """
-    ARITHMETIC = "arithmetic"          # Correct reasoning but numerical calculation mistake
-    LOGIC = "logic"                    # Flawed reasoning chain, wrong formula
-    HALLUCINATION = "hallucination"    # Fabricated numbers, wrong theorem
-    VERIFICATION = "verification"      # Failed self-check, missed the error
+    COMPUTATION = "computation"        # Calculation, symbolic manipulation, formula computation
+    REASONING = "reasoning"            # Inference chain, rule application, causal/logical jumps
+    KNOWLEDGE = "knowledge"            # Factual/domain knowledge, concepts, unsupported claims
+    VERIFICATION = "verification"      # Final answer checks, option mapping, self-check failures
 
 
 # ============================================================
@@ -96,41 +96,48 @@ def resolve_reasoning_style(value: str) -> ReasoningStyle:
     )
 
 
-def resolve_error_type(value: str) -> ErrorType:
-    """Resolve a string to ErrorType with robust case-insensitive matching.
+def resolve_critic_skill(value: str) -> CriticSkill:
+    """Resolve a string to CriticSkill with robust case-insensitive matching.
 
     Matching priority:
-      1. Exact value match  (e.g. "arithmetic")
-      2. Exact name match   (e.g. "ARITHMETIC")
-      3. Case-insensitive value match (e.g. "Arithmetic")
+      1. Exact value match  (e.g. "computation")
+      2. Exact name match   (e.g. "COMPUTATION")
+      3. Case-insensitive value match (e.g. "Computation")
 
     Raises ValueError (never silently falls back to a default).
     """
     if not value:
-        raise ValueError("Cannot resolve empty string to ErrorType")
+        raise ValueError("Cannot resolve empty string to CriticSkill")
 
     # 1. Exact value match
     try:
-        return ErrorType(value)
+        return CriticSkill(value)
     except ValueError:
         pass
 
     # 2. Exact name match
     try:
-        return ErrorType[value]
+        return CriticSkill[value]
     except KeyError:
         pass
 
     # 3. Case-insensitive value match
     lower = value.lower()
-    for et in ErrorType:
-        if et.value == lower:
-            return et
+    aliases = {
+        "calculation": CriticSkill.COMPUTATION,
+        "grounding": CriticSkill.KNOWLEDGE,
+        "factual": CriticSkill.KNOWLEDGE,
+    }
+    if lower in aliases:
+        return aliases[lower]
+    for skill in CriticSkill:
+        if skill.value == lower:
+            return skill
 
     raise ValueError(
-        f"Cannot resolve '{value}' to ErrorType. "
-        f"Valid values: {[e.value for e in ErrorType]}, "
-        f"valid names: {[e.name for e in ErrorType]}"
+        f"Cannot resolve '{value}' to CriticSkill. "
+        f"Valid values: {[s.value for s in CriticSkill]}, "
+        f"valid names: {[s.name for s in CriticSkill]}"
     )
 
 
@@ -157,26 +164,25 @@ ACTOR_STYLE_PROMPTS = {
 }
 
 CRITIC_SPECIALTY_PROMPTS = {
-    ErrorType.ARITHMETIC: (
-        "You are a critic specializing in arithmetic error detection. "
-        "Carefully check all numerical calculations in the response. "
-        "Report any arithmetic mistakes, sign errors, or computation errors."
+    CriticSkill.COMPUTATION: (
+        "You are a critic specializing in computation errors. "
+        "Carefully check numerical calculations, algebra, symbolic manipulation, "
+        "formula use, sign errors, units, and quantity-scale mistakes."
     ),
-    ErrorType.LOGIC: (
-        "You are a critic specializing in logical error detection. "
-        "Check the reasoning chain for flawed logic, wrong formulas, "
-        "incorrect theorem application, or logical fallacies."
+    CriticSkill.REASONING: (
+        "You are a critic specializing in reasoning errors. "
+        "Check the response for invalid inferences, missing steps, causal mistakes, "
+        "wrong rule application, and unsupported reasoning jumps."
     ),
-    ErrorType.HALLUCINATION: (
-        "You are a critic specializing in hallucination detection. "
-        "Check for fabricated numbers, invented theorems, unsupported claims, "
-        "or facts that don't match the problem statement."
+    CriticSkill.KNOWLEDGE: (
+        "You are a critic specializing in knowledge and grounding errors. "
+        "Check for wrong facts, domain concept confusion, unsupported claims, "
+        "misread question constraints, and mismatches with the provided options."
     ),
-    ErrorType.VERIFICATION: (
+    CriticSkill.VERIFICATION: (
         "You are a critic specializing in verification failures. "
-        "Check if the solution performed adequate self-checks. "
-        "Identify cases where the solver should have caught their own error "
-        "but didn't verify properly."
+        "Check final-answer consistency, answer-option mapping, extracted answers, "
+        "and whether self-checks should have caught contradictions."
     ),
 }
 
@@ -205,7 +211,7 @@ class AgentConfig:
 
     # Specialization (one per role type)
     reasoning_style: Optional[ReasoningStyle] = None  # For Actors
-    error_specialty: Optional[ErrorType] = None  # For Critics
+    error_specialty: Optional[CriticSkill] = None  # For Critics
 
     # Generation parameters
     temperature: float = 0.7
@@ -259,7 +265,7 @@ class AgentConfig:
         if d.get("reasoning_style"):
             d["reasoning_style"] = ReasoningStyle(d["reasoning_style"])
         if d.get("error_specialty"):
-            d["error_specialty"] = ErrorType(d["error_specialty"])
+            d["error_specialty"] = resolve_critic_skill(d["error_specialty"])
         return cls(**d)
 
 
@@ -272,7 +278,7 @@ class AgentRegistry:
     Registry for managing the Actor-Critic Society's agents.
 
     Tracks 3 Actors (ALGEBRAIC, DIRECT, BACKTRACKING) and
-    4 Critics (ARITHMETIC, LOGIC, HALLUCINATION, VERIFICATION),
+    4 Critics (COMPUTATION, REASONING, KNOWLEDGE, VERIFICATION),
     each with their own LoRA adapter path.
     """
 
@@ -304,8 +310,8 @@ class AgentRegistry:
                 return a
         return None
 
-    def get_critic_by_specialty(self, specialty: ErrorType) -> Optional[AgentConfig]:
-        """Get the Critic with a specific error specialty."""
+    def get_critic_by_specialty(self, specialty: CriticSkill) -> Optional[AgentConfig]:
+        """Get the Critic with a specific skill specialty."""
         for a in self._agents.values():
             if a.role == AgentRole.CRITIC and a.error_specialty == specialty:
                 return a
@@ -369,8 +375,8 @@ class AgentRegistry:
                 reasoning_style=style,
             ))
 
-        # 4 Critics with distinct error specialties
-        for specialty in ErrorType:
+        # 4 Critics with distinct skill specialties
+        for specialty in CriticSkill:
             agent_name = f"critic_{specialty.value}"
             lora_path = f"{cache_dir}/critics/{agent_name}/adapter"
             registry.register(AgentConfig(

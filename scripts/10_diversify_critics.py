@@ -1,11 +1,11 @@
 """
-Diversify Critics by training specialized LoRA adapters for each error type.
+Diversify Critics by training specialized LoRA adapters for each critic skill.
 
 For each Critic:
 1. Load trained Actor LoRA adapters (from Step 09)
 2. Run Algorithm 1 (generate_trajectories) with Actor + base Critic
 3. Extract Critic preference pairs (chosen=positive_critic, rejected=negative_critic)
-4. Filter by error type via DiversitySplit (data-level diversification)
+4. Route by error profile and build a skill-specific training mixture
 5. Train with DPO
 6. Save to output/society/critics/{agent_id}/
 
@@ -43,7 +43,7 @@ STEP_DEFAULTS = {
     "input_dir": "output/society/classified",
     "actor_base_dir": "output/society/actors",
     "output_dir": "output/society/critics",
-    "error_types": ["arithmetic", "logic", "hallucination", "verification"],
+    "critic_skills": ["computation", "reasoning", "knowledge", "verification"],
     "max_delib_samples": 50,
     "num_rounds": 5,
     "num_simulations": 5,
@@ -180,7 +180,7 @@ def load_classified_data(input_dir: str) -> Dict[str, Any]:
 def build_critic_preference_pairs(
     samples: List[Dict],
     actor_lora_paths: Dict[str, str],
-    error_type: str,
+    critic_skill: str,
     model_name: str = "Qwen/Qwen2.5-7B-Instruct",
     dataset_name: str = "math",
     num_rounds: int = 5,
@@ -203,7 +203,7 @@ def build_critic_preference_pairs(
     1. Run generate_trajectories() with Actor LoRA + base Critic for each sample
     2. Extract Critic pairs: chosen=positive_critic, rejected=negative_critic
        where the Actor's negative response is wrong (error scenario for Critic)
-    3. Filter by error type via DiversitySplit (data-level diversification)
+    3. Route by error profile and sample a shared/specialty/calibration mix
 
     The Critic is always the base model (no LoRA) at this stage since no
     Critic LoRA adapters exist yet. Actors use their trained LoRA adapters
@@ -213,9 +213,10 @@ def build_critic_preference_pairs(
     from src.algorithms.trajectory import generate_trajectories
     from src.algorithms.reward import extract_answer, math_answers_equal, normalize_answer
     from src.society.diversity_split import DiversitySplit
-    from src.society.agent_registry import ErrorType
+    from src.society.agent_registry import resolve_critic_skill
 
-    logger.info(f"  Generating Critic preference pairs for '{error_type}' via Algorithm 1")
+    skill = resolve_critic_skill(critic_skill)
+    logger.info(f"  Generating Critic preference pairs for '{critic_skill}' via Algorithm 1")
 
     # Collect all unique LoRA paths to determine max_loras for engine
     all_lora_paths = {k: v for k, v in actor_lora_paths.items() if v}
@@ -241,6 +242,8 @@ def build_critic_preference_pairs(
 
         # Build adapters for all actors
         adapters = _build_adapters(engine, all_lora_paths)
+        if not adapters:
+            adapters = {"base_actor": _LoRAModelAdapter(engine, None)}
         actor_names = list(adapters.keys())
 
         # Base Critic adapter (no LoRA)
@@ -304,65 +307,71 @@ def build_critic_preference_pairs(
 
         logger.info(
             f"  Algorithm 1 produced {len(raw_pairs)} raw critic pairs "
-            f"for '{error_type}'"
+            f"for '{critic_skill}'"
         )
 
-        # Step 2: Filter by error type via DiversitySplit
+        # Step 2: Route by error profile, then build the critic training mix.
         if raw_pairs:
-            try:
-                specialty = ErrorType(error_type.lower())
-            except ValueError:
-                logger.warning(f"  Unknown error type '{error_type}', skipping filter")
-                preference_pairs = raw_pairs
-            else:
-                splitter = DiversitySplit(
-                    balance=True, seed=seed, use_api=True,
-                    cache_dir=input_dir,
-                )
-                error_splits = splitter.split_by_error_type(
-                    samples=[p["sample"] for p in raw_pairs],
-                    responses=[p["actor_response"] for p in raw_pairs],
-                    correct_answers=[p["correct_answer"] for p in raw_pairs],
-                    extracted_answers=[p["actor_answer"] or "" for p in raw_pairs],
-                )
+            splitter = DiversitySplit(
+                balance=False, seed=seed, use_api=True,
+                cache_dir=input_dir,
+                pre_classified_file=os.path.join(input_dir, "classified_data.json"),
+            )
+            routed_items = splitter.split_by_error_profile(
+                samples=[p["sample"] for p in raw_pairs],
+                responses=[p["actor_response"] for p in raw_pairs],
+                correct_answers=[p["correct_answer"] for p in raw_pairs],
+                extracted_answers=[p["actor_answer"] or "" for p in raw_pairs],
+                dataset_name=dataset_name,
+            )
 
-                specialty_items = error_splits.get(specialty, [])
+            critic_items = splitter.build_critic_training_mix(
+                all_items=routed_items,
+                target_skill=skill,
+                general_ratio=0.6,
+                specialty_ratio=0.3,
+                calibration_ratio=0.1,
+                max_items=max_samples,
+            )
 
-                # O(1) lookup by (question, actor_response)
-                pair_index: Dict[tuple, Dict] = {}
-                for p in raw_pairs:
-                    key = (p["sample"].get("question", ""), p["actor_response"])
-                    pair_index[key] = p
+            # O(1) lookup by (question, actor_response)
+            pair_index: Dict[tuple, Dict] = {}
+            for p in raw_pairs:
+                key = (p["sample"].get("question", ""), p["actor_response"])
+                pair_index[key] = p
 
-                for sample, _response in specialty_items:
-                    key = (sample.get("question", ""), _response)
-                    p = pair_index.get(key)
-                    if p is not None:
-                        preference_pairs.append({
-                            "sample": p["sample"],
-                            "chosen": p["chosen"],
-                            "rejected": p["rejected"],
-                            "actor_response": p.get("actor_response", ""),
-                            "metadata": {
-                                "error_type": specialty.value,
-                                "delta": p["delta"],
-                                "direction": p["direction"],
-                            },
-                        })
+            for item in critic_items:
+                key = (item.sample.get("question", ""), item.response)
+                p = pair_index.get(key)
+                if p is not None:
+                    preference_pairs.append({
+                        "sample": p["sample"],
+                        "chosen": p["chosen"],
+                        "rejected": p["rejected"],
+                        "actor_response": p.get("actor_response", ""),
+                        "metadata": {
+                            "target_skill": skill.value,
+                            "assigned_skill": item.skill.value if item.skill else "general",
+                            "routing_weight": item.weight,
+                            "error_profile": item.profile,
+                            "delta": p["delta"],
+                            "direction": p["direction"],
+                        },
+                    })
 
-                logger.info(
-                    f"  {len(preference_pairs)}/{len(raw_pairs)} pairs "
-                    f"matched specialty '{specialty.value}'"
-                )
+            logger.info(
+                f"  {len(preference_pairs)}/{len(raw_pairs)} pairs "
+                f"selected for skill '{skill.value}'"
+            )
         else:
-            logger.warning(f"  No raw pairs produced for '{error_type}'")
+            logger.warning(f"  No raw pairs produced for '{critic_skill}'")
 
         if _owns_engine:
             del engine
             _cleanup_gpu()
 
     except Exception as e:
-        logger.error(f"  Failed to generate Critic pairs for '{error_type}': {e}")
+        logger.error(f"  Failed to generate Critic pairs for '{critic_skill}': {e}")
         if _owns_engine:
             _cleanup_gpu()
 
@@ -382,7 +391,7 @@ def _cleanup_gpu():
 def train_critic_dpo(
     model_name: str,
     preference_pairs: List[Dict],
-    error_type: str,
+    critic_skill: str,
     output_dir: str,
     dataset_name: str,
     lora_r: int,
@@ -406,10 +415,10 @@ def train_critic_dpo(
     model_type = detect_model_type(model_name)
 
     # Create output directory
-    critic_output_dir = os.path.join(output_dir, f"critic_{error_type}")
+    critic_output_dir = os.path.join(output_dir, f"critic_{critic_skill}")
     os.makedirs(critic_output_dir, exist_ok=True)
 
-    logger.info(f"  Training DPO for '{error_type}'...")
+    logger.info(f"  Training DPO for '{critic_skill}'...")
     logger.info(f"    Pairs: {len(preference_pairs)}")
     logger.info(f"    Output: {critic_output_dir}")
 
@@ -474,7 +483,7 @@ def main():
     logger.info(f"  Input dir: {input_dir}")
     logger.info(f"  Actor dir: {actor_dir}")
     logger.info(f"  Output dir: {output_dir}")
-    logger.info(f"  Error types: {args.error_types}")
+    logger.info(f"  Critic skills: {args.critic_skills}")
     logger.info("=" * 60)
 
     # Load classified data to get sample list
@@ -482,12 +491,18 @@ def main():
     classified_data = load_classified_data(input_dir)
     classified_results = classified_data["results"]
 
-    # Build per-error-type sample lists from classified data
-    error_sample_ids: Dict[str, List[str]] = {}
+    # Use samples that have at least one incorrect response; skill routing is
+    # handled later by DiversitySplit, not by hard pre-filtering labels here.
+    incorrect_sample_ids: List[str] = []
     for r in classified_results:
-        et = r.get("error_type")
-        if et:
-            error_sample_ids.setdefault(et, []).append(r["sample_id"])
+        has_incorrect = r.get("metadata", {}).get("num_incorrect", 0) > 0
+        if not has_incorrect:
+            has_incorrect = any(
+                not label.get("is_correct", False)
+                for label in r.get("per_response_labels", [])
+            )
+        if has_incorrect:
+            incorrect_sample_ids.append(r["sample_id"])
 
     # Load original dataset for Algorithm 1 input
     logger.info("[Step 2] Loading dataset for Algorithm 1...")
@@ -545,7 +560,7 @@ def main():
 
     critic_paths = {}
 
-    # Create a single vLLM engine shared across all error types
+    # Create a single vLLM engine shared across all critic skills
     from src.inference.vllm_server import VLLMInference
     shared_engine = None
 
@@ -565,26 +580,27 @@ def main():
         logger.warning(f"Failed to create shared vLLM engine: {e}")
         logger.warning("Will attempt per-error-type engine creation")
 
-    def _pairs_cache_path(error_type):
-        return os.path.join(output_dir, f"pairs_{error_type}.json")
+    def _pairs_cache_path(critic_skill):
+        return os.path.join(output_dir, f"pairs_{critic_skill}.json")
 
     try:
-        # Phase 1: Generate preference pairs for ALL error types (with disk cache)
+        # Phase 1: Generate preference pairs for ALL critic skills (with disk cache)
         all_pairs = {}
-        for error_type in args.error_types:
-            cache_file = _pairs_cache_path(error_type)
+        for critic_skill in args.critic_skills:
+            cache_file = _pairs_cache_path(critic_skill)
             if os.path.exists(cache_file):
-                logger.info(f"\n--- Loading cached pairs for Critic: {error_type} ---")
+                logger.info(f"\n--- Loading cached pairs for Critic: {critic_skill} ---")
                 with open(cache_file) as f:
                     cached = json.load(f)
-                all_pairs[error_type] = cached
-                logger.info(f"  Loaded {len(cached)} cached pairs for '{error_type}'")
+                all_pairs[critic_skill] = cached
+                logger.info(f"  Loaded {len(cached)} cached pairs for '{critic_skill}'")
                 continue
 
-            logger.info(f"\n--- Building pairs for Critic: {error_type} ---")
+            logger.info(f"\n--- Building pairs for Critic: {critic_skill} ---")
 
-            # Collect samples with this error type
-            sample_ids = error_sample_ids.get(error_type, [])
+            # Every critic sees the same incorrect-response source pool; the
+            # profile router builds skill-specific mixtures after generation.
+            sample_ids = incorrect_sample_ids
             samples_for_type = [
                 id_to_sample[sid]
                 for sid in sample_ids
@@ -593,17 +609,16 @@ def main():
 
             if not samples_for_type:
                 logger.warning(
-                    f"  No samples found for error type '{error_type}'. "
-                    f"Skipping this Critic to preserve data-level diversification."
+                    f"  No incorrect samples found. Skipping Critic '{critic_skill}'."
                 )
                 continue
 
-            logger.info(f"  {len(samples_for_type)} samples for '{error_type}'")
+            logger.info(f"  {len(samples_for_type)} source samples for '{critic_skill}'")
 
             preference_pairs = build_critic_preference_pairs(
                 samples=samples_for_type,
                 actor_lora_paths=actor_lora_paths,
-                error_type=error_type,
+                critic_skill=critic_skill,
                 model_name=args.model_name,
                 dataset_name=args.dataset,
                 num_rounds=args.num_rounds,
@@ -625,9 +640,9 @@ def main():
                 with open(cache_file, "w") as f:
                     json.dump(preference_pairs, f)
                 logger.info(f"  Cached {len(preference_pairs)} pairs to {cache_file}")
-                all_pairs[error_type] = preference_pairs
+                all_pairs[critic_skill] = preference_pairs
             else:
-                logger.warning(f"  No preference pairs for '{error_type}', skipping")
+                logger.warning(f"  No preference pairs for '{critic_skill}', skipping")
 
         # Clean up shared engine before DPO training (GPU memory intensive)
         if shared_engine is not None:
@@ -636,13 +651,13 @@ def main():
             _cleanup_gpu()
 
         # Phase 2: Train each critic (no engine needed, DPO runs in subprocess)
-        for error_type, preference_pairs in all_pairs.items():
-            logger.info(f"\n--- Training Critic: {error_type} ---")
+        for critic_skill, preference_pairs in all_pairs.items():
+            logger.info(f"\n--- Training Critic: {critic_skill} ---")
 
             checkpoint_path = train_critic_dpo(
                 model_name=args.model_name,
                 preference_pairs=preference_pairs,
-                error_type=error_type,
+                critic_skill=critic_skill,
                 output_dir=output_dir,
                 dataset_name=args.dataset,
                 lora_r=args.lora_r,
@@ -657,7 +672,7 @@ def main():
                 device=args.device,
             )
 
-            critic_paths[error_type] = checkpoint_path
+            critic_paths[critic_skill] = checkpoint_path
 
     finally:
         # Clean up shared engine if still alive (e.g. on early exit)
@@ -672,12 +687,12 @@ def main():
     with open(registry_file, "w") as f:
         json.dump({
             "critics": {
-                error_type: {
-                    "error_type": error_type,
+                critic_skill: {
+                    "critic_skill": critic_skill,
                     "model_path": path,
                     "base_model": args.model_name,
                 }
-                for error_type, path in critic_paths.items()
+                for critic_skill, path in critic_paths.items()
             },
             "metadata": {
                 "base_model": args.model_name,
@@ -690,8 +705,8 @@ def main():
     logger.info("=" * 60)
     logger.info("Critic diversification complete!")
     logger.info(f"  Trained {len(critic_paths)} critics:")
-    for error_type, path in critic_paths.items():
-        logger.info(f"    {error_type}: {path}")
+    for critic_skill, path in critic_paths.items():
+        logger.info(f"    {critic_skill}: {path}")
     logger.info("=" * 60)
 
 

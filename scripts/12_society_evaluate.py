@@ -179,8 +179,8 @@ def _build_agent_configs(
     Returns (actor_configs, critic_configs, lora_paths).
     """
     from src.society.agent_registry import (
-        AgentConfig, AgentRole, ReasoningStyle, ErrorType,
-        resolve_reasoning_style, resolve_error_type,
+        AgentConfig, AgentRole, ReasoningStyle, CriticSkill,
+        resolve_reasoning_style, resolve_critic_skill,
     )
 
     actors_info = registry.get("actors", {})
@@ -212,16 +212,16 @@ def _build_agent_configs(
 
     critic_configs = []
     for name, info in critics_info.items():
-        error_str = name.replace("critic_", "")
+        skill_str = name.replace("critic_", "")
         try:
-            error = resolve_error_type(error_str)
+            skill = resolve_critic_skill(skill_str)
         except ValueError as e:
-            logger.error(f"Cannot resolve critic error type '{error_str}': {e}")
+            logger.error(f"Cannot resolve critic skill '{skill_str}': {e}")
             raise
         critic_configs.append(AgentConfig(
             name=name,
             role=AgentRole.CRITIC,
-            error_specialty=error,
+            error_specialty=skill,
             model_path=base_model,
             lora_path=info.get("model_path", ""),
             system_prompt="",
@@ -247,7 +247,7 @@ def _build_base_agent_configs(model_name: str):
     single Actor and single Critic.  Used as the zero-training reference
     point — distinct from A1 which uses trained LoRA adapters.
     """
-    from src.society.agent_registry import AgentConfig, AgentRole, ReasoningStyle, ErrorType
+    from src.society.agent_registry import AgentConfig, AgentRole, ReasoningStyle, CriticSkill
 
     actor_config = AgentConfig(
         name="base_actor",
@@ -260,7 +260,7 @@ def _build_base_agent_configs(model_name: str):
     critic_config = AgentConfig(
         name="base_critic",
         role=AgentRole.CRITIC,
-        error_specialty=ErrorType.LOGIC,
+        error_specialty=CriticSkill.REASONING,
         model_path=model_name,
         lora_path="",  # No LoRA — pure base model
         system_prompt="",
@@ -285,11 +285,11 @@ def _build_agent_configs_from_phase_registries(
         critic_phase_dir: Directory containing critic_registry.json (from script 10)
         base_model: Base model path
         actor_names: Optional filter for specific actor style names
-        critic_names: Optional filter for specific critic error type names
+        critic_names: Optional filter for specific critic skill names
     """
     from src.society.agent_registry import (
         AgentConfig, AgentRole,
-        resolve_reasoning_style, resolve_error_type,
+        resolve_reasoning_style, resolve_critic_skill,
     )
 
     actor_configs = []
@@ -332,21 +332,21 @@ def _build_agent_configs_from_phase_registries(
         with open(critic_reg_file) as f:
             critic_data = json.load(f)
 
-        for error_key, info in critic_data.get("critics", {}).items():
-            if critic_names is not None and error_key not in critic_names:
+        for skill_key, info in critic_data.get("critics", {}).items():
+            if critic_names is not None and skill_key not in critic_names:
                 continue
             try:
-                error = resolve_error_type(error_key)
+                skill = resolve_critic_skill(skill_key)
             except ValueError as e:
-                logger.error(f"Cannot resolve phase critic error type '{error_key}': {e}")
+                logger.error(f"Cannot resolve phase critic skill '{skill_key}': {e}")
                 raise
 
             path = info.get("model_path", "")
-            name = f"critic_{error.value}"
+            name = f"critic_{skill.value}"
             critic_configs.append(AgentConfig(
                 name=name,
                 role=AgentRole.CRITIC,
-                error_specialty=error,
+                error_specialty=skill,
                 model_path=base_model,
                 lora_path=path,
                 system_prompt="",

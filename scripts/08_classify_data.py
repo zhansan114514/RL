@@ -3,7 +3,7 @@ Classify bootstrap data by reasoning style and error type.
 
 Uses GLM-4.5 API to classify:
 - Reasoning style for correct responses
-- Error type for incorrect responses
+- Multi-dimensional error profile for incorrect responses
 
 Supports checkpointing for crash recovery.
 
@@ -53,8 +53,7 @@ class ClassificationResult:
     sample_id: str
     reasoning_style: Optional[str]
     reasoning_style_confidence: float
-    error_type: Optional[str]
-    error_type_confidence: float
+    error_profile: Optional[Dict[str, Any]]
     metadata: Dict[str, Any]
 
 
@@ -69,10 +68,11 @@ class GLMClassifier:
         "backtracking": "backtracking", "backtrack": "backtracking",
     }
     _ERROR_VARIANTS = {
-        "arithmetic": "arithmetic", "arithmetical": "arithmetic",
-        "logic": "logic", "logical": "logic", "logically": "logic",
-        "hallucination": "hallucination", "hallucinate": "hallucination",
-        "hallucinating": "hallucination",
+        "computation": "computation", "computational": "computation",
+        "calculation": "computation",
+        "reasoning": "reasoning",
+        "knowledge": "knowledge", "factual": "knowledge",
+        "grounding": "grounding", "grounded": "grounding",
         "verification": "verification", "verify": "verification",
         "verifying": "verification",
     }
@@ -124,39 +124,43 @@ Do NOT include any other text."""
                 valid_labels={"algebraic", "direct", "backtracking"},
             )
 
-    def classify_error_type(
+    def classify_error_profile(
         self,
         question: str,
         response: str,
-    ) -> tuple[str | None, float]:
-        """Classify error type using GLM API."""
-        prompt = f"""The following response to a question is KNOWN TO BE INCORRECT. Classify the primary error type.
+        sample: Optional[Dict[str, Any]] = None,
+        extracted_answer: str = "",
+    ) -> Dict[str, Any] | None:
+        """Classify error profile using GLM API."""
+        sample = sample or {}
+        prompt = f"""You are classifying why a model response is wrong.
+
+Dataset/task type: {sample.get("task_type", "unknown")}
+Subject/domain: {sample.get("subject", sample.get("category", "unknown"))}
 
 Question: {question}
 
+Choices: {json.dumps(sample.get("choices", ""), ensure_ascii=False)}
+
 Response: {response}
 
-Error types (choose exactly one):
-- arithmetic: correct reasoning approach but numerical calculation mistake
-- logic: flawed reasoning chain, wrong formula, or logical fallacy
-- hallucination: fabricated numbers, wrong theorem, or unsupported claims
-- verification: attempted self-check but failed to catch the error
+Extracted answer: {extracted_answer}
+Correct answer: {sample.get("answer", "")}
 
-IMPORTANT: The answer IS wrong. You MUST pick an error type. Do NOT say "no error".
+Score each error dimension from 0.0 to 1.0:
+- computation: numerical calculation, algebra, symbolic manipulation, formula computation
+- reasoning: flawed reasoning chain, invalid inference, wrong rule application
+- knowledge: wrong factual/domain knowledge, concept confusion
+- grounding: ignores or contradicts the question/options, invents unsupported assumptions
+- verification: fails to check final answer, option-letter mismatch, self-check failure
 
-Respond with ONLY the error type name in lowercase and a confidence score (0-1).
-Format: "errortype 0.8"
-Example: "arithmetic 0.8"
-Do NOT include any other text."""
+Return JSON only with keys: scores, primary, secondary, confidence, evidence."""
 
         try:
-            return self._call_api(prompt, valid_labels={"arithmetic", "logic", "hallucination", "verification"})
+            return self._call_profile_api(prompt)
         except RuntimeError:
-            # Secondary retry with minimal prompt
-            return self._retry_minimal(
-                f"This answer is WRONG. What type of error? Reply ONE word: arithmetic, logic, hallucination, or verification\n\nQuestion: {question}\nResponse: {response[:500]}",
-                valid_labels={"arithmetic", "logic", "hallucination", "verification"},
-            )
+            logger.warning("Error profile classification failed after retry, marking as unclassified")
+            return None
 
     def _retry_minimal(self, prompt: str, valid_labels: set[str]) -> tuple[str | None, float]:
         """Secondary retry with a minimal prompt when primary classification fails."""
@@ -209,6 +213,101 @@ Do NOT include any other text."""
                 time.sleep(self.retry_delay)
 
         raise RuntimeError(f"API classification failed after {self.max_retries} attempts: {last_error}")
+
+    def _call_profile_api(self, prompt: str) -> Dict[str, Any]:
+        """Call GLM API and parse a JSON error profile."""
+        import requests
+
+        last_error = None
+        for attempt in range(self.max_retries):
+            try:
+                response = requests.post(
+                    self.api_base,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": self.model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "temperature": self.temperature,
+                        "max_tokens": 512,
+                    },
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
+
+                result = response.json()["choices"][0]["message"]["content"].strip()
+                profile = self._extract_profile(result)
+                if profile:
+                    return profile
+
+                last_error = f"Unrecognized profile JSON in API response: {result!r}"
+                logger.warning(
+                    f"API returned unrecognized profile (attempt {attempt + 1}/{self.max_retries}): {last_error}"
+                )
+            except Exception as e:
+                last_error = str(e)
+                logger.warning(f"API call failed (attempt {attempt + 1}/{self.max_retries}): {e}")
+
+            if attempt < self.max_retries - 1:
+                time.sleep(self.retry_delay)
+
+        raise RuntimeError(f"API profile classification failed after {self.max_retries} attempts: {last_error}")
+
+    @staticmethod
+    def _extract_profile(text: str) -> Dict[str, Any] | None:
+        """Extract and normalize a JSON error profile."""
+        dims = ("computation", "reasoning", "knowledge", "grounding", "verification")
+        fenced = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
+        if fenced:
+            text = fenced.group(1).strip()
+        start = text.find("{")
+        end = text.rfind("}")
+        if start >= 0 and end >= start:
+            text = text[start:end + 1]
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+
+        raw_scores = data.get("scores", {})
+        if not isinstance(raw_scores, dict):
+            raw_scores = {}
+        scores = {}
+        for dim in dims:
+            try:
+                scores[dim] = max(0.0, min(1.0, float(raw_scores.get(dim, 0.0))))
+            except (TypeError, ValueError):
+                scores[dim] = 0.0
+
+        primary = str(data.get("primary", "")).strip().lower()
+        if primary not in dims:
+            primary = max(scores.items(), key=lambda kv: kv[1])[0] if any(scores.values()) else "unknown"
+
+        secondary = data.get("secondary", [])
+        if isinstance(secondary, str):
+            secondary = [secondary]
+        if not isinstance(secondary, list):
+            secondary = []
+        secondary = [
+            str(label).strip().lower()
+            for label in secondary
+            if str(label).strip().lower() in dims and str(label).strip().lower() != primary
+        ]
+
+        try:
+            confidence = max(0.0, min(1.0, float(data.get("confidence", 0.5))))
+        except (TypeError, ValueError):
+            confidence = 0.5
+
+        return {
+            "scores": scores,
+            "primary": primary,
+            "secondary": secondary,
+            "confidence": confidence,
+            "evidence": str(data.get("evidence", "")).strip(),
+        }
 
     @classmethod
     def _extract_label(cls, text: str) -> str:
@@ -395,9 +494,9 @@ def main():
             final_responses = traj.get("initial_responses", [])
 
         # Classify reasoning style for correct responses
-        # and error type for incorrect responses
+        # and error profile for incorrect responses
         reasoning_styles = []
-        error_types = []
+        error_profiles = []
 
         # Determine task type for proper answer comparison
         task_type = traj.get("sample", {}).get("task_type", "math")
@@ -428,8 +527,7 @@ def main():
                 "is_correct": is_correct,
                 "reasoning_style": None,
                 "reasoning_style_confidence": 0.0,
-                "error_type": None,
-                "error_type_confidence": 0.0,
+                "error_profile": None,
             })
 
             if is_correct:
@@ -439,18 +537,20 @@ def main():
                 per_response_labels[-1]["reasoning_style"] = style
                 per_response_labels[-1]["reasoning_style_confidence"] = conf
             else:
-                # Incorrect response - classify error type
-                error, conf = classifier.classify_error_type(question, response_text)
-                error_types.append((error, conf))
-                per_response_labels[-1]["error_type"] = error
-                per_response_labels[-1]["error_type_confidence"] = conf
+                # Incorrect response - classify multi-dimensional error profile
+                profile = classifier.classify_error_profile(
+                    question, response_text, sample=traj.get("sample", {}),
+                    extracted_answer=answer or "",
+                )
+                if profile:
+                    error_profiles.append(profile)
+                per_response_labels[-1]["error_profile"] = profile
 
-        # Aggregate classifications for backward compat (sample-level summary)
+        # Aggregate classifications at sample level.
         # Filter out None labels (unclassified) from aggregation
         from collections import Counter
 
         valid_styles = [(s, c) for s, c in reasoning_styles if s is not None]
-        valid_errors = [(e, c) for e, c in error_types if e is not None]
 
         reasoning_style = None
         reasoning_confidence = 0.0
@@ -459,31 +559,43 @@ def main():
             reasoning_style = style_counter.most_common(1)[0][0]
             reasoning_confidence = sum(c for s, c in valid_styles if s == reasoning_style) / len(valid_styles)
 
-        error_type = None
-        error_confidence = 0.0
-        if valid_errors:
-            error_counter = Counter([e for e, _ in valid_errors])
-            error_type = error_counter.most_common(1)[0][0]
-            error_confidence = sum(c for e, c in valid_errors if e == error_type) / len(valid_errors)
+        error_profile = None
+        if error_profiles:
+            dims = ("computation", "reasoning", "knowledge", "grounding", "verification")
+            avg_scores = {
+                dim: sum(p.get("scores", {}).get(dim, 0.0) for p in error_profiles) / len(error_profiles)
+                for dim in dims
+            }
+            primary_counter = Counter([p.get("primary", "unknown") for p in error_profiles])
+            primary = primary_counter.most_common(1)[0][0]
+            error_profile = {
+                "scores": avg_scores,
+                "primary": primary,
+                "secondary": [
+                    dim for dim, _ in sorted(avg_scores.items(), key=lambda kv: kv[1], reverse=True)
+                    if dim != primary
+                ][:2],
+                "confidence": sum(p.get("confidence", 0.0) for p in error_profiles) / len(error_profiles),
+                "evidence": "sample-level aggregate",
+            }
 
         result = ClassificationResult(
             sample_id=sample_id,
             reasoning_style=reasoning_style,
             reasoning_style_confidence=reasoning_confidence,
-            error_type=error_type,
-            error_type_confidence=error_confidence,
+            error_profile=error_profile,
             metadata={
                 "num_correct": len(reasoning_styles),
-                "num_incorrect": len(error_types),
+                "num_incorrect": len(error_profiles),
             },
         )
 
         results.append({
             "sample_id": sample_id,
+            "question": question,
             "reasoning_style": reasoning_style,
             "reasoning_style_confidence": reasoning_confidence,
-            "error_type": error_type,
-            "error_type_confidence": error_confidence,
+            "error_profile": error_profile,
             "metadata": result.metadata,
             "per_response_labels": per_response_labels,
         })
@@ -507,22 +619,22 @@ def main():
     logger.info("[Step 6] Creating per-style splits...")
 
     style_splits = {}
-    error_splits = {}
+    profile_splits = {}
 
     # Per-response granular splits
     per_response_style_splits = {}
-    per_response_error_splits = {}
+    per_response_profile_splits = {}
 
     for result in results:
         style = result["reasoning_style"]
-        error = result["error_type"]
+        profile = result.get("error_profile")
         sample_id = result["sample_id"]
 
         if style:
             style_splits.setdefault(style, []).append(sample_id)
 
-        if error:
-            error_splits.setdefault(error, []).append(sample_id)
+        if profile and profile.get("primary") and profile["primary"] != "unknown":
+            profile_splits.setdefault(profile["primary"], []).append(sample_id)
 
         # Build per-response splits for finer-grained data diversification
         per_labels = result.get("per_response_labels", [])
@@ -536,21 +648,24 @@ def main():
                     "agent_name": label.get("agent_name", ""),
                     "is_correct": label.get("is_correct", False),
                 })
-            if label.get("error_type"):
-                per_response_error_splits.setdefault(
-                    label["error_type"], [],
+            profile = label.get("error_profile")
+            if profile and profile.get("primary") and profile["primary"] != "unknown":
+                per_response_profile_splits.setdefault(
+                    profile["primary"], [],
                 ).append({
                     "sample_id": sample_id,
                     "response_index": ri,
                     "agent_name": label.get("agent_name", ""),
                     "is_correct": label.get("is_correct", False),
+                    "scores": profile.get("scores", {}),
+                    "confidence": profile.get("confidence", 0.0),
                 })
 
     splits_file = os.path.join(output_dir, "splits.json")
     with open(splits_file, "w") as f:
         json.dump({
             "reasoning_styles": style_splits,
-            "error_types": error_splits,
+            "error_profiles": profile_splits,
         }, f, indent=2)
 
     # Save per-response splits for finer-grained Actor/Critic diversification
@@ -558,13 +673,13 @@ def main():
     with open(per_response_splits_file, "w") as f:
         json.dump({
             "reasoning_styles": per_response_style_splits,
-            "error_types": per_response_error_splits,
+            "error_profiles": per_response_profile_splits,
         }, f, indent=2)
 
     logger.info(f"  Reasoning style splits: {list(style_splits.keys())}")
-    logger.info(f"  Error type splits: {list(error_splits.keys())}")
+    logger.info(f"  Error profile splits: {list(profile_splits.keys())}")
     logger.info(f"  Per-response style splits: { {k: len(v) for k, v in per_response_style_splits.items()} }")
-    logger.info(f"  Per-response error splits: { {k: len(v) for k, v in per_response_error_splits.items()} }")
+    logger.info(f"  Per-response profile splits: { {k: len(v) for k, v in per_response_profile_splits.items()} }")
 
     logger.info("=" * 60)
     logger.info("Classification complete!")

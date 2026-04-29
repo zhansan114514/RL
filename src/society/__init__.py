@@ -7,7 +7,7 @@ combining ACC-Collab (Actor-Critic collaboration) with Multiagent FT
 
 Architecture:
 - 3 Actors: ALGEBRAIC, DIRECT, BACKTRACKING reasoning styles
-- 4 Critics: ARITHMETIC, LOGIC, HALLUCINATION, VERIFICATION error specialties
+- 4 Critics: COMPUTATION, REASONING, KNOWLEDGE, VERIFICATION skill specialties
 - MoE Router: Confidence-based softmax routing (no trainable params)
 - Single GPU: Sequential LoRA load/unload with disk-based crash recovery
 """
@@ -19,7 +19,7 @@ from src.society.agent_registry import (
     AgentRegistry,
     AgentRole,
     ReasoningStyle,
-    ErrorType,
+    CriticSkill,
     ACTOR_STYLE_PROMPTS,
     CRITIC_SPECIALTY_PROMPTS,
 )
@@ -42,10 +42,10 @@ from src.society.data_classifier import (
     DataClassifier,
     ClassificationError,
     classify_reasoning_style,
-    classify_error_type,
+    classify_error_profile,
     check_api_available,
 )
-from src.society.diversity_split import DiversitySplit
+from src.society.diversity_split import DiversitySplit, RoutedTrainingItem, assign_error_profile
 from src.society.society_trainer import (
     society_alternating_train,
     SocietyTrainingResult,
@@ -63,7 +63,7 @@ __all__ = [
     "AgentRegistry",
     "AgentRole",
     "ReasoningStyle",
-    "ErrorType",
+    "CriticSkill",
     "ACTOR_STYLE_PROMPTS",
     "CRITIC_SPECIALTY_PROMPTS",
     # Router
@@ -83,10 +83,12 @@ __all__ = [
     "DataClassifier",
     "ClassificationError",
     "classify_reasoning_style",
-    "classify_error_type",
+    "classify_error_profile",
     "check_api_available",
     # Diversity Split
     "DiversitySplit",
+    "RoutedTrainingItem",
+    "assign_error_profile",
     # Society Trainer
     "society_alternating_train",
     "SocietyTrainingResult",
