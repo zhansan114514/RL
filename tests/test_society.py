@@ -125,7 +125,9 @@ class TestAgentConfig:
             error_specialty=CriticSkill.VERIFICATION,
         )
         assert CRITIC_CONFIDENCE_SUFFIX in config.system_prompt
-        assert "[Confidence: 0.X]" in config.system_prompt
+        assert "[Confidence: 0.0-1.0]" in config.system_prompt
+        assert "[Suggested_Final_Answer:" in config.system_prompt
+        assert "[Error_Type:" in config.system_prompt
 
     def test_to_dict(self):
         """Should serialize to dictionary."""

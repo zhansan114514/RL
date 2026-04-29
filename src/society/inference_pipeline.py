@@ -451,6 +451,9 @@ def run_ablation(
 
         config_results = []
         for i, sample in enumerate(samples):
+            # Use weighted voting for configs with multiple Critics + Router
+            voting_strategy = "weighted" if config_name in {"A3", "A4", "A5"} else "majority_vote"
+
             result = society_inference(
                 registry=registry,
                 sample=sample,
@@ -461,7 +464,7 @@ def run_ablation(
                 num_rounds=num_rounds,
                 router_top_k=config["router_top_k"],
                 router_uniform=config.get("router_uniform", False),
-                voting_strategy="majority_vote",
+                voting_strategy=voting_strategy,
                 checkpoint_dir=checkpoint_dir,
                 ablation_label=config_name,
             )

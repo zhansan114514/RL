@@ -84,4 +84,4 @@ step06_evaluate:
   output_dir: "output/society/eval"
   num_rounds: 2
   max_tokens: 512
-  temperature: 0.7
+  temperature: 0.0

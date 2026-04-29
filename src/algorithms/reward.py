@@ -56,20 +56,43 @@ def extract_answer(response: str, task_type: str = "yes_no") -> Optional[str]:
 
 
 def _extract_yes_no(text: str) -> Optional[str]:
-    """Extract Yes/No from response (returns uppercase)."""
-    patterns = [
-        r"[Ff]inal [Aa]nswer:?\s*(Yes|No)",
-        r"[Aa]nswer:?\s*(Yes|No)",
-        r"[Tt]he answer is\s*(Yes|No)",
-        r"I (?:think|believe) (?:the answer is )?(Yes|No)",
-    ]
-    for pat in patterns:
-        m = re.search(pat, text, re.IGNORECASE)
-        if m:
-            return m.group(1).strip().upper()
+    """Extract Yes/No from response (returns uppercase).
 
-    # Fallback: last Yes/No occurrence
-    matches = re.findall(r"\b(Yes|No)\b", text, re.IGNORECASE)
+    Priority:
+      1. FINAL_ANSWER: marker (strict)
+      2. Final Answer / Answer near end (medium)
+      3. Last standalone Yes/No in tail (weak)
+    """
+    if not text:
+        return None
+
+    # Layer 1: strict FINAL_ANSWER marker (uppercase only)
+    strict_patterns = [
+        r"(?m)^\s*FINAL[_\s]ANSWER\s*:\s*(Yes|No)\s*$",
+        r"(?m)^\s*FINAL_ANSWER\s*:\s*(Yes|No)\s*$",
+    ]
+    for pat in strict_patterns:
+        matches = re.findall(pat, text, re.IGNORECASE)
+        if matches:
+            return matches[-1].strip().upper()
+
+    # Tail region for weaker patterns
+    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+    tail = "\n".join(lines[-5:])
+
+    # Layer 2: Final Answer / Answer near end
+    medium_patterns = [
+        r"(?i)(?:final\s+answer|answer)\s*:\s*(Yes|No)",
+        r"(?i)the\s+(?:correct\s+)?answer\s+is\s*(Yes|No)",
+        r"(?i)I\s+(?:think|believe)\s+(?:the answer is\s*)?(Yes|No)",
+    ]
+    for pat in medium_patterns:
+        matches = re.findall(pat, tail, re.IGNORECASE)
+        if matches:
+            return matches[-1].strip().upper()
+
+    # Layer 3: weak fallback — last Yes/No in the tail only
+    matches = re.findall(r"\b(Yes|No)\b", tail, re.IGNORECASE)
     if matches:
         return matches[-1].strip().upper()
 
@@ -77,26 +100,61 @@ def _extract_yes_no(text: str) -> Optional[str]:
 
 
 def _extract_mc(text: str) -> Optional[str]:
-    """Extract A/B/C/D from multiple choice response."""
-    patterns = [
-        r"[Ff]inal [Aa]nswer:?\s*\(?([A-D])\)?",
-        r"[Aa]nswer:?\s*\(?([A-D])\)?",
-        r"\(([A-D])\)",
-        r"[Oo]ption\s*([A-D])",
-        r"[Cc]hoice\s*([A-D])",
-        r"[Tt]he (?:correct )?(?:answer|option) is\s*\(?\s*([A-D])\s*\)?",
-    ]
-    for pat in patterns:
-        m = re.search(pat, text, re.IGNORECASE)
-        if m:
-            return m.group(1).strip().upper()
+    """Extract A/B/C/D from multiple choice response.
 
-    # Fallback: last standalone A-D letter in the text.
-    # Using findall+last avoids the re.search left-to-right bias that would
-    # match "A" in "A is wrong. The answer is C" instead of "C".
-    matches = re.findall(r"\b([A-D])\b", text)
+    Three-layer priority (conservative — avoids grabbing option letters
+    from reasoning / critic feedback text):
+      1. FINAL_ANSWER: X  (strict, full text scan)
+      2. Final Answer / Answer / the correct answer is X  (last 5 lines)
+      3. Very weak: standalone letter at line end (last 5 lines only)
+    """
+    if not text:
+        return None
+
+    text = text.replace("\uff1a", ":")  # fullwidth colon
+    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+    tail = "\n".join(lines[-5:])
+
+    # Layer 1: strict FINAL_ANSWER marker (scan full text)
+    # Only matches the exact uppercase marker we inject into prompts.
+    strict_patterns = [
+        r"(?m)^\s*FINAL[_\s]ANSWER\s*:\s*\(?\s*([A-D])\s*\)?\s*$",
+        r"(?m)^\s*FINAL_ANSWER\s*:\s*\(?\s*([A-D])\s*\)?\s*$",
+    ]
+    for pat in strict_patterns:
+        matches = re.findall(pat, text, re.IGNORECASE)
+        if matches:
+            return matches[-1].upper()
+
+    # Layer 2: medium-confidence patterns in tail only
+    medium_patterns = [
+        r"(?i)(?:final\s+answer|answer)\s*:\s*\(?\s*([A-D])\s*\)?",
+        r"(?i)the\s+(?:correct\s+)?(?:answer|option|choice)\s+is\s*\(?\s*([A-D])\s*\)?",
+        r"(?i)(?:option|choice)\s*([A-D])",
+        r"\(([A-D])\)",
+    ]
+    for pat in medium_patterns:
+        matches = re.findall(pat, tail, re.IGNORECASE)
+        if matches:
+            return matches[-1].upper()
+
+    # Layer 3: weak fallback — restricted to tail only (last 5 lines).
+    # The old \b([A-D])\b was dangerous because it scanned the full text,
+    # but restricting to the tail avoids picking up option letters from
+    # earlier reasoning / critic feedback.
+    weak_patterns = [
+        r"(?im)^\s*\(?\s*([A-D])\s*\)?\s*$",
+        r"(?im)^\s*(?:therefore|thus|so)\s*,?\s*\(?\s*([A-D])\s*\)?\s*\.?\s*$",
+    ]
+    for pat in weak_patterns:
+        matches = re.findall(pat, tail, re.IGNORECASE)
+        if matches:
+            return matches[-1].upper()
+
+    # Last resort: find the last standalone A-D letter in the tail only.
+    matches = re.findall(r"\b([A-D])\b", tail)
     if matches:
-        return matches[-1].strip().upper()
+        return matches[-1].upper()
 
     return None
 
@@ -122,8 +180,29 @@ def extract_balanced_braces(text: str, start: int) -> Optional[str]:
 
 
 def _extract_math(text: str) -> Optional[str]:
-    """Extract mathematical answer from response (supports \\boxed{} and numeric answers)."""
-    # First try to extract from \boxed{...} with balanced brace matching
+    """Extract mathematical answer from response (supports \\boxed{}, FINAL_ANSWER, and numeric answers).
+
+    Priority:
+      1. FINAL_ANSWER: marker (strict)
+      2. \\boxed{...}
+      3. Final Answer / Answer patterns
+      4. Weak fallback near end
+    """
+    if not text:
+        return None
+
+    # Layer 1: strict FINAL_ANSWER marker (uppercase only, exact format)
+    final_answer_match = re.search(
+        r"(?m)^\s*FINAL[_\s]ANSWER\s*:\s*(.+?)\s*$", text,
+    )
+    if not final_answer_match:
+        final_answer_match = re.search(
+            r"(?m)^\s*FINAL_ANSWER\s*:\s*(.+?)\s*$", text,
+        )
+    if final_answer_match:
+        return final_answer_match.group(1).strip()
+
+    # Layer 2: \boxed{...} with balanced brace matching
     boxed_prefixes = [
         r'\\boxed\s*\{',
         r'boxed\s*\{',
@@ -136,7 +215,10 @@ def _extract_math(text: str) -> Optional[str]:
             if content is not None:
                 return content.strip()
 
-    # Try to extract from "Final Answer:" or "Answer:" patterns
+    # Layer 3: Answer patterns (tail only)
+    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
+    tail = "\n".join(lines[-5:])
+
     answer_patterns = [
         r'[Ff]inal [Aa]nswer:?\s*(-?[0-9]+(?:\.[0-9]+)?)',
         r'[Aa]nswer:?\s*(-?[0-9]+(?:\.[0-9]+)?)',
@@ -144,18 +226,17 @@ def _extract_math(text: str) -> Optional[str]:
         r'=\s*(-?[0-9]+(?:\.[0-9]+)?)(?:\s|$|\.|,)',
     ]
     for pat in answer_patterns:
-        m = re.search(pat, text)
+        m = re.search(pat, tail)
         if m:
             return m.group(1).strip()
 
-    # Fallback: try to extract any mathematical expression near the end
-    # Look for patterns like "therefore X" or "equals X"
+    # Layer 4: weak fallback
     fallback_patterns = [
         r'(?:therefore|so|thus|equals?|is)\s+(-?[0-9]+(?:\.[0-9]+)?|\([^)]+\))',
         r'=\s*(-?[0-9]+(?:\.[0-9]+)?|\([^)]+\))',
     ]
     for pat in fallback_patterns:
-        matches = re.findall(pat, text, re.IGNORECASE)
+        matches = re.findall(pat, tail, re.IGNORECASE)
         if matches:
             return matches[-1].strip()
 

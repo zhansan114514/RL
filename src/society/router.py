@@ -36,6 +36,8 @@ class CriticFeedback:
     feedback_text: str
     confidence: float  # 0.0 to 1.0
     answer_correct: Optional[bool] = None  # Critic's judgment on Actor answer correctness
+    suggested_answer: Optional[str] = None  # Critic's suggested final answer
+    error_type: Optional[str] = None  # Critic's identified error type
     raw_response: str = ""
 
 
@@ -62,6 +64,16 @@ ANSWER_CORRECT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+SUGGESTED_ANSWER_PATTERN = re.compile(
+    r'\[Suggested_Final_Answer:\s*([A-Da-d]|Yes|No|unknown)\]',
+    re.IGNORECASE,
+)
+
+ERROR_TYPE_PATTERN = re.compile(
+    r'\[Error_Type:\s*(arithmetic|logic|hallucination|verification|none)\]',
+    re.IGNORECASE,
+)
+
 
 def parse_confidence(response: str) -> Optional[float]:
     """Parse [Confidence: 0.X] from Critic response."""
@@ -79,6 +91,27 @@ def parse_answer_correct(response: str) -> Optional[bool]:
     match = ANSWER_CORRECT_PATTERN.search(response)
     if match:
         return match.group(1).lower() == "yes"
+    return None
+
+
+def parse_suggested_answer(response: str) -> Optional[str]:
+    """Parse [Suggested_Final_Answer: X] from Critic response."""
+    match = SUGGESTED_ANSWER_PATTERN.search(response)
+    if not match:
+        return None
+    ans = match.group(1).strip()
+    if ans.lower() == "unknown":
+        return None
+    if ans.upper() in {"A", "B", "C", "D"}:
+        return ans.upper()
+    return ans.capitalize()
+
+
+def parse_error_type(response: str) -> Optional[str]:
+    """Parse [Error_Type: X] from Critic response."""
+    match = ERROR_TYPE_PATTERN.search(response)
+    if match:
+        return match.group(1).lower()
     return None
 
 
@@ -113,7 +146,11 @@ class CriticRouter:
         self.uniform_weights = uniform_weights
 
     def route(self, feedbacks: list[CriticFeedback]) -> RoutedFeedback:
-        """Route feedbacks to produce aggregated weighted feedback."""
+        """Route feedbacks to produce aggregated weighted feedback.
+
+        Prioritises Critics that detected an error (Answer_Correct: no)
+        so the Actor receives corrective feedback, not mere confirmations.
+        """
         if not feedbacks:
             return RoutedFeedback("", [], [], [])
 
@@ -125,12 +162,27 @@ class CriticRouter:
             else:
                 return RoutedFeedback("", [], [], feedbacks)
 
+        # Prefer Critics that found errors — they are more actionable
+        negative = [f for f in valid if f.answer_correct is False]
+        if negative:
+            # Only promote negative critics; still keep all valid for weighting
+            pass  # selection below handles priority
+
         # Softmax on confidence (or uniform if uniform_weights=True)
         if self.uniform_weights:
             weights = np.ones(len(valid)) / len(valid)
         else:
             confidences = np.array([f.confidence for f in valid])
             weights = self._softmax(confidences, temperature=self.temperature)
+
+        # Boost weights for error-detecting Critics so they are
+        # preferentially selected by Top-K.
+        if negative:
+            for i, fb in enumerate(valid):
+                if fb.answer_correct is False:
+                    weights[i] *= 2.0
+            # Renormalise
+            weights = weights / weights.sum()
 
         # Top-K selection (descending order: highest weight first)
         k = min(self.top_k, len(valid))
@@ -179,10 +231,14 @@ def build_critic_feedback(
         logger.debug(f"No confidence parsed for {critic_config.name}, default=0.5")
 
     answer_correct = parse_answer_correct(response)
+    suggested_answer = parse_suggested_answer(response)
+    error_type = parse_error_type(response)
 
-    # Strip both tags from the displayed feedback text
+    # Strip all structured tags from the displayed feedback text
     clean_response = CONFIDENCE_PATTERN.sub("", response)
-    clean_response = ANSWER_CORRECT_PATTERN.sub("", clean_response).strip()
+    clean_response = ANSWER_CORRECT_PATTERN.sub("", clean_response)
+    clean_response = SUGGESTED_ANSWER_PATTERN.sub("", clean_response)
+    clean_response = ERROR_TYPE_PATTERN.sub("", clean_response).strip()
 
     error_specialty = critic_config.error_specialty
     if error_specialty is None:
@@ -194,5 +250,7 @@ def build_critic_feedback(
         feedback_text=clean_response,
         confidence=confidence,
         answer_correct=answer_correct,
+        suggested_answer=suggested_answer,
+        error_type=error_type,
         raw_response=response,
     )

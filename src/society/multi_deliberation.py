@@ -536,6 +536,47 @@ def _generate_with_lora(
 # Prompt builders (separated for testability and reuse)
 # ============================================================
 
+def _answer_contract(sample: dict) -> str:
+    """Return a strict output-format contract appended to every Actor prompt."""
+    task_type = sample.get("task_type", "multiple_choice")
+    if task_type == "yes_no":
+        return (
+            "\n\nOutput format requirements:\n"
+            "1. You may briefly explain your reasoning.\n"
+            "2. You MUST end your response with exactly one final line:\n"
+            "FINAL_ANSWER: Yes or No\n"
+            "3. Do not write anything after the FINAL_ANSWER line."
+        )
+    if task_type == "math":
+        return (
+            "\n\nOutput format requirements:\n"
+            "1. Solve the problem step by step.\n"
+            "2. You MUST end your response with exactly one final line:\n"
+            "FINAL_ANSWER: <numeric_or_expression_answer>\n"
+            "3. Do not write anything after the FINAL_ANSWER line."
+        )
+    if task_type == "mixed":
+        # BBH contains both yes/no and multiple-choice subtasks.
+        # Use a flexible contract that covers both answer forms.
+        return (
+            "\n\nOutput format requirements:\n"
+            "1. You may briefly explain your reasoning.\n"
+            "2. You MUST end your response with exactly one final line:\n"
+            "FINAL_ANSWER: <your_answer>\n"
+            "   For yes/no questions: FINAL_ANSWER: Yes or FINAL_ANSWER: No\n"
+            "   For multiple-choice questions: FINAL_ANSWER: A, B, C, or D\n"
+            "3. Do not write anything after the FINAL_ANSWER line."
+        )
+    # multiple_choice / default
+    return (
+        "\n\nOutput format requirements:\n"
+        "1. You may briefly explain your reasoning.\n"
+        "2. You MUST end your response with exactly one final line:\n"
+        "FINAL_ANSWER: A or B or C or D\n"
+        "3. Do not write anything after the FINAL_ANSWER line."
+    )
+
+
 def _build_actor_prompt(
     actor: AgentConfig,
     sample: dict,
@@ -576,6 +617,19 @@ def _build_actor_prompt(
     # Prepend actor's style-specific system prompt
     if actor.system_prompt:
         prompt = f"{actor.system_prompt}\n\n{prompt}"
+
+    # Revision instruction for deliberation rounds
+    if round_num > 0:
+        prompt += (
+            "\n\nRevision instruction:\n"
+            "You have received critic feedback above. "
+            "If it points out a valid mistake, revise your answer. "
+            "If you disagree, briefly explain why. "
+            "Do not ignore the feedback silently."
+        )
+
+    # Always append the strict output-format contract
+    prompt += _answer_contract(sample)
 
     return prompt
 

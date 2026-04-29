@@ -46,7 +46,7 @@ STEP_DEFAULTS = {
     "output_dir": "output/society/eval",
     "num_rounds": 2,
     "max_tokens": 512,
-    "temperature": 0.7,
+    "temperature": 0.0,
     "device": 0,
     "dtype": "bfloat16",
     "gpu_memory_utilization": 0.65,

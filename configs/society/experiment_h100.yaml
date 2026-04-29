@@ -79,6 +79,6 @@ step06_evaluate:
   output_dir: "output/society/eval"
   num_rounds: 2
   max_tokens: 512
-  temperature: 0.7
+  temperature: 0.0
 
 # Estimated runtime: ~17-22 hours (200 samples, 5 rounds, 1 iteration)

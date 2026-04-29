@@ -188,11 +188,12 @@ CRITIC_SPECIALTY_PROMPTS = {
 
 # Confidence prompt suffix for Critic (used by MoE Router + weighted voting)
 CRITIC_CONFIDENCE_SUFFIX = (
-    "\n\nAfter your analysis:\n"
-    "1. Judge whether the solver's final answer is correct: "
-    "[Answer_Correct: yes] or [Answer_Correct: no]\n"
-    "2. Output your confidence in your feedback on a scale of 0.0 to 1.0: "
-    "[Confidence: 0.X]"
+    "\n\nAfter your analysis you MUST end your response with the following fields "
+    "(one per line):\n"
+    "[Answer_Correct: yes or no]\n"
+    "[Suggested_Final_Answer: A or B or C or D or unknown]\n"
+    "[Error_Type: arithmetic or logic or hallucination or verification or none]\n"
+    "[Confidence: 0.0-1.0]"
 )
 
 
