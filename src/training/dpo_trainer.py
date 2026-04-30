@@ -36,6 +36,7 @@ def train_dpo(
     use_wandb: bool = False,
     wandb_project: str = "acc-collab",
     gradient_checkpointing: bool = True,
+    merge_lora: bool = False,
     device: int = 0,
     timeout_per_1k: int = 1800,
 ) -> str:
@@ -68,6 +69,8 @@ def train_dpo(
         use_wandb: Whether to log to wandb.
         wandb_project: Wandb project name.
         gradient_checkpointing: Whether to use gradient checkpointing.
+        merge_lora: Whether to merge the trained LoRA into a full model.
+            Development runs keep this False so vLLM can load adapters directly.
         device: CUDA device index.
         timeout_per_1k: Base timeout in seconds per 1000 preference pairs.
             The total subprocess timeout is ``timeout_per_1k *
@@ -152,6 +155,7 @@ def train_dpo(
         "use_wandb": use_wandb,
         "wandb_project": wandb_project,
         "gradient_checkpointing": gradient_checkpointing,
+        "merge_lora": merge_lora,
     }
     with open(_config_path, "w") as f:
         import json
@@ -205,4 +209,4 @@ def train_dpo(
         if _temp_dir and os.path.exists(_temp_dir):
             shutil.rmtree(_temp_dir, ignore_errors=True)
 
-    return output_dir
+    return output_dir if merge_lora else output_dir + "_adapter"

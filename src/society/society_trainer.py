@@ -115,6 +115,7 @@ def society_alternating_train(
     num_iterations: int = 1,
     num_rounds: int = 5,
     num_simulations: int = 5,
+    trajectory_max_tokens: int = 256,
     reward_threshold: float = 0.0,
     lora_r: int = 256,
     lora_alpha: int = 512,
@@ -163,6 +164,7 @@ def society_alternating_train(
         num_iterations: Number of alternating iterations.
         num_rounds: Deliberation rounds for trajectory generation.
         num_simulations: MC roll-out simulations.
+        trajectory_max_tokens: Max tokens for Algorithm 1 trajectory generation.
         reward_threshold: Preference pair filtering threshold.
         lora_r: LoRA rank (default 256).
         lora_alpha: LoRA alpha (default 512).
@@ -266,6 +268,7 @@ def society_alternating_train(
                 registry=registry,
                 num_rounds=num_rounds,
                 num_simulations=num_simulations,
+                max_tokens=trajectory_max_tokens,
                 reward_threshold=reward_threshold,
                 max_samples=max_samples,
                 seed=seed,
@@ -401,6 +404,7 @@ def society_alternating_train(
                 registry=registry,
                 num_rounds=num_rounds,
                 num_simulations=num_simulations,
+                max_tokens=trajectory_max_tokens,
                 reward_threshold=reward_threshold,
                 max_samples=max_samples,
                 seed=seed,
@@ -594,6 +598,7 @@ def _generate_critic_pairs_algorithm1(
     registry: AgentRegistry,
     num_rounds: int,
     num_simulations: int,
+    max_tokens: int,
     reward_threshold: float,
     max_samples: int,
     seed: int,
@@ -630,7 +635,7 @@ def _generate_critic_pairs_algorithm1(
     """
     from src.inference.vllm_server import VLLMInference
     from src.algorithms.deliberation import deliberate_batch
-    from src.algorithms.trajectory import _generate_guided_pairs_for_sample, generate_wrong_answer
+    from src.algorithms.trajectory import _generate_guided_pairs_for_batch, generate_wrong_answer
 
     model_name = registry.base_model_path or "Qwen/Qwen2.5-7B-Instruct"
     specialty = critic.error_specialty
@@ -684,56 +689,62 @@ def _generate_critic_pairs_algorithm1(
             # Batched natural deliberation (biggest speedup: N*2*T → 2*T calls)
             trajectories = deliberate_batch(
                 actor_adapter, critic_adapter, group_samples, dataset_name,
-                num_rounds=num_rounds, max_tokens=512, temperature=0.7,
+                num_rounds=num_rounds, max_tokens=max_tokens, temperature=0.7,
             )
 
-            # Per-sample guided trajectories + MC roll-out
-            for j, (sample, natural_traj) in enumerate(zip(group_samples, trajectories)):
-                if (len(raw_pairs) + 1) % 10 == 0:
-                    logger.info(
-                        f"  [{critic.name}] Guided pairs: {len(raw_pairs)} so far"
-                    )
-
+            correct_answers: list[str] = []
+            wrong_answers: list[str] = []
+            for j, sample in enumerate(group_samples):
                 rng = random.Random(seed + indexed_samples[j][0])
                 task_type = sample.get("task_type", "math")
                 correct_answer = sample.get("answer", "")
-                wrong_answer = generate_wrong_answer(
+                correct_answers.append(correct_answer)
+                wrong_answers.append(generate_wrong_answer(
                     correct_answer, sample.get("choices"),
                     task_type=task_type, rng=rng,
-                )
+                ))
 
-                algo_pairs = _generate_guided_pairs_for_sample(
-                    actor_adapter, critic_adapter, sample, natural_traj,
-                    dataset_name, correct_answer, wrong_answer,
-                    reward_threshold=reward_threshold,
-                    num_simulations=num_simulations,
-                )
+            algo_pairs = _generate_guided_pairs_for_batch(
+                actor_adapter, critic_adapter, group_samples, trajectories,
+                dataset_name, correct_answers, wrong_answers,
+                reward_threshold=reward_threshold,
+                num_simulations=num_simulations,
+                max_tokens=max_tokens,
+                temperature=0.7,
+            )
+            logger.info(
+                f"  [{critic.name}] Guided+MC batch with actor {actor_name}: "
+                f"{len(algo_pairs)} Algorithm 1 pairs"
+            )
 
-                for pair in algo_pairs:
-                    negative_actor = pair["negative"]
-                    negative_answer = extract_answer(negative_actor, task_type)
+            for pair in algo_pairs:
+                sample = pair["sample"]
+                negative_actor = pair["negative"]
+                task_type = sample.get("task_type", "math")
+                correct_answer = sample.get("answer", "")
+                negative_answer = extract_answer(negative_actor, task_type)
 
-                    if task_type == "math":
-                        is_wrong = not math_answers_equal(
-                            negative_answer or "", correct_answer,
-                        )
-                    else:
-                        is_wrong = normalize_answer(
-                            negative_answer or "", task_type,
-                        ) != normalize_answer(correct_answer, task_type)
+                if task_type == "math":
+                    is_wrong = not math_answers_equal(
+                        negative_answer or "", correct_answer,
+                    )
+                else:
+                    is_wrong = normalize_answer(
+                        negative_answer or "", task_type,
+                    ) != normalize_answer(correct_answer, task_type)
 
-                    if is_wrong:
-                        raw_pairs.append({
-                            "sample": sample,
-                            "chosen": pair["positive_critic"],
-                            "rejected": pair["negative_critic"],
-                            "actor_response": negative_actor,
-                            "actor_answer": negative_answer,
-                            "correct_answer": correct_answer,
-                            "task_type": task_type,
-                            "delta": pair["delta"],
-                            "direction": pair["direction"],
-                        })
+                if is_wrong:
+                    raw_pairs.append({
+                        "sample": sample,
+                        "chosen": pair["positive_critic"],
+                        "rejected": pair["negative_critic"],
+                        "actor_response": negative_actor,
+                        "actor_answer": negative_answer,
+                        "correct_answer": correct_answer,
+                        "task_type": task_type,
+                        "delta": pair["delta"],
+                        "direction": pair["direction"],
+                    })
 
         logger.info(
             f"  [{critic.name}] Algorithm 1 produced {len(raw_pairs)} raw critic pairs"
@@ -874,6 +885,7 @@ def _generate_actor_pairs_algorithm1(
     registry: AgentRegistry,
     num_rounds: int,
     num_simulations: int,
+    max_tokens: int,
     reward_threshold: float,
     max_samples: int,
     seed: int,
@@ -902,7 +914,7 @@ def _generate_actor_pairs_algorithm1(
     """
     from src.inference.vllm_server import VLLMInference
     from src.algorithms.deliberation import deliberate_batch
-    from src.algorithms.trajectory import _generate_guided_pairs_for_sample, generate_wrong_answer
+    from src.algorithms.trajectory import _generate_guided_pairs_for_batch, generate_wrong_answer
 
     model_name = registry.base_model_path or "Qwen/Qwen2.5-7B-Instruct"
 
@@ -955,39 +967,42 @@ def _generate_actor_pairs_algorithm1(
             # Batched natural deliberation
             trajectories = deliberate_batch(
                 actor_adapter, critic_adapter, group_samples, dataset_name,
-                num_rounds=num_rounds, max_tokens=512, temperature=0.7,
+                num_rounds=num_rounds, max_tokens=max_tokens, temperature=0.7,
             )
 
-            # Per-sample guided trajectories + MC roll-out
-            for j, (sample, natural_traj) in enumerate(zip(group_samples, trajectories)):
-                if (len(raw_pairs) + 1) % 10 == 0:
-                    logger.info(
-                        f"  [{actor.name}] Guided pairs: {len(raw_pairs)} so far"
-                    )
-
+            correct_answers: list[str] = []
+            wrong_answers: list[str] = []
+            for j, sample in enumerate(group_samples):
                 rng = random.Random(seed + indexed_samples[j][0])
                 correct_answer = sample.get("answer", "")
                 task_type = sample.get("task_type", "math")
-                wrong_answer = generate_wrong_answer(
+                correct_answers.append(correct_answer)
+                wrong_answers.append(generate_wrong_answer(
                     correct_answer, sample.get("choices"),
                     task_type=task_type, rng=rng,
-                )
+                ))
 
-                algo_pairs = _generate_guided_pairs_for_sample(
-                    actor_adapter, critic_adapter, sample, natural_traj,
-                    dataset_name, correct_answer, wrong_answer,
-                    reward_threshold=reward_threshold,
-                    num_simulations=num_simulations,
-                )
+            algo_pairs = _generate_guided_pairs_for_batch(
+                actor_adapter, critic_adapter, group_samples, trajectories,
+                dataset_name, correct_answers, wrong_answers,
+                reward_threshold=reward_threshold,
+                num_simulations=num_simulations,
+                max_tokens=max_tokens,
+                temperature=0.7,
+            )
+            logger.info(
+                f"  [{actor.name}] Guided+MC batch with critic {critic_name}: "
+                f"{len(algo_pairs)} Algorithm 1 pairs"
+            )
 
-                for pair in algo_pairs:
-                    raw_pairs.append({
-                        "sample": sample,
-                        "chosen": pair["positive"],
-                        "rejected": pair["negative"],
-                        "delta": pair["delta"],
-                        "direction": pair["direction"],
-                    })
+            for pair in algo_pairs:
+                raw_pairs.append({
+                    "sample": pair["sample"],
+                    "chosen": pair["positive"],
+                    "rejected": pair["negative"],
+                    "delta": pair["delta"],
+                    "direction": pair["direction"],
+                })
 
         logger.info(
             f"  [{actor.name}] Algorithm 1 produced {len(raw_pairs)} raw actor pairs"

@@ -10,8 +10,8 @@ common:
   max_samples: 300
   device: 6
   dtype: "bfloat16"
-  gpu_memory_utilization: 0.60
-  max_model_len: 8192
+  gpu_memory_utilization: 0.80
+  max_model_len: 4096
 
 # Phase 1: Bootstrap data generation
 step01_bootstrap:
@@ -19,7 +19,7 @@ step01_bootstrap:
   num_agents: 5
   num_debate_rounds: 2
   temperature: 0.8
-  max_tokens: 512
+  max_tokens: 192
 
 # Phase 2: Data classification (GLM API)
 step02_classify:
@@ -48,15 +48,18 @@ step04_diversify_critics:
   actor_base_dir: "output/society_mmlu/actors"
   output_dir: "output/society_mmlu/critics"
   critic_skills: ["reasoning", "knowledge", "computation", "verification"]
-  max_delib_samples: 300
+  max_delib_samples: 100
+  num_rounds: 3
+  num_simulations: 2
+  max_tokens: 192
   min_pairs_per_critic: 64
   min_specialty_items: 32
   min_specialty_ratio: 0.08
   specialty_ratio: 0.7
   general_ratio: 0.2
   calibration_ratio: 0.1
-  lora_r: 256
-  lora_alpha: 512
+  lora_r: 64
+  lora_alpha: 128
   learning_rate: 5.0e-5
   beta: 0.1
   batch_size: 4
@@ -69,11 +72,12 @@ step05_train_society:
   critic_base_dir: "output/society_mmlu/critics"
   output_dir: "output/society_mmlu/society"
   num_iterations: 1
-  num_rounds: 3
-  num_simulations: 5
+  num_rounds: 2
+  num_simulations: 2
+  trajectory_max_tokens: 192
   reward_threshold: 0.0
-  lora_r: 256
-  lora_alpha: 512
+  lora_r: 64
+  lora_alpha: 128
   learning_rate: 5.0e-5
   beta: 0.1
   batch_size: 4
@@ -86,5 +90,5 @@ step06_evaluate:
   society_dir: "output/society_mmlu/society"
   output_dir: "output/society_mmlu/eval"
   num_rounds: 2
-  max_tokens: 512
+  max_tokens: 128
   temperature: 0.0

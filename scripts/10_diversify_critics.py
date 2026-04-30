@@ -47,6 +47,7 @@ STEP_DEFAULTS = {
     "max_delib_samples": 300,
     "num_rounds": 5,
     "num_simulations": 5,
+    "max_tokens": 256,
     "reward_threshold": 0.0,
     "lora_r": 256,
     "lora_alpha": 512,
@@ -194,6 +195,7 @@ def build_critic_preference_pairs(
     dataset_name: str = "math",
     num_rounds: int = 5,
     num_simulations: int = 5,
+    max_tokens: int = 256,
     reward_threshold: float = 0.0,
     max_samples: int = 50,
     seed: int = 42,
@@ -227,7 +229,7 @@ def build_critic_preference_pairs(
     from script 09, providing diverse real actor responses.
     """
     from src.inference.vllm_server import VLLMInference
-    from src.algorithms.trajectory import generate_trajectories
+    from src.algorithms.trajectory import generate_trajectories_batch
     from src.algorithms.reward import extract_answer, math_answers_equal, normalize_answer
     from src.society.diversity_split import DiversitySplit
     from src.society.agent_registry import resolve_critic_skill
@@ -266,28 +268,36 @@ def build_critic_preference_pairs(
         # Base Critic adapter (no LoRA)
         critic_adapter = _LoRAModelAdapter(engine, None)
 
-        # Step 1: Run Algorithm 1 for each sample, round-robin actors
+        # Step 1: Run Algorithm 1 with samples grouped by round-robin actor.
+        # Each group batches natural deliberation, guided prompts, and MC
+        # rollout phases across samples.
         raw_pairs: List[Dict] = []
+        actor_groups: Dict[str, List[Dict]] = {}
         for i, sample in enumerate(samples[:n_samples]):
-            if (i + 1) % 10 == 0:
-                logger.info(f"    Algorithm 1: sample {i + 1}/{n_samples}")
+            actor_groups.setdefault(actor_names[i % len(actor_names)], []).append(sample)
 
-            # Round-robin actors so critic sees diverse styles
-            actor_name = actor_names[i % len(actor_names)]
+        for actor_name, group_samples in actor_groups.items():
             actor_adapter = adapters[actor_name]
+            logger.info(
+                f"    Algorithm 1 batch for '{critic_skill}' with actor "
+                f"{actor_name}: {len(group_samples)} samples"
+            )
 
-            task_type = sample.get("task_type", "math")
-            correct_answer = sample.get("answer", "")
-
-            algo_pairs = generate_trajectories(
+            algo_pairs = generate_trajectories_batch(
                 actor_model=actor_adapter,
                 critic_model=critic_adapter,
-                sample=sample,
+                samples=group_samples,
                 dataset_name=dataset_name,
                 num_rounds=num_rounds,
                 num_simulations=num_simulations,
                 reward_threshold=reward_threshold,
-                seed=seed + i,
+                max_tokens=max_tokens,
+                seed=seed,
+                batch_size=len(group_samples),
+            )
+            logger.info(
+                f"    Algorithm 1 batch for actor {actor_name} produced "
+                f"{len(algo_pairs)} pairs"
             )
 
             # Extract Critic preference pairs from Algorithm 1 results
@@ -295,6 +305,9 @@ def build_critic_preference_pairs(
                 # pair has: positive, negative (actor),
                 #           positive_critic, negative_critic,
                 #           delta, direction
+                sample = pair.get("sample", {})
+                task_type = sample.get("task_type", "math")
+                correct_answer = sample.get("answer", "")
                 negative_actor = pair["negative"]
                 negative_answer = extract_answer(negative_actor, task_type)
 
@@ -731,6 +744,7 @@ def main():
                 dataset_name=args.dataset,
                 num_rounds=args.num_rounds,
                 num_simulations=args.num_simulations,
+                max_tokens=args.max_tokens,
                 reward_threshold=args.reward_threshold,
                 max_samples=args.max_delib_samples,
                 seed=args.seed,

@@ -161,13 +161,15 @@ def _run():
     trainer.train()
     logger.info("Training complete.")
 
-    # Save LoRA adapter, then merge for vLLM compatibility
+    # Save LoRA adapter. vLLM supports loading LoRA adapters directly, so
+    # development runs skip the expensive full-model merge by default.
     output_dir = cfg["output_dir"]
     adapter_dir = output_dir + "_adapter"
     trainer.save_model(adapter_dir)
     logger.info(f"LoRA adapter saved to: {adapter_dir}")
 
-    if os.path.exists(os.path.join(adapter_dir, "adapter_config.json")):
+    merge_lora = cfg.get("merge_lora", False)
+    if merge_lora and os.path.exists(os.path.join(adapter_dir, "adapter_config.json")):
         logger.info("Merging LoRA weights into base model...")
         from peft import PeftModel
 
@@ -184,9 +186,12 @@ def _run():
 
         del base_model, merged_model
     else:
-        logger.warning("No adapter_config.json found, saving model as-is.")
-        trainer.save_model(output_dir)
-        tokenizer.save_pretrained(output_dir)
+        if merge_lora:
+            logger.warning("No adapter_config.json found, saving model as-is.")
+            trainer.save_model(output_dir)
+            tokenizer.save_pretrained(output_dir)
+        else:
+            logger.info("Skipping LoRA merge; downstream vLLM will load adapter directly.")
 
     gc.collect()
     try:

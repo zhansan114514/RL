@@ -226,6 +226,7 @@ def train_dpo_from_pairs(
         beta=beta,
         seed=seed,
         device=device,
+        merge_lora=True,
     )
     logger.info(f"{agent.capitalize()} saved: {result_path}")
     return result_path

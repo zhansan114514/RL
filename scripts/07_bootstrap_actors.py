@@ -95,28 +95,24 @@ def generate_initial_responses(
     from src.prompts.templates import PromptType
     from src.algorithms.reward import extract_answer
 
+    prompts = [
+        format_prompt(dataset_name, PromptType.SINGLE_SHOT, sample)
+        + f"\n\nYou are bootstrap Agent {agent_id}. Produce an independent solution."
+        for agent_id in range(num_agents)
+    ]
+    random.seed(base_seed)
+    gen_results = model.generate(
+        prompts,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        seed=base_seed,
+    )
+    if isinstance(gen_results, str):
+        gen_results = [gen_results]
+
     responses = []
-
-    for agent_id in range(num_agents):
-        # Use different seed for each agent
-        seed = base_seed + agent_id
-        random.seed(seed)
-
-        # Format prompt
-        prompt = format_prompt(
-            dataset_name,
-            PromptType.SINGLE_SHOT,
-            sample,
-        )
-
-        # Generate response
-        gen_result = model.generate(
-            prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            seed=seed,
-        )
-        response_text = gen_result[0] if isinstance(gen_result, list) else gen_result
+    for agent_id, response_text in enumerate(gen_results):
+        response_text = response_text if isinstance(response_text, str) else str(response_text)
 
         # Extract answer
         answer = extract_answer(response_text, sample.get("task_type", "math"))
@@ -146,33 +142,36 @@ def simulate_debate_round(
     from src.prompts.templates import PromptType
     from src.algorithms.reward import extract_answer
 
-    responses = []
-
     # Format responses text for context
     responses_text = "\n\n".join([
         f"Agent {r.agent_id}: {r.response}"
         for r in previous_responses
     ])
 
-    for agent_id in range(len(previous_responses)):
-        seed = base_seed + agent_id + round_num * 100
-
-        # Format deliberation prompt
-        prompt = format_prompt(
+    prompts = [
+        format_prompt(
             dataset_name,
             PromptType.DELIBERATION_ACTOR,
             sample,
             responses=responses_text,
         )
+        + f"\n\nYou are bootstrap Agent {agent_id}. Revise independently after reading the debate."
+        for agent_id in range(len(previous_responses))
+    ]
+    seed = base_seed + round_num * 100
+    random.seed(seed)
+    gen_results = model.generate(
+        prompts,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        seed=seed,
+    )
+    if isinstance(gen_results, str):
+        gen_results = [gen_results]
 
-        # Generate response
-        gen_result = model.generate(
-            prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            seed=seed,
-        )
-        response_text = gen_result[0] if isinstance(gen_result, list) else gen_result
+    responses = []
+    for agent_id, response_text in enumerate(gen_results):
+        response_text = response_text if isinstance(response_text, str) else str(response_text)
 
         # Extract answer
         answer = extract_answer(response_text, sample.get("task_type", "math"))

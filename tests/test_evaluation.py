@@ -156,8 +156,8 @@ class TestEvaluateBenchmark:
         actor = MagicMock()
         critic = MagicMock()
 
-        with patch("src.evaluation.benchmarks.deliberate") as mock_deliberate:
-            mock_deliberate.return_value = [
+        with patch("src.evaluation.benchmarks.deliberate_batch") as mock_deliberate_batch:
+            trajectory = [
                 {
                     "round": i,
                     "actor_response": "Final answer: Yes",
@@ -167,6 +167,7 @@ class TestEvaluateBenchmark:
                 }
                 for i in range(3)
             ]
+            mock_deliberate_batch.return_value = [trajectory, trajectory]
 
             samples = [
                 {"question": "Q1?", "passage": "P1.", "answer": "YES", "task_type": "yes_no"},
@@ -184,6 +185,7 @@ class TestEvaluateBenchmark:
             assert results["num_samples"] == 2
             assert results["num_rounds"] == 3
             assert len(results["per_round_accuracy"]) == 3
+            mock_deliberate_batch.assert_called_once()
 
 
 class TestExtractAnswerEdgeCases:

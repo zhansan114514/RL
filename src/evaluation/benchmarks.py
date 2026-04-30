@@ -8,7 +8,7 @@ import logging
 import time
 
 
-from src.algorithms.deliberation import deliberate
+from src.algorithms.deliberation import deliberate_batch
 from src.algorithms.reward import (
     extract_answer,
     compute_accuracy_with_ci,
@@ -35,6 +35,7 @@ def evaluate_benchmark(
     num_rounds: int = 5,
     max_tokens: int = 256,
     temperature: float = 0.7,
+    batch_size: int = 8,
 ) -> dict:
     """
     Evaluate Actor-Critic team on a benchmark dataset.
@@ -51,57 +52,89 @@ def evaluate_benchmark(
     Returns:
         Dict with accuracy, per_round_accuracy, improvement_rate, ci.
     """
+    return evaluate_benchmark_batch(
+        actor_model,
+        critic_model,
+        test_samples,
+        dataset_name,
+        num_rounds=num_rounds,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        batch_size=batch_size,
+    )
+
+
+def evaluate_benchmark_batch(
+    actor_model,
+    critic_model,
+    test_samples: list[dict],
+    dataset_name: str,
+    num_rounds: int = 5,
+    max_tokens: int = 256,
+    temperature: float = 0.7,
+    batch_size: int = 8,
+) -> dict:
+    """Evaluate Actor-Critic team with batched deliberation."""
     labels = []
     all_round_answers = [[] for _ in range(num_rounds)]
     sample_details = []
     eval_start = time.time()
 
-    for i, sample in enumerate(test_samples):
+    for batch_start in range(0, len(test_samples), batch_size):
+        batch = test_samples[batch_start:batch_start + batch_size]
         t0 = time.time()
-        logger.info(f"Evaluating: {i+1}/{len(test_samples)}")
+        logger.info(
+            f"Evaluating batch: {batch_start + 1}-"
+            f"{batch_start + len(batch)}/{len(test_samples)}"
+        )
 
-        trajectory = deliberate(
-            actor_model, critic_model, sample, dataset_name,
-            num_rounds=num_rounds, max_tokens=max_tokens,
+        trajectories = deliberate_batch(
+            actor_model, critic_model, batch, dataset_name,
+            num_rounds=num_rounds,
+            max_tokens=max_tokens,
             temperature=temperature,
         )
 
-        task_type = sample.get("task_type", "yes_no")
-        label = sample.get("answer", "")
-        labels.append(label)
+        batch_elapsed = time.time() - t0
+        per_sample_elapsed = batch_elapsed / max(len(batch), 1)
 
-        round_answers = []
-        for t, round_data in enumerate(trajectory):
-            answer = extract_answer(round_data["actor_response"], task_type)
-            all_round_answers[t].append(answer or "")
-            round_answers.append(answer or "")
+        for local_i, (sample, trajectory) in enumerate(zip(batch, trajectories)):
+            i = batch_start + local_i
+            task_type = sample.get("task_type", "yes_no")
+            label = sample.get("answer", "")
+            labels.append(label)
 
-        elapsed = time.time() - t0
-        initial_pred = round_answers[0] if round_answers else ""
-        final_pred = round_answers[-1] if round_answers else ""
+            round_answers = []
+            for t, round_data in enumerate(trajectory):
+                answer = extract_answer(round_data["actor_response"], task_type)
+                all_round_answers[t].append(answer or "")
+                round_answers.append(answer or "")
 
-        # Use math-aware comparison for math tasks
-        if task_type == "math":
-            from src.algorithms.reward import math_answers_equal
-            initially_correct = math_answers_equal(initial_pred, label)
-            finally_correct = math_answers_equal(final_pred, label)
-        else:
-            correct_label = label.upper().strip()
-            initially_correct = (initial_pred.upper() == correct_label)
-            finally_correct = (final_pred.upper() == correct_label)
+            initial_pred = round_answers[0] if round_answers else ""
+            final_pred = round_answers[-1] if round_answers else ""
 
-        sample_details.append({
-            "index": i,
-            "initial_answer": initial_pred,
-            "final_answer": final_pred,
-            "label": label,
-            "initially_correct": initially_correct,
-            "finally_correct": finally_correct,
-            "flipped_to_correct": not initially_correct and finally_correct,
-            "flipped_to_wrong": initially_correct and not finally_correct,
-            "elapsed_seconds": round(elapsed, 2),
-            "task_type": task_type,
-        })
+            # Use math-aware comparison for math tasks
+            if task_type == "math":
+                from src.algorithms.reward import math_answers_equal
+                initially_correct = math_answers_equal(initial_pred, label)
+                finally_correct = math_answers_equal(final_pred, label)
+            else:
+                correct_label = label.upper().strip()
+                initially_correct = (initial_pred.upper() == correct_label)
+                finally_correct = (final_pred.upper() == correct_label)
+
+            sample_details.append({
+                "index": i,
+                "initial_answer": initial_pred,
+                "final_answer": final_pred,
+                "label": label,
+                "initially_correct": initially_correct,
+                "finally_correct": finally_correct,
+                "flipped_to_correct": not initially_correct and finally_correct,
+                "flipped_to_wrong": initially_correct and not finally_correct,
+                "elapsed_seconds": round(per_sample_elapsed, 2),
+                "task_type": task_type,
+            })
 
     eval_elapsed = time.time() - eval_start
 

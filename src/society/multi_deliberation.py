@@ -369,13 +369,19 @@ def multi_agent_deliberate_single_gpu(
                     _atomic_write_json(ckpt_path, {"actor_response": response})
 
         # ---- Step 2: Batch all Critic evaluations ----
-        for actor in actors:
+        for actor_idx, actor in enumerate(actors):
             actor_response = round_data.actor_responses[actor.name]
             round_data.critic_feedbacks[actor.name] = {}
+            selected_critics = _select_critics_for_generation(
+                critics,
+                getattr(router, "top_k", len(critics)),
+                round_num,
+                actor_idx,
+            )
 
             # Check cache for all critics
             uncached_critics = []
-            for critic in critics:
+            for critic in selected_critics:
                 ckpt_path = (ckpt_dir / f"round_{round_num}" /
                              f"critic_{critic.name}_for_{actor.name}.json" if ckpt_dir else None)
                 cached = _load_json(ckpt_path) if ckpt_path else None
@@ -412,7 +418,7 @@ def multi_agent_deliberate_single_gpu(
 
             # ---- Step 3: Router combines feedback ----
             critic_feedbacks = []
-            for critic in critics:
+            for critic in selected_critics:
                 resp = round_data.critic_feedbacks[actor.name].get(critic.name, "")
                 fb = build_critic_feedback(critic, resp)
                 critic_feedbacks.append(fb)
@@ -460,6 +466,22 @@ def multi_agent_deliberate_single_gpu(
 
 # Keep old name for backward compat
 multi_agent_deliberate = multi_agent_deliberate_single_gpu
+
+
+def _select_critics_for_generation(
+    critics: list[AgentConfig],
+    top_k: int,
+    round_num: int,
+    actor_idx: int,
+) -> list[AgentConfig]:
+    """Pre-route critics before generation to make Top-K reduce compute."""
+    if top_k <= 0 or top_k >= len(critics):
+        return critics
+    start = (round_num + actor_idx) % len(critics)
+    return [
+        critics[(start + offset) % len(critics)]
+        for offset in range(top_k)
+    ]
 
 
 # ============================================================

@@ -216,6 +216,263 @@ def _generate_guided_pairs_for_sample(
     return preference_pairs
 
 
+def _generate_guided_pairs_for_batch(
+    actor_model,
+    critic_model,
+    samples: list[dict],
+    natural_trajectories: list[list[dict]],
+    dataset_name: str,
+    correct_answers: list[str],
+    wrong_answers: list[str],
+    reward_threshold: float = 0.0,
+    num_simulations: int = 5,
+    max_tokens: int = 512,
+    temperature: float = 0.7,
+    sample_offset: int = 0,
+) -> list[dict]:
+    """Run guided trajectory generation + MC roll-out for a batch of samples.
+
+    This is the throughput-oriented Algorithm 1 path. For each round, it
+    batches all samples' guided actor prompts, guided critic prompts, and the
+    three MC rollout phases into large vLLM calls instead of serializing by
+    sample.
+    """
+    if not samples:
+        return []
+
+    if not (
+        len(samples)
+        == len(natural_trajectories)
+        == len(correct_answers)
+        == len(wrong_answers)
+    ):
+        raise ValueError("samples, trajectories, and answers must have equal length")
+
+    preference_pairs: list[dict] = []
+    max_rounds = max((len(traj) for traj in natural_trajectories), default=0)
+
+    for t in range(1, max_rounds):
+        active = [
+            i for i, traj in enumerate(natural_trajectories)
+            if t < len(traj)
+        ]
+        if not active:
+            continue
+
+        previous_by_sample: dict[int, list[str]] = {}
+        for i in active:
+            previous: list[str] = []
+            for r in natural_trajectories[i][:t]:
+                previous.append(r["actor_response"])
+                previous.append(r["critic_response"])
+            previous_by_sample[i] = previous
+
+        # --- Guided actor responses: 2 * B prompts in one actor call ---
+        guided_actor_prompts: list[str] = []
+        guided_actor_meta: list[tuple[int, str]] = []
+        for i in active:
+            sample = samples[i]
+            round_data = natural_trajectories[i][t]
+            guided_actor_prompts.append(_make_guided_prompt(
+                dataset_name, sample, correct_answers[i], t,
+                previous_by_sample[i], round_data["actor_response"],
+                agent="actor",
+            ))
+            guided_actor_meta.append((i, "correct"))
+            guided_actor_prompts.append(_make_guided_prompt(
+                dataset_name, sample, wrong_answers[i], t,
+                previous_by_sample[i], round_data["actor_response"],
+                agent="actor",
+            ))
+            guided_actor_meta.append((i, "wrong"))
+
+        guided_actor_results = actor_model.generate(
+            guided_actor_prompts,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+
+        guided_actor: dict[int, dict[str, str]] = {
+            i: {} for i in active
+        }
+        for (i, direction), response in zip(guided_actor_meta, guided_actor_results):
+            guided_actor[i][direction] = response
+
+        # --- Guided critic responses: 2 * B prompts in one critic call ---
+        guided_critic_prompts: list[str] = []
+        guided_critic_meta: list[tuple[int, str]] = []
+        for i in active:
+            sample = samples[i]
+            guided_critic_prompts.append(_make_guided_prompt(
+                dataset_name, sample, correct_answers[i], t,
+                previous_by_sample[i], guided_actor[i]["correct"],
+                agent="critic",
+            ))
+            guided_critic_meta.append((i, "correct"))
+            guided_critic_prompts.append(_make_guided_prompt(
+                dataset_name, sample, wrong_answers[i], t,
+                previous_by_sample[i], guided_actor[i]["wrong"],
+                agent="critic",
+            ))
+            guided_critic_meta.append((i, "wrong"))
+
+        guided_critic_results = critic_model.generate(
+            guided_critic_prompts,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        )
+
+        guided_critic: dict[int, dict[str, str]] = {
+            i: {} for i in active
+        }
+        for (i, direction), response in zip(guided_critic_meta, guided_critic_results):
+            guided_critic[i][direction] = response
+
+        # --- MC rollout Phase A: actor responses from three prefixes ---
+        phase_a_prompts: list[str] = []
+        phase_a_meta: list[tuple[int, int]] = []
+        for i in active:
+            sample = samples[i]
+            round_data = natural_trajectories[i][t]
+            prefix_pairs = [
+                (round_data["actor_response"], round_data["critic_response"]),
+                (guided_actor[i]["correct"], guided_critic[i]["correct"]),
+                (guided_actor[i]["wrong"], guided_critic[i]["wrong"]),
+            ]
+            for prefix_idx, (prefix_actor, prefix_critic) in enumerate(prefix_pairs):
+                for _ in range(num_simulations):
+                    sim_ctx = (
+                        list(previous_by_sample[i])
+                        + [prefix_actor, prefix_critic]
+                    )
+                    phase_a_prompts.append(format_prompt(
+                        dataset_name, PromptType.DELIBERATION_ACTOR, sample,
+                        responses=sim_ctx,
+                    ))
+                    phase_a_meta.append((i, prefix_idx))
+
+        phase_a_results = actor_model.generate(
+            phase_a_prompts,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        ) if phase_a_prompts else []
+
+        # --- MC rollout Phase B: critic feedback for each simulated response ---
+        phase_b_prompts = [
+            format_prompt(
+                dataset_name, PromptType.DELIBERATION_CRITIC, samples[i],
+                actor_response=response,
+            )
+            for (i, _), response in zip(phase_a_meta, phase_a_results)
+        ]
+        phase_b_results = critic_model.generate(
+            phase_b_prompts,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        ) if phase_b_prompts else []
+
+        # --- MC rollout Phase C: actor refined response with critic feedback ---
+        phase_c_prompts: list[str] = []
+        phase_c_meta: list[tuple[int, int]] = []
+        for (i, prefix_idx), actor_resp, critic_resp in zip(
+            phase_a_meta, phase_a_results, phase_b_results,
+        ):
+            sample = samples[i]
+            round_data = natural_trajectories[i][t]
+            if prefix_idx == 0:
+                prefix_actor = round_data["actor_response"]
+                prefix_critic = round_data["critic_response"]
+            elif prefix_idx == 1:
+                prefix_actor = guided_actor[i]["correct"]
+                prefix_critic = guided_critic[i]["correct"]
+            else:
+                prefix_actor = guided_actor[i]["wrong"]
+                prefix_critic = guided_critic[i]["wrong"]
+
+            sim_ctx = (
+                list(previous_by_sample[i])
+                + [prefix_actor, prefix_critic, actor_resp, critic_resp]
+            )
+            phase_c_prompts.append(format_prompt(
+                dataset_name, PromptType.DELIBERATION_ACTOR, sample,
+                responses=sim_ctx,
+            ))
+            phase_c_meta.append((i, prefix_idx))
+
+        phase_c_results = actor_model.generate(
+            phase_c_prompts,
+            max_tokens=max_tokens,
+            temperature=temperature,
+        ) if phase_c_prompts else []
+
+        correct_counts: dict[int, list[int]] = {
+            i: [0, 0, 0] for i in active
+        }
+        total_counts: dict[int, list[int]] = {
+            i: [0, 0, 0] for i in active
+        }
+        correct_norms = {
+            i: normalize_answer(
+                correct_answers[i],
+                task_type=samples[i].get("task_type", "yes_no"),
+            )
+            for i in active
+        }
+
+        for (i, prefix_idx), response in zip(phase_c_meta, phase_c_results):
+            task_type = samples[i].get("task_type", "yes_no")
+            answer = extract_answer(response, task_type)
+            if normalize_answer(answer or "", task_type=task_type) == correct_norms[i]:
+                correct_counts[i][prefix_idx] += 1
+            total_counts[i][prefix_idx] += 1
+
+        for i in active:
+            round_data = natural_trajectories[i][t]
+
+            def value(prefix_idx: int) -> float:
+                total = total_counts[i][prefix_idx]
+                return correct_counts[i][prefix_idx] / total if total else 0.0
+
+            v_natural = value(0)
+            v_guided_correct = value(1)
+            v_guided_wrong = value(2)
+            delta_y = compute_reward_delta(v_guided_correct, v_natural)
+            delta_not_y = compute_reward_delta(v_natural, v_guided_wrong)
+
+            if delta_y >= reward_threshold:
+                preference_pairs.append({
+                    "sample": samples[i],
+                    "sample_idx": sample_offset + i,
+                    "actor_prompt": round_data["actor_prompt"],
+                    "critic_prompt": round_data["critic_prompt"],
+                    "positive": guided_actor[i]["correct"],
+                    "negative": round_data["actor_response"],
+                    "positive_critic": guided_critic[i]["correct"],
+                    "negative_critic": round_data["critic_response"],
+                    "round": t,
+                    "delta": delta_y,
+                    "direction": "towards",
+                    "agent": "actor",
+                })
+            if delta_not_y >= reward_threshold:
+                preference_pairs.append({
+                    "sample": samples[i],
+                    "sample_idx": sample_offset + i,
+                    "actor_prompt": round_data["actor_prompt"],
+                    "critic_prompt": round_data["critic_prompt"],
+                    "positive": round_data["actor_response"],
+                    "negative": guided_actor[i]["wrong"],
+                    "positive_critic": round_data["critic_response"],
+                    "negative_critic": guided_critic[i]["wrong"],
+                    "round": t,
+                    "delta": delta_not_y,
+                    "direction": "away",
+                    "agent": "actor",
+                })
+
+    return preference_pairs
+
+
 # ============================================================
 # Public API
 # ============================================================
@@ -337,24 +594,28 @@ def generate_trajectories_batch(
             temperature=temperature,
         )
 
-        # Generate guided trajectories per sample (within the batch)
-        for i, (sample, natural_trajectory) in enumerate(zip(batch, trajectories)):
+        correct_answers: list[str] = []
+        wrong_answers: list[str] = []
+        for i, sample in enumerate(batch):
             rng = random.Random(seed + batch_start + i)
             correct_answer = sample.get("answer", "")
             task_type = sample.get("task_type", "yes_no")
-            wrong_answer = generate_wrong_answer(
-                correct_answer, sample.get("choices"), task_type=task_type, rng=rng,
-            )
+            correct_answers.append(correct_answer)
+            wrong_answers.append(generate_wrong_answer(
+                correct_answer, sample.get("choices"),
+                task_type=task_type, rng=rng,
+            ))
 
-            pairs = _generate_guided_pairs_for_sample(
-                actor_model, critic_model, sample, natural_trajectory,
-                dataset_name, correct_answer, wrong_answer,
-                reward_threshold=reward_threshold,
-                num_simulations=num_simulations,
-                max_tokens=max_tokens,
-                temperature=temperature,
-            )
-            all_pairs.extend(pairs)
+        pairs = _generate_guided_pairs_for_batch(
+            actor_model, critic_model, batch, trajectories,
+            dataset_name, correct_answers, wrong_answers,
+            reward_threshold=reward_threshold,
+            num_simulations=num_simulations,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            sample_offset=batch_start,
+        )
+        all_pairs.extend(pairs)
 
     return all_pairs
 
