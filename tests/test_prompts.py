@@ -144,6 +144,27 @@ class TestPromptFormatting:
         )
         assert "Output format requirements:" not in result
 
+    def test_prior_response_contract_text_does_not_suppress_current_contract(self):
+        sample = {
+            "question": "Is the sky blue?",
+            "passage": "The sky appears blue.",
+            "task_type": "yes_no",
+        }
+        prior_response = (
+            "I copied the instruction text:\n"
+            "Output format requirements:\n"
+            "FINAL_ANSWER: Yes\n"
+            "Do not write anything after the FINAL_ANSWER line."
+        )
+        result = format_prompt(
+            "boolq",
+            PromptType.DELIBERATION_ACTOR,
+            sample,
+            responses=[prior_response],
+        )
+        assert result.count("Output format requirements:") == 2
+        assert result.rstrip().endswith("Do not write anything after the FINAL_ANSWER line.")
+
 
 class TestFormatResponses:
     """Test multi-response formatting helper."""

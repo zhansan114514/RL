@@ -81,10 +81,22 @@ def append_answer_contract(
     task_type: str | None = None,
 ) -> str:
     """Append the Actor final-answer contract unless it is already present."""
-    if "Output format requirements:" in prompt and "FINAL_ANSWER:" in prompt:
+    if _has_answer_contract_suffix(prompt):
         return prompt
     inferred_task_type = task_type or _infer_task_type_from_prompt(prompt)
     return prompt.rstrip() + answer_contract(sample, inferred_task_type)
+
+
+def _has_answer_contract_suffix(prompt: str) -> bool:
+    """Return True only when the final prompt section is already the contract."""
+    final_section = prompt.rstrip().rsplit("\n\nOutput format requirements:\n", 1)[-1]
+    return (
+        final_section != prompt.rstrip()
+        and "FINAL_ANSWER:" in final_section
+        and final_section.rstrip().endswith(
+            "Do not write anything after the FINAL_ANSWER line."
+        )
+    )
 
 
 def _infer_task_type_from_prompt(prompt: str) -> str | None:
