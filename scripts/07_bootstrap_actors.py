@@ -39,6 +39,7 @@ STEP_DEFAULTS = {
     "max_tokens": 512,
     "seed": 42,
     "max_samples": None,
+    "batch_size": 8,
     "dtype": "bfloat16",
     "gpu_memory_utilization": 0.85,
     "max_model_len": 4096,
@@ -127,6 +128,65 @@ def generate_initial_responses(
     return responses
 
 
+def _coerce_generation_results(results, expected: int, phase: str) -> list[str]:
+    """Normalize model output and fail fast on prompt/result misalignment."""
+    if isinstance(results, str):
+        results = [results]
+    results = [r if isinstance(r, str) else str(r) for r in results]
+    if len(results) != expected:
+        raise ValueError(
+            f"{phase} generated {len(results)} responses for {expected} prompts"
+        )
+    return results
+
+
+def generate_initial_responses_batch(
+    model,
+    samples: list[dict],
+    dataset_name: str,
+    num_agents: int,
+    temperature: float,
+    max_tokens: int,
+    base_seed: int,
+) -> list[list[AgentResponse]]:
+    """Generate initial responses for multiple samples and agents in one call."""
+    from src.prompts.formatter import format_prompt
+    from src.prompts.templates import PromptType
+    from src.algorithms.reward import extract_answer
+
+    prompts: list[str] = []
+    meta: list[tuple[int, int]] = []
+    for sample_idx, sample in enumerate(samples):
+        for agent_id in range(num_agents):
+            prompts.append(
+                format_prompt(dataset_name, PromptType.SINGLE_SHOT, sample)
+                + f"\n\nYou are bootstrap Agent {agent_id}. Produce an independent solution."
+            )
+            meta.append((sample_idx, agent_id))
+
+    random.seed(base_seed)
+    gen_results = model.generate(
+        prompts,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        seed=base_seed,
+    )
+    gen_results = _coerce_generation_results(gen_results, len(prompts), "initial batch")
+
+    responses_by_sample: list[list[AgentResponse]] = [[] for _ in samples]
+    for (sample_idx, agent_id), response_text in zip(meta, gen_results):
+        sample = samples[sample_idx]
+        answer = extract_answer(response_text, sample.get("task_type", "math"))
+        responses_by_sample[sample_idx].append(AgentResponse(
+            agent_id=agent_id,
+            round=0,
+            response=response_text,
+            answer=answer,
+        ))
+
+    return responses_by_sample
+
+
 def simulate_debate_round(
     model,
     sample: dict,
@@ -186,6 +246,74 @@ def simulate_debate_round(
     return responses
 
 
+def simulate_debate_round_batch(
+    model,
+    samples: list[dict],
+    dataset_name: str,
+    previous_responses_by_sample: list[list[AgentResponse]],
+    round_num: int,
+    temperature: float,
+    max_tokens: int,
+    base_seed: int,
+) -> list[list[AgentResponse]]:
+    """Simulate one debate round for multiple samples and agents in one call."""
+    from src.prompts.formatter import format_prompt
+    from src.prompts.templates import PromptType
+    from src.algorithms.reward import extract_answer
+
+    if len(samples) != len(previous_responses_by_sample):
+        raise ValueError("samples and previous responses must have equal length")
+
+    prompts: list[str] = []
+    meta: list[tuple[int, int]] = []
+    for sample_idx, (sample, previous_responses) in enumerate(
+        zip(samples, previous_responses_by_sample)
+    ):
+        responses_text = "\n\n".join([
+            f"Agent {r.agent_id}: {r.response}"
+            for r in previous_responses
+        ])
+        for agent_id in range(len(previous_responses)):
+            prompts.append(
+                format_prompt(
+                    dataset_name,
+                    PromptType.DELIBERATION_ACTOR,
+                    sample,
+                    responses=responses_text,
+                )
+                + (
+                    f"\n\nYou are bootstrap Agent {agent_id}. "
+                    "Revise independently after reading the debate."
+                )
+            )
+            meta.append((sample_idx, agent_id))
+
+    seed = base_seed + round_num * 100
+    random.seed(seed)
+    gen_results = model.generate(
+        prompts,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        seed=seed,
+    )
+    gen_results = _coerce_generation_results(
+        gen_results, len(prompts), f"debate round {round_num} batch"
+    )
+
+    responses_by_sample: list[list[AgentResponse]] = [[] for _ in samples]
+    for (sample_idx, agent_id), response_text in zip(meta, gen_results):
+        sample = samples[sample_idx]
+        answer = extract_answer(response_text, sample.get("task_type", "math"))
+        responses_by_sample[sample_idx].append(AgentResponse(
+            agent_id=agent_id,
+            round=round_num,
+            response=response_text,
+            answer=answer,
+        ))
+
+    return responses_by_sample
+
+
 def compute_consensus(responses: list[AgentResponse], task_type: str = "math") -> tuple[str, float]:
     """Compute consensus answer via majority vote with math-aware comparison."""
     from src.algorithms.reward import math_answers_equal
@@ -230,6 +358,7 @@ def main():
     os.makedirs(os.path.join(cache_dir, "logs"), exist_ok=True)
 
     num_agents = args.num_agents
+    batch_size = max(1, int(getattr(args, "batch_size", 1) or 1))
 
     logger.info("=" * 60)
     logger.info("Bootstrap Diverse Actors")
@@ -237,6 +366,7 @@ def main():
     logger.info(f"  Dataset: {args.dataset}")
     logger.info(f"  Num agents: {num_agents}")
     logger.info(f"  Debate rounds: {args.num_debate_rounds}")
+    logger.info(f"  Bootstrap sample batch size: {batch_size}")
     logger.info(f"  Output dir: {output_dir}")
     logger.info("=" * 60)
 
@@ -286,68 +416,86 @@ def main():
                     continue
         logger.info(f"  Found {len(existing_sample_ids)} existing trajectories, skipping them")
 
-    for idx, sample in enumerate(samples):
-        if (idx + 1) % 10 == 0:
-            logger.info(f"  Progress: {idx + 1}/{len(samples)}")
+    pending = [
+        (idx, sample)
+        for idx, sample in enumerate(samples)
+        if f"{args.dataset}_{idx}" not in existing_sample_ids
+    ]
+    logger.info(f"  Pending samples: {len(pending)}")
 
-        sample_id = f"{args.dataset}_{idx}"
+    for batch_start in range(0, len(pending), batch_size):
+        batch_entries = pending[batch_start:batch_start + batch_size]
+        batch_indices = [idx for idx, _ in batch_entries]
+        batch_samples = [sample for _, sample in batch_entries]
+        first_display_idx = batch_start + 1
+        last_display_idx = batch_start + len(batch_entries)
+        logger.info(
+            f"  Progress: pending {first_display_idx}-{last_display_idx}/{len(pending)}"
+        )
 
-        # Skip already-processed samples (crash recovery)
-        if sample_id in existing_sample_ids:
-            continue
+        base_seed = args.seed + batch_indices[0] * 1000
 
-        # Generate initial responses
-        initial_responses = generate_initial_responses(
+        # Generate initial responses for all samples x agents in this batch.
+        initial_responses_batch = generate_initial_responses_batch(
             model,
-            sample,
+            batch_samples,
             args.dataset,
             num_agents,
             args.temperature,
             args.max_tokens,
-            args.seed + idx * 1000,
+            base_seed,
         )
 
-        # Simulate debate rounds
-        debate_rounds = []
-        current_responses = initial_responses
+        # Simulate debate rounds, batching all samples x agents per round.
+        debate_rounds_batch: list[list[list[AgentResponse]]] = [
+            [] for _ in batch_samples
+        ]
+        current_responses_batch = initial_responses_batch
 
         for round_num in range(1, args.num_debate_rounds + 1):
-            round_responses = simulate_debate_round(
+            round_responses_batch = simulate_debate_round_batch(
                 model,
-                sample,
+                batch_samples,
                 args.dataset,
-                current_responses,
+                current_responses_batch,
                 round_num,
                 args.temperature,
                 args.max_tokens,
-                args.seed + idx * 1000,
+                base_seed,
             )
-            debate_rounds.append(round_responses)
-            current_responses = round_responses
+            for local_idx, round_responses in enumerate(round_responses_batch):
+                debate_rounds_batch[local_idx].append(round_responses)
+            current_responses_batch = round_responses_batch
 
-        # Compute consensus from final round
-        final_responses = debate_rounds[-1] if debate_rounds else initial_responses
-        consensus, confidence = compute_consensus(final_responses, sample.get("task_type", "math"))
+        batch_records = []
+        for local_idx, (idx, sample) in enumerate(batch_entries):
+            sample_id = f"{args.dataset}_{idx}"
+            initial_responses = initial_responses_batch[local_idx]
+            debate_rounds = debate_rounds_batch[local_idx]
 
-        trajectory = BootstrapTrajectory(
-            sample_id=sample_id,
-            sample=sample,
-            initial_responses=[r.__dict__ for r in initial_responses],
-            debate_rounds=[[r.__dict__ for r in round_resp] for round_resp in debate_rounds],
-            consensus_answer=consensus,
-            confidence=confidence,
-            metadata={
-                "num_agents": num_agents,
-                "num_rounds": args.num_debate_rounds,
-                "temperature": args.temperature,
-            },
-        )
+            final_responses = debate_rounds[-1] if debate_rounds else initial_responses
+            consensus, confidence = compute_consensus(
+                final_responses,
+                sample.get("task_type", "math"),
+            )
 
-        trajectories.append(trajectory)
+            trajectory = BootstrapTrajectory(
+                sample_id=sample_id,
+                sample=sample,
+                initial_responses=[r.__dict__ for r in initial_responses],
+                debate_rounds=[[r.__dict__ for r in round_resp] for round_resp in debate_rounds],
+                consensus_answer=consensus,
+                confidence=confidence,
+                metadata={
+                    "num_agents": num_agents,
+                    "num_rounds": args.num_debate_rounds,
+                    "temperature": args.temperature,
+                    "batch_size": batch_size,
+                },
+            )
 
-        # Write to JSONL incrementally
-        with open(output_file, "a") as f:
-            f.write(json.dumps({
+            trajectories.append(trajectory)
+            batch_records.append({
                 "sample_id": trajectory.sample_id,
                 "sample": trajectory.sample,
                 "initial_responses": trajectory.initial_responses,
@@ -355,7 +503,12 @@ def main():
                 "consensus_answer": trajectory.consensus_answer,
                 "confidence": trajectory.confidence,
                 "metadata": trajectory.metadata,
-            }, ensure_ascii=False) + "\n")
+            })
+
+        # Write to JSONL after each sample batch for crash recovery.
+        with open(output_file, "a") as f:
+            for record in batch_records:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
     logger.info(f"[Step 4] Saved {len(trajectories)} trajectories to {output_file}")
     logger.info("=" * 60)

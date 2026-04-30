@@ -19,6 +19,7 @@ step01_bootstrap:
   num_debate_rounds: 2
   temperature: 0.8
   max_tokens: 512
+  batch_size: 8
 
 # Phase 2: Data classification
 step02_classify:
