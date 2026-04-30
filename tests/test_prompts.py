@@ -120,6 +120,30 @@ class TestPromptFormatting:
         assert "(C) 5" in result
         assert "(D) 6" in result
 
+    def test_actor_prompt_appends_final_answer_contract(self):
+        sample = {
+            "question": "What is 2+2?",
+            "choices": ["3", "4", "5", "6"],
+            "task_type": "multiple_choice",
+        }
+        result = format_prompt("mmlu", PromptType.SINGLE_SHOT, sample)
+        assert "FINAL_ANSWER: A or B or C or D" in result
+        assert result.rstrip().endswith("Do not write anything after the FINAL_ANSWER line.")
+
+    def test_critic_prompt_does_not_append_final_answer_contract(self):
+        sample = {
+            "question": "Is the sky blue?",
+            "passage": "The sky appears blue.",
+            "task_type": "yes_no",
+        }
+        result = format_prompt(
+            "boolq",
+            PromptType.DELIBERATION_CRITIC,
+            sample,
+            actor_response="FINAL_ANSWER: Yes",
+        )
+        assert "Output format requirements:" not in result
+
 
 class TestFormatResponses:
     """Test multi-response formatting helper."""

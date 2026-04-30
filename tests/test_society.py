@@ -558,6 +558,226 @@ class TestCriticRouter:
         assert len(result_high.selected_critics) == 2
 
 
+class TestMultiAgentCriticRouting:
+    """Test integration between deliberation and critic router."""
+
+    def test_all_critics_generate_before_router_top_k(self):
+        """Router top_k should not pre-filter critic generation."""
+        from src.society.multi_deliberation import multi_agent_deliberate_single_gpu
+
+        class BatchInferenceStub:
+            def __init__(self):
+                self.calls = []
+
+            def generate(self, prompts, **kwargs):
+                self.calls.append(list(prompts))
+                if len(self.calls) == 1:
+                    return [
+                        "The passage supports the claim.\nFINAL_ANSWER: Yes"
+                        for _ in prompts
+                    ]
+
+                confidences = [0.2, 0.95, 0.8, 0.3]
+                return [
+                    (
+                        f"feedback_{i}\n"
+                        "[Answer_Correct: yes]\n"
+                        f"[Confidence: {confidences[i]}]"
+                    )
+                    for i, _ in enumerate(prompts)
+                ]
+
+        actor = AgentConfig(
+            name="actor_direct",
+            role=AgentRole.ACTOR,
+            model_path="/models/base",
+            reasoning_style=ReasoningStyle.DIRECT,
+        )
+        critics = [
+            AgentConfig(
+                name=f"critic_{skill.value}",
+                role=AgentRole.CRITIC,
+                model_path="/models/base",
+                error_specialty=skill,
+            )
+            for skill in [
+                CriticSkill.COMPUTATION,
+                CriticSkill.REASONING,
+                CriticSkill.KNOWLEDGE,
+                CriticSkill.VERIFICATION,
+            ]
+        ]
+        sample = {
+            "question": "Is the sky blue?",
+            "passage": "The sky appears blue in daylight.",
+            "answer": "yes",
+            "task_type": "yes_no",
+        }
+        engine = BatchInferenceStub()
+
+        result = multi_agent_deliberate_single_gpu(
+            inference_engine=engine,
+            actors=[actor],
+            critics=critics,
+            sample=sample,
+            dataset_name="boolq",
+            num_rounds=1,
+            router=CriticRouter(top_k=2, min_confidence=0.0),
+        )
+
+        critic_call = engine.calls[1]
+        first_round = result.rounds[0]
+        routed = first_round.routed_feedbacks[actor.name]
+
+        assert len(critic_call) == 4
+        assert set(first_round.critic_feedbacks[actor.name]) == {
+            critic.name for critic in critics
+        }
+        assert len(routed.raw_feedbacks) == 4
+        assert routed.selected_critics == ["critic_reasoning", "critic_knowledge"]
+
+
+class TestSocietyAlternatingTrain:
+    """Test alternating trainer state handoff between phases."""
+
+    def test_build_lora_adapters_raises_when_required_lora_missing(
+        self, monkeypatch
+    ):
+        """Agents with lora_path must not silently fall back to base model."""
+        from src.society import society_trainer, multi_deliberation
+        from src.society.multi_deliberation import LoRAError
+
+        actor = AgentConfig(
+            name="actor_direct",
+            role=AgentRole.ACTOR,
+            model_path="/models/base",
+            lora_path="/missing/actor_adapter",
+            reasoning_style=ReasoningStyle.DIRECT,
+        )
+
+        def fake_load_lora_adapter(engine, lora_path):
+            raise LoRAError("adapter_config.json not found")
+
+        monkeypatch.setattr(
+            multi_deliberation, "_load_lora_adapter", fake_load_lora_adapter
+        )
+
+        with pytest.raises(
+            LoRAError,
+            match="actor_direct.*missing/actor_adapter.*adapter_config",
+        ):
+            society_trainer._build_lora_adapters(object(), [actor])
+
+    def test_phase_handoff_uses_newly_trained_lora_paths(self, tmp_path, monkeypatch):
+        """Phase B should see Phase A critics; next Phase A should see Phase B actors."""
+        from src.society import society_trainer
+
+        registry = AgentRegistry(base_model_path="/models/base")
+        registry.register(AgentConfig(
+            name="actor_direct",
+            role=AgentRole.ACTOR,
+            model_path="/models/base",
+            lora_path="/initial/actor",
+            reasoning_style=ReasoningStyle.DIRECT,
+        ))
+        registry.register(AgentConfig(
+            name="critic_computation",
+            role=AgentRole.CRITIC,
+            model_path="/models/base",
+            lora_path="/initial/critic",
+            error_specialty=CriticSkill.COMPUTATION,
+        ))
+
+        phase_engine_calls = []
+        pair_generation_calls = []
+
+        def fake_create_phase_engine(**kwargs):
+            phase_engine_calls.append({
+                agent.name: agent.lora_path
+                for agent in kwargs["agents"]
+            })
+            return object()
+
+        def fake_generate_critic_pairs_algorithm1(**kwargs):
+            pair_generation_calls.append({
+                "phase": "critic",
+                "actor_paths": [
+                    actor.lora_path for actor in kwargs["actors"]
+                ],
+                "critic_path": kwargs["critic"].lora_path,
+            })
+            return [{
+                "sample": {"question": "1+1?", "answer": "2", "task_type": "math"},
+                "chosen": "correct feedback",
+                "rejected": "incorrect feedback",
+            }]
+
+        def fake_generate_actor_pairs_algorithm1(**kwargs):
+            pair_generation_calls.append({
+                "phase": "actor",
+                "actor_path": kwargs["actor"].lora_path,
+                "critic_paths": [
+                    critic.lora_path for critic in kwargs["critics"]
+                ],
+            })
+            return [{
+                "sample": {"question": "1+1?", "answer": "2", "task_type": "math"},
+                "chosen": "correct answer",
+                "rejected": "incorrect answer",
+            }]
+
+        def fake_run_dpo_training(**kwargs):
+            return f"{kwargs['output_dir']}/adapter"
+
+        monkeypatch.setattr(
+            society_trainer, "_create_phase_engine", fake_create_phase_engine
+        )
+        monkeypatch.setattr(
+            society_trainer, "_generate_critic_pairs_algorithm1",
+            fake_generate_critic_pairs_algorithm1,
+        )
+        monkeypatch.setattr(
+            society_trainer, "_generate_actor_pairs_algorithm1",
+            fake_generate_actor_pairs_algorithm1,
+        )
+        monkeypatch.setattr(
+            society_trainer, "_run_dpo_training", fake_run_dpo_training
+        )
+        monkeypatch.setattr(society_trainer, "_cleanup_gpu", lambda: None)
+
+        result = society_trainer.society_alternating_train(
+            registry=registry,
+            dataset=[{"question": "1+1?", "answer": "2", "task_type": "math"}],
+            dataset_name="math",
+            output_base_dir=str(tmp_path),
+            num_iterations=2,
+            min_pairs_per_critic=1,
+        )
+
+        critic_iter0 = f"{tmp_path}/critics/critic_computation/iter_0/adapter"
+        actor_iter0 = f"{tmp_path}/actors/actor_direct/iter_0/adapter"
+        critic_iter1 = f"{tmp_path}/critics/critic_computation/iter_1/adapter"
+        actor_iter1 = f"{tmp_path}/actors/actor_direct/iter_1/adapter"
+
+        actor_phase_calls = [
+            call for call in pair_generation_calls
+            if call["phase"] == "actor"
+        ]
+        critic_phase_calls = [
+            call for call in pair_generation_calls
+            if call["phase"] == "critic"
+        ]
+
+        assert actor_phase_calls[0]["critic_paths"] == [critic_iter0]
+        assert critic_phase_calls[1]["actor_paths"] == [actor_iter0]
+        assert phase_engine_calls[1]["critic_computation"] == critic_iter0
+        assert phase_engine_calls[2]["actor_direct"] == actor_iter0
+        assert result.critic_paths["critic_computation"] == critic_iter1
+        assert result.actor_paths["actor_direct"] == actor_iter1
+        assert registry.get("critic_computation").lora_path == critic_iter1
+        assert registry.get("actor_direct").lora_path == actor_iter1
+
+
 # ============================================================
 # 3. data_classifier.py Tests
 # ============================================================

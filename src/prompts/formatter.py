@@ -7,7 +7,9 @@ from __future__ import annotations
 from typing import Any
 
 from src.prompts.templates import (
+    ACTOR_PROMPT_TYPES,
     PromptType,
+    append_answer_contract,
     get_prompt_template,
 )
 
@@ -16,6 +18,7 @@ def format_prompt(
     dataset_name: str,
     prompt_type: PromptType,
     sample: dict[str, Any],
+    include_answer_contract: bool | None = None,
     **kwargs: Any,
 ) -> str:
     """
@@ -25,6 +28,8 @@ def format_prompt(
         dataset_name: Dataset name (boolq, mmlu, etc.).
         prompt_type: Type of prompt.
         sample: Standardized sample dict with question, passage, answer, etc.
+        include_answer_contract: Append the strict FINAL_ANSWER contract.
+            Defaults to True for Actor prompt types and False for Critic types.
         **kwargs: Additional variables (target_answer, responses, actor_response).
 
     Returns:
@@ -69,13 +74,22 @@ def format_prompt(
 
     # Safe format: ignore missing keys
     try:
-        return template.format_map(fmt_vars)
+        result = template.format_map(fmt_vars)
     except KeyError:
         # Fallback: manual substitution for missing keys
         result = template
         for key, value in fmt_vars.items():
             result = result.replace("{" + key + "}", str(value))
-        return result
+
+    should_append_contract = (
+        prompt_type in ACTOR_PROMPT_TYPES
+        if include_answer_contract is None
+        else include_answer_contract
+    )
+    if should_append_contract:
+        result = append_answer_contract(result, sample)
+
+    return result
 
 
 def _format_responses(responses: list[str] | dict[int, str] | str) -> str:

@@ -107,6 +107,14 @@ class SocietyTrainingResult:
     metrics: dict[str, Any] = field(default_factory=dict)
 
 
+def _sync_lora_paths(agents: list[AgentConfig], paths: dict[str, str]) -> None:
+    """Apply the latest known LoRA paths to in-memory agent configs."""
+    for agent in agents:
+        path = paths.get(agent.name)
+        if path:
+            agent.lora_path = path
+
+
 def society_alternating_train(
     registry: AgentRegistry,
     dataset: list[dict],
@@ -216,6 +224,9 @@ def society_alternating_train(
     # partially-run iteration.  Keys: "phase_A_done" / "phase_B_done" ->
     # list of agent names that finished successfully.
     phase_done: dict[str, list[str]] = state.get("phase_done", {})
+
+    _sync_lora_paths(actors, actor_paths)
+    _sync_lora_paths(critics, critic_paths)
 
     for iteration in range(start_iteration, num_iterations):
         logger.info(f"=== Society Training Iteration {iteration + 1}/{num_iterations} ===")
@@ -361,6 +372,8 @@ def society_alternating_train(
             del phase_a_engine
         _cleanup_gpu()
 
+        _sync_lora_paths(critics, critic_paths)
+
         # ---- Phase B: Train all Actors (fix Critics) ----
         logger.info(f"Phase B: Training {len(actors)} Actors (Critics frozen)")
 
@@ -483,6 +496,8 @@ def society_alternating_train(
             del phase_b_engine
         _cleanup_gpu()
 
+        _sync_lora_paths(actors, actor_paths)
+
         # End-of-iteration checkpoint (iteration is now complete, so bump
         # the counter and clear phase_done for the next iteration).
         _save_checkpoint(ckpt_file, {
@@ -568,8 +583,14 @@ def _build_lora_adapters(
     engine: Any,
     agents: list[AgentConfig],
 ) -> dict[str, _LoRAModelAdapter]:
-    """Create _LoRAModelAdapter for each agent (uses base model if no LoRA)."""
-    from src.society.multi_deliberation import _load_lora_adapter
+    """Create _LoRAModelAdapter for each agent.
+
+    Agents with ``lora_path`` must successfully load that adapter.  Falling
+    back to the base model would invalidate multi-agent experiments because
+    training logs could claim an agent participated while its specialized
+    weights were never used.
+    """
+    from src.society.multi_deliberation import LoRAError, _load_lora_adapter
 
     adapters: dict[str, _LoRAModelAdapter] = {}
     for agent in agents:
@@ -577,10 +598,15 @@ def _build_lora_adapters(
         if agent.lora_path:
             try:
                 lora_req = _load_lora_adapter(engine, agent.lora_path)
-            except Exception as e:
-                logger.warning(
-                    f"Could not load LoRA for {agent.name}: {e}. "
-                    f"Using base model."
+            except LoRAError as e:
+                raise LoRAError(
+                    f"Required LoRA adapter for agent '{agent.name}' failed "
+                    f"to load from '{agent.lora_path}': {e}"
+                ) from e
+            if lora_req is None:
+                raise LoRAError(
+                    f"Required LoRA adapter for agent '{agent.name}' at "
+                    f"'{agent.lora_path}' produced no LoRARequest."
                 )
         adapters[agent.name] = _LoRAModelAdapter(engine, lora_req)
     return adapters
@@ -1152,6 +1178,7 @@ def _run_dpo_training(
                     dataset_name,
                     PromptType.SINGLE_SHOT,
                     sample,
+                    include_answer_contract=(agent_type == "actor"),
                 )
             prompts.append(prompt)
 

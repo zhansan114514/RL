@@ -188,6 +188,7 @@ def _generate_guided_pairs_for_sample(
         # Build preference pairs (Algorithm 1: delta >= epsilon)
         if delta_y >= reward_threshold:
             preference_pairs.append({
+                "sample": sample,
                 "actor_prompt": actor_prompt,
                 "critic_prompt": critic_prompt,
                 "positive": z_y_actor,
@@ -201,6 +202,7 @@ def _generate_guided_pairs_for_sample(
             })
         if delta_not_y >= reward_threshold:
             preference_pairs.append({
+                "sample": sample,
                 "actor_prompt": actor_prompt,
                 "critic_prompt": critic_prompt,
                 "positive": actor_response,

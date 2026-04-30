@@ -32,6 +32,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from _utils import setup_logging
 from src.utils.config import ConfigManager
+from src.society.multi_deliberation import LoRAError
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -138,7 +139,11 @@ def _build_adapters(
     engine: Any,
     lora_paths: Dict[str, str],
 ) -> Dict[str, _LoRAModelAdapter]:
-    """Create _LoRAModelAdapter for each named agent path."""
+    """Create _LoRAModelAdapter for each named agent path.
+
+    Every provided path is required.  Continuing with a base actor after a
+    failed LoRA load would corrupt the critic-diversification experiment.
+    """
     from src.society.multi_deliberation import _load_lora_adapter
 
     adapters: Dict[str, _LoRAModelAdapter] = {}
@@ -148,8 +153,16 @@ def _build_adapters(
             try:
                 lora_req = _load_lora_adapter(engine, path)
                 logger.info(f"    Loaded LoRA for {name}: {path}")
-            except Exception as e:
-                logger.warning(f"    Could not load LoRA for {name}: {e}. Using base model.")
+            except LoRAError as e:
+                raise LoRAError(
+                    f"Required LoRA adapter for actor '{name}' failed "
+                    f"to load from '{path}': {e}"
+                ) from e
+            if lora_req is None:
+                raise LoRAError(
+                    f"Required LoRA adapter for actor '{name}' at "
+                    f"'{path}' produced no LoRARequest."
+                )
         adapters[name] = _LoRAModelAdapter(engine, lora_req)
     return adapters
 
@@ -521,7 +534,12 @@ def train_critic_dpo(
                 actor_response=actor_resp,
             )
         else:
-            prompt = format_prompt(dataset_name, PromptType.SINGLE_SHOT, sample)
+            prompt = format_prompt(
+                dataset_name,
+                PromptType.SINGLE_SHOT,
+                sample,
+                include_answer_contract=False,
+            )
         prompts.append(prompt)
 
     # Convert preference_pairs to HuggingFace Dataset
@@ -670,9 +688,9 @@ def main():
     actor_lora_paths = load_actor_lora_paths(actor_dir)
 
     if not actor_lora_paths:
-        logger.warning(
-            "No Actor LoRA paths found. Algorithm 1 will run with base-model "
-            "actors only (no LoRA). This reduces trajectory quality."
+        raise LoRAError(
+            f"No Actor LoRA paths found in '{actor_dir}'. Run actor "
+            f"diversification first and provide a valid actor_registry.json."
         )
 
     # Train each critic

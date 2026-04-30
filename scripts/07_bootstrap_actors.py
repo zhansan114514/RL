@@ -93,12 +93,20 @@ def generate_initial_responses(
 ) -> list[AgentResponse]:
     """Generate N independent responses with different seeds."""
     from src.prompts.formatter import format_prompt
-    from src.prompts.templates import PromptType
+    from src.prompts.templates import PromptType, append_answer_contract
     from src.algorithms.reward import extract_answer
 
     prompts = [
-        format_prompt(dataset_name, PromptType.SINGLE_SHOT, sample)
-        + f"\n\nYou are bootstrap Agent {agent_id}. Produce an independent solution."
+        append_answer_contract(
+            format_prompt(
+                dataset_name,
+                PromptType.SINGLE_SHOT,
+                sample,
+                include_answer_contract=False,
+            )
+            + f"\n\nYou are bootstrap Agent {agent_id}. Produce an independent solution.",
+            sample,
+        )
         for agent_id in range(num_agents)
     ]
     random.seed(base_seed)
@@ -151,7 +159,7 @@ def generate_initial_responses_batch(
 ) -> list[list[AgentResponse]]:
     """Generate initial responses for multiple samples and agents in one call."""
     from src.prompts.formatter import format_prompt
-    from src.prompts.templates import PromptType
+    from src.prompts.templates import PromptType, append_answer_contract
     from src.algorithms.reward import extract_answer
 
     prompts: list[str] = []
@@ -159,8 +167,19 @@ def generate_initial_responses_batch(
     for sample_idx, sample in enumerate(samples):
         for agent_id in range(num_agents):
             prompts.append(
-                format_prompt(dataset_name, PromptType.SINGLE_SHOT, sample)
-                + f"\n\nYou are bootstrap Agent {agent_id}. Produce an independent solution."
+                append_answer_contract(
+                    format_prompt(
+                        dataset_name,
+                        PromptType.SINGLE_SHOT,
+                        sample,
+                        include_answer_contract=False,
+                    )
+                    + (
+                        f"\n\nYou are bootstrap Agent {agent_id}. "
+                        "Produce an independent solution."
+                    ),
+                    sample,
+                )
             )
             meta.append((sample_idx, agent_id))
 
@@ -199,7 +218,7 @@ def simulate_debate_round(
 ) -> list[AgentResponse]:
     """Simulate one round of debate where agents see others' responses."""
     from src.prompts.formatter import format_prompt
-    from src.prompts.templates import PromptType
+    from src.prompts.templates import PromptType, append_answer_contract
     from src.algorithms.reward import extract_answer
 
     # Format responses text for context
@@ -213,11 +232,13 @@ def simulate_debate_round(
             dataset_name,
             PromptType.DELIBERATION_ACTOR,
             sample,
+            include_answer_contract=False,
             responses=responses_text,
         )
         + f"\n\nYou are bootstrap Agent {agent_id}. Revise independently after reading the debate."
         for agent_id in range(len(previous_responses))
     ]
+    prompts = [append_answer_contract(prompt, sample) for prompt in prompts]
     seed = base_seed + round_num * 100
     random.seed(seed)
     gen_results = model.generate(
@@ -258,7 +279,7 @@ def simulate_debate_round_batch(
 ) -> list[list[AgentResponse]]:
     """Simulate one debate round for multiple samples and agents in one call."""
     from src.prompts.formatter import format_prompt
-    from src.prompts.templates import PromptType
+    from src.prompts.templates import PromptType, append_answer_contract
     from src.algorithms.reward import extract_answer
 
     if len(samples) != len(previous_responses_by_sample):
@@ -279,6 +300,7 @@ def simulate_debate_round_batch(
                     dataset_name,
                     PromptType.DELIBERATION_ACTOR,
                     sample,
+                    include_answer_contract=False,
                     responses=responses_text,
                 )
                 + (
@@ -286,6 +308,7 @@ def simulate_debate_round_batch(
                     "Revise independently after reading the debate."
                 )
             )
+            prompts[-1] = append_answer_contract(prompts[-1], sample)
             meta.append((sample_idx, agent_id))
 
     seed = base_seed + round_num * 100

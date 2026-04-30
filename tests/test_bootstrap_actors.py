@@ -58,6 +58,12 @@ def test_initial_responses_are_batched_across_samples_and_agents():
     prompts, kwargs = model.calls[0]
     assert len(prompts) == 6
     assert kwargs["seed"] == 123
+    assert all("FINAL_ANSWER:" in prompt for prompt in prompts)
+    assert all(
+        prompt.rfind("Produce an independent solution.")
+        < prompt.rfind("Output format requirements:")
+        for prompt in prompts
+    )
 
     assert [r.agent_id for r in responses[0]] == [0, 1, 2]
     assert [r.response for r in responses[0]] == ["response-0", "response-1", "response-2"]
@@ -106,6 +112,12 @@ def test_debate_round_batch_keeps_sample_contexts_separate():
     assert kwargs["seed"] == 223
     assert all("s1-a" not in prompt for prompt in prompts[:2])
     assert all("s0-a" not in prompt for prompt in prompts[2:])
+    assert all("FINAL_ANSWER:" in prompt for prompt in prompts)
+    assert all(
+        prompt.rfind("Revise independently after reading the debate.")
+        < prompt.rfind("Output format requirements:")
+        for prompt in prompts
+    )
 
     assert [r.agent_id for r in responses[0]] == [0, 1]
     assert [r.round for r in responses[0]] == [1, 1]

@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.algorithms.reward import extract_answer
+from src.prompts.templates import answer_contract, append_answer_contract
 from src.society.agent_registry import AgentConfig
 from src.society.router import CriticRouter, build_critic_feedback, RoutedFeedback
 
@@ -369,19 +370,13 @@ def multi_agent_deliberate_single_gpu(
                     _atomic_write_json(ckpt_path, {"actor_response": response})
 
         # ---- Step 2: Batch all Critic evaluations ----
-        for actor_idx, actor in enumerate(actors):
+        for actor in actors:
             actor_response = round_data.actor_responses[actor.name]
             round_data.critic_feedbacks[actor.name] = {}
-            selected_critics = _select_critics_for_generation(
-                critics,
-                getattr(router, "top_k", len(critics)),
-                round_num,
-                actor_idx,
-            )
 
             # Check cache for all critics
             uncached_critics = []
-            for critic in selected_critics:
+            for critic in critics:
                 ckpt_path = (ckpt_dir / f"round_{round_num}" /
                              f"critic_{critic.name}_for_{actor.name}.json" if ckpt_dir else None)
                 cached = _load_json(ckpt_path) if ckpt_path else None
@@ -418,7 +413,7 @@ def multi_agent_deliberate_single_gpu(
 
             # ---- Step 3: Router combines feedback ----
             critic_feedbacks = []
-            for critic in selected_critics:
+            for critic in critics:
                 resp = round_data.critic_feedbacks[actor.name].get(critic.name, "")
                 fb = build_critic_feedback(critic, resp)
                 critic_feedbacks.append(fb)
@@ -466,22 +461,6 @@ def multi_agent_deliberate_single_gpu(
 
 # Keep old name for backward compat
 multi_agent_deliberate = multi_agent_deliberate_single_gpu
-
-
-def _select_critics_for_generation(
-    critics: list[AgentConfig],
-    top_k: int,
-    round_num: int,
-    actor_idx: int,
-) -> list[AgentConfig]:
-    """Pre-route critics before generation to make Top-K reduce compute."""
-    if top_k <= 0 or top_k >= len(critics):
-        return critics
-    start = (round_num + actor_idx) % len(critics)
-    return [
-        critics[(start + offset) % len(critics)]
-        for offset in range(top_k)
-    ]
 
 
 # ============================================================
@@ -559,44 +538,8 @@ def _generate_with_lora(
 # ============================================================
 
 def _answer_contract(sample: dict) -> str:
-    """Return a strict output-format contract appended to every Actor prompt."""
-    task_type = sample.get("task_type", "multiple_choice")
-    if task_type == "yes_no":
-        return (
-            "\n\nOutput format requirements:\n"
-            "1. You may briefly explain your reasoning.\n"
-            "2. You MUST end your response with exactly one final line:\n"
-            "FINAL_ANSWER: Yes or No\n"
-            "3. Do not write anything after the FINAL_ANSWER line."
-        )
-    if task_type == "math":
-        return (
-            "\n\nOutput format requirements:\n"
-            "1. Solve the problem step by step.\n"
-            "2. You MUST end your response with exactly one final line:\n"
-            "FINAL_ANSWER: <numeric_or_expression_answer>\n"
-            "3. Do not write anything after the FINAL_ANSWER line."
-        )
-    if task_type == "mixed":
-        # BBH contains both yes/no and multiple-choice subtasks.
-        # Use a flexible contract that covers both answer forms.
-        return (
-            "\n\nOutput format requirements:\n"
-            "1. You may briefly explain your reasoning.\n"
-            "2. You MUST end your response with exactly one final line:\n"
-            "FINAL_ANSWER: <your_answer>\n"
-            "   For yes/no questions: FINAL_ANSWER: Yes or FINAL_ANSWER: No\n"
-            "   For multiple-choice questions: FINAL_ANSWER: A, B, C, or D\n"
-            "3. Do not write anything after the FINAL_ANSWER line."
-        )
-    # multiple_choice / default
-    return (
-        "\n\nOutput format requirements:\n"
-        "1. You may briefly explain your reasoning.\n"
-        "2. You MUST end your response with exactly one final line:\n"
-        "FINAL_ANSWER: A or B or C or D\n"
-        "3. Do not write anything after the FINAL_ANSWER line."
-    )
+    """Backward-compatible wrapper around the shared Actor answer contract."""
+    return answer_contract(sample)
 
 
 def _build_actor_prompt(
@@ -650,8 +593,8 @@ def _build_actor_prompt(
             "Do not ignore the feedback silently."
         )
 
-    # Always append the strict output-format contract
-    prompt += _answer_contract(sample)
+    # Always append the strict output-format contract.
+    prompt = append_answer_contract(prompt, sample)
 
     return prompt
 

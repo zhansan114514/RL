@@ -29,6 +29,80 @@ class PromptType(str, Enum):
     GUIDED_DELIBERATION_CRITIC = "guided_deliberation_critic"
 
 
+ACTOR_PROMPT_TYPES = {
+    PromptType.SINGLE_SHOT,
+    PromptType.GUIDED_SINGLE_SHOT,
+    PromptType.DELIBERATION_ACTOR,
+    PromptType.GUIDED_DELIBERATION_ACTOR,
+}
+
+
+def answer_contract(sample: dict | None = None, task_type: str | None = None) -> str:
+    """Return the strict final-answer contract for Actor generations."""
+    resolved_task_type = task_type or (sample or {}).get("task_type", "multiple_choice")
+    if resolved_task_type == "yes_no":
+        return (
+            "\n\nOutput format requirements:\n"
+            "1. You may briefly explain your reasoning.\n"
+            "2. You MUST end your response with exactly one final line:\n"
+            "FINAL_ANSWER: Yes or No\n"
+            "3. Do not write anything after the FINAL_ANSWER line."
+        )
+    if resolved_task_type == "math":
+        return (
+            "\n\nOutput format requirements:\n"
+            "1. Solve the problem step by step.\n"
+            "2. You MUST end your response with exactly one final line:\n"
+            "FINAL_ANSWER: <numeric_or_expression_answer>\n"
+            "3. Do not write anything after the FINAL_ANSWER line."
+        )
+    if resolved_task_type == "mixed":
+        return (
+            "\n\nOutput format requirements:\n"
+            "1. You may briefly explain your reasoning.\n"
+            "2. You MUST end your response with exactly one final line:\n"
+            "FINAL_ANSWER: <your_answer>\n"
+            "   For yes/no questions: FINAL_ANSWER: Yes or FINAL_ANSWER: No\n"
+            "   For multiple-choice questions: FINAL_ANSWER: A, B, C, or D\n"
+            "3. Do not write anything after the FINAL_ANSWER line."
+        )
+    return (
+        "\n\nOutput format requirements:\n"
+        "1. You may briefly explain your reasoning.\n"
+        "2. You MUST end your response with exactly one final line:\n"
+        "FINAL_ANSWER: A or B or C or D\n"
+        "3. Do not write anything after the FINAL_ANSWER line."
+    )
+
+
+def append_answer_contract(
+    prompt: str,
+    sample: dict | None = None,
+    task_type: str | None = None,
+) -> str:
+    """Append the Actor final-answer contract unless it is already present."""
+    if "Output format requirements:" in prompt and "FINAL_ANSWER:" in prompt:
+        return prompt
+    inferred_task_type = task_type or _infer_task_type_from_prompt(prompt)
+    return prompt.rstrip() + answer_contract(sample, inferred_task_type)
+
+
+def _infer_task_type_from_prompt(prompt: str) -> str | None:
+    """Infer task type for legacy reconstructed prompts without sample metadata."""
+    prompt_lower = prompt.lower()
+    if "yes-no question" in prompt_lower or "yes/no question" in prompt_lower:
+        return "yes_no"
+    if (
+        "mathematics problem" in prompt_lower
+        or "math problem" in prompt_lower
+        or "grade school mathematics" in prompt_lower
+    ):
+        return "math"
+    if "multiple choice question" in prompt_lower or "\n(a) " in prompt_lower:
+        return "multiple_choice"
+    return None
+
+
 # =============================================================================
 # BoolQ Templates (Yes/No reading comprehension)
 # =============================================================================
