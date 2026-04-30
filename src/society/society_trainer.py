@@ -801,6 +801,8 @@ def _generate_critic_pairs_algorithm1(
                 api_key=api_key,
                 api_base=api_base,
                 api_model=api_model,
+                strict_classification=strict_classification,
+                max_classification_failure_rate=max_classification_failure_rate,
             )
             routed_items = splitter.split_by_error_profile(
                 samples=[p["sample"] for p in raw_pairs],
