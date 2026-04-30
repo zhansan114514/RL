@@ -35,7 +35,7 @@ from src.society.agent_registry import AgentRegistry, AgentConfig, ReasoningStyl
 from src.society.data_classifier import (
     classify_reasoning_style, ClassificationError,
 )
-from src.society.diversity_split import DiversitySplit
+from src.society.diversity_split import DiversitySplit, summarize_critic_training_pairs
 from src.algorithms.reward import extract_answer, math_answers_equal, normalize_answer
 
 logger = logging.getLogger(__name__)
@@ -149,6 +149,8 @@ def society_alternating_train(
     api_key: str = "",
     api_base: str = "",
     api_model: str = "",
+    strict_classification: bool = True,
+    max_classification_failure_rate: float = 0.0,
 ) -> SocietyTrainingResult:
     """
     Train N Actors + M Critics in alternating fashion.
@@ -292,6 +294,8 @@ def society_alternating_train(
                 api_key=api_key,
                 api_base=api_base,
                 api_model=api_model,
+                strict_classification=strict_classification,
+                max_classification_failure_rate=max_classification_failure_rate,
                 min_specialty_items=min_specialty_items,
                 min_specialty_ratio=min_specialty_ratio,
                 specialty_ratio=specialty_ratio,
@@ -310,6 +314,7 @@ def society_alternating_train(
                     "pairs": len(preference_pairs),
                     "reason": "below_min_pairs_per_critic",
                     "min_pairs_per_critic": min_pairs_per_critic,
+                    "critic_training_metrics": summarize_critic_training_pairs(preference_pairs),
                 }
                 continue
 
@@ -339,6 +344,7 @@ def society_alternating_train(
                     "status": "completed",
                     "pairs": len(preference_pairs),
                     "path": checkpoint_path,
+                    "critic_training_metrics": summarize_critic_training_pairs(preference_pairs),
                 }
             else:
                 logger.warning(
@@ -349,6 +355,7 @@ def society_alternating_train(
                     "status": "failed",
                     "pairs": len(preference_pairs),
                     "path": critic_paths.get(critic.name, ""),
+                    "critic_training_metrics": summarize_critic_training_pairs(preference_pairs),
                 }
 
             # Per-critic checkpoint: if we crash after this point, the next
@@ -430,6 +437,8 @@ def society_alternating_train(
                 api_key=api_key,
                 api_base=api_base,
                 api_model=api_model,
+                strict_classification=strict_classification,
+                max_classification_failure_rate=max_classification_failure_rate,
             )
 
             if not preference_pairs:
@@ -637,6 +646,8 @@ def _generate_critic_pairs_algorithm1(
     api_key: str = "",
     api_base: str = "",
     api_model: str = "",
+    strict_classification: bool = True,
+    max_classification_failure_rate: float = 0.0,
     min_specialty_items: int = 32,
     min_specialty_ratio: float = 0.08,
     specialty_ratio: float = 0.7,
@@ -895,6 +906,8 @@ def _generate_critic_pairs_algorithm1(
         logger.error(f"Failed to generate critic pairs for {critic.name}: {e}")
         if _owns_engine:
             _cleanup_gpu()
+        if strict_classification:
+            raise
 
     return preference_pairs
 
@@ -924,6 +937,8 @@ def _generate_actor_pairs_algorithm1(
     api_key: str = "",
     api_base: str = "",
     api_model: str = "",
+    strict_classification: bool = True,
+    max_classification_failure_rate: float = 0.0,
 ) -> list[dict]:
     """Generate Actor DPO preference pairs using Algorithm 1 from trajectory.py.
 
@@ -1081,6 +1096,14 @@ def _generate_actor_pairs_algorithm1(
                 f"{len(style_cache)} unique responses, "
                 f"{n_ok} classified, {n_failed} failures"
             )
+            attempted = n_ok + n_failed
+            failure_rate = n_failed / attempted if attempted else 0.0
+            if strict_classification and failure_rate > max_classification_failure_rate:
+                raise ClassificationError(
+                    f"reasoning_style classification failure rate {failure_rate:.3f} "
+                    f"exceeds threshold {max_classification_failure_rate:.3f} "
+                    f"({n_failed}/{attempted})"
+                )
 
             # Filter pairs by actor's reasoning style using cached results
             target_style = actor.reasoning_style

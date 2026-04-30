@@ -67,6 +67,8 @@ STEP_DEFAULTS = {
     "api_key": "",
     "api_base": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
     "api_model": "glm-4-flash",
+    "strict_classification": True,
+    "max_classification_failure_rate": 0.0,
 }
 
 
@@ -294,6 +296,11 @@ def main():
         api_key = os.environ.get("GLM_API_KEY", "")
     if api_key:
         os.environ["GLM_API_KEY"] = api_key
+    elif getattr(args, "strict_classification", True):
+        raise RuntimeError(
+            "strict_classification=True requires GLM_API_KEY or "
+            "step05_train_society.api_key"
+        )
     else:
         logger.warning(
             "GLM_API_KEY not set. Unseen raw pairs will be routed to general pool."
@@ -335,6 +342,8 @@ def main():
         api_key=api_key,
         api_base=api_base,
         api_model=api_model,
+        strict_classification=getattr(args, "strict_classification", True),
+        max_classification_failure_rate=getattr(args, "max_classification_failure_rate", 0.0),
     )
 
     # Save final registry
@@ -369,6 +378,8 @@ def main():
                     "general_ratio": args.general_ratio,
                     "calibration_ratio": args.calibration_ratio,
                 },
+                "strict_classification": getattr(args, "strict_classification", True),
+                "max_classification_failure_rate": getattr(args, "max_classification_failure_rate", 0.0),
             },
         }, f, indent=2)
 

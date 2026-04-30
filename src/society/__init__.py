@@ -45,7 +45,12 @@ from src.society.data_classifier import (
     classify_error_profile,
     check_api_available,
 )
-from src.society.diversity_split import DiversitySplit, RoutedTrainingItem, assign_error_profile
+from src.society.diversity_split import (
+    DiversitySplit,
+    RoutedTrainingItem,
+    assign_error_profile,
+    summarize_critic_training_pairs,
+)
 from src.society.society_trainer import (
     society_alternating_train,
     SocietyTrainingResult,
@@ -55,6 +60,7 @@ from src.society.inference_pipeline import (
     InferenceResult,
     run_ablation,
     ABLATION_CONFIGS,
+    clone_registry_without_lora,
 )
 
 __all__ = [
@@ -89,6 +95,7 @@ __all__ = [
     "DiversitySplit",
     "RoutedTrainingItem",
     "assign_error_profile",
+    "summarize_critic_training_pairs",
     # Society Trainer
     "society_alternating_train",
     "SocietyTrainingResult",
@@ -97,4 +104,5 @@ __all__ = [
     "InferenceResult",
     "run_ablation",
     "ABLATION_CONFIGS",
+    "clone_registry_without_lora",
 ]

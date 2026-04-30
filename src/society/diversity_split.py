@@ -15,6 +15,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Optional
@@ -50,6 +52,7 @@ class RoutedTrainingItem:
     weight: float
     profile: dict
     source_bucket: str = "unknown"
+    response_id: str = ""
 
 
 class DiversitySplit:
@@ -73,6 +76,8 @@ class DiversitySplit:
         api_key: str = "",
         api_base: str = "",
         api_model: str = "",
+        strict_classification: bool = False,
+        max_classification_failure_rate: float = 0.0,
     ):
         self.balance = balance
         self.rng = np.random.default_rng(seed)
@@ -83,6 +88,9 @@ class DiversitySplit:
         self._api_key = api_key
         self._api_base = api_base
         self._api_model = api_model
+        self.strict_classification = strict_classification
+        self.max_classification_failure_rate = max(0.0, max_classification_failure_rate)
+        self.last_classification_metrics: dict[str, dict] = {}
 
         if pre_classified_file:
             self._pre_classified = self._load_pre_classified(pre_classified_file)
@@ -106,8 +114,10 @@ class DiversitySplit:
             logger.warning(f"Failed to load pre-classified file: {e}")
             return None
 
-        # Build lookup: (question_hash, response_hash) -> classification payload.
-        lookup: dict[tuple[str, str], dict] = {}
+        # Build lookups by stable response_id first, with content hash as a
+        # secondary key for generated pairs that do not originate from bootstrap.
+        by_response_id: dict[str, dict] = {}
+        by_content: dict[str, dict] = {}
         for result in data.get("results", []):
             # Use per-response labels for fine-grained matching
             for label in result.get("per_response_labels", []):
@@ -115,27 +125,35 @@ class DiversitySplit:
                 response = label.get("response", "")
                 key = _content_hash(question, response)
                 entry = {}
+                if label.get("response_id"):
+                    entry["response_id"] = label["response_id"]
                 if label.get("reasoning_style"):
                     entry["style"] = label["reasoning_style"]
                     entry["style_confidence"] = label.get("reasoning_style_confidence", 0.5)
                 if label.get("error_profile"):
                     entry["error_profile"] = label["error_profile"]
                 if entry:
-                    lookup[key] = entry
+                    by_content[key] = entry
+                    if entry.get("response_id"):
+                        by_response_id[entry["response_id"]] = entry
 
         logger.info(
-            f"Loaded {len(lookup)} pre-classified entries from {path}"
+            f"Loaded {len(by_content)} pre-classified entries from {path}"
         )
-        return lookup
+        return {"by_response_id": by_response_id, "by_content": by_content}
 
     def _lookup_pre_classified_style(
-        self, question: str, response: str,
+        self, question: str, response: str, response_id: str = "",
     ) -> Optional[ReasoningStyle]:
         """Check pre-classified results for a reasoning style match."""
         if not self._pre_classified:
             return None
+        entry = None
+        if response_id:
+            entry = self._pre_classified.get("by_response_id", {}).get(response_id)
         key = _content_hash(question, response)
-        entry = self._pre_classified.get(key)
+        if entry is None:
+            entry = self._pre_classified.get("by_content", {}).get(key)
         if entry and "style" in entry:
             try:
                 return ReasoningStyle(entry["style"])
@@ -144,22 +162,71 @@ class DiversitySplit:
         return None
 
     def _lookup_pre_classified_error_profile(
-        self, question: str, response: str,
+        self, question: str, response: str, response_id: str = "",
     ) -> Optional[dict]:
         """Check pre-classified results for an error profile match."""
         if not self._pre_classified:
             return None
+        entry = None
+        if response_id:
+            entry = self._pre_classified.get("by_response_id", {}).get(response_id)
         key = _content_hash(question, response)
-        entry = self._pre_classified.get(key)
+        if entry is None:
+            entry = self._pre_classified.get("by_content", {}).get(key)
         if entry and "error_profile" in entry:
             return entry["error_profile"]
         return None
+
+    def _require_live_classifier(self) -> None:
+        if not self.strict_classification:
+            return
+        if not self.use_api:
+            raise ClassificationError(
+                "strict_classification=True requires use_api=True for "
+                "unseen responses"
+            )
+        if not (self._api_key or os.environ.get("GLM_API_KEY")):
+            raise ClassificationError(
+                "strict_classification=True requires GLM_API_KEY or api_key "
+                "for unseen responses"
+            )
+
+    def _record_classification_metrics(
+        self,
+        kind: str,
+        total: int,
+        preclassified: int,
+        attempted_live: int,
+        failures: int,
+    ) -> None:
+        failure_rate = failures / attempted_live if attempted_live else 0.0
+        metrics = {
+            "total_items": total,
+            "preclassified": preclassified,
+            "attempted_live": attempted_live,
+            "failures": failures,
+            "failure_rate": failure_rate,
+            "strict_classification": self.strict_classification,
+            "max_classification_failure_rate": self.max_classification_failure_rate,
+        }
+        self.last_classification_metrics[kind] = metrics
+        if (
+            self.strict_classification
+            and attempted_live
+            and failure_rate > self.max_classification_failure_rate
+        ):
+            raise ClassificationError(
+                f"{kind} classification failure rate {failure_rate:.3f} "
+                f"exceeds threshold {self.max_classification_failure_rate:.3f} "
+                f"({failures}/{attempted_live})"
+            )
 
     def split_by_reasoning_style(
         self,
         samples: list[dict],
         responses: Optional[list[str]] = None,
         answers: Optional[list[str]] = None,
+        response_ids: Optional[list[str]] = None,
     ) -> dict[ReasoningStyle, list[dict]]:
         """
         Split samples by reasoning style.
@@ -176,21 +243,28 @@ class DiversitySplit:
             Dict mapping ReasoningStyle to list of samples.
         """
         splits: dict[ReasoningStyle, list[dict]] = {s: [] for s in ReasoningStyle}
+        preclassified = 0
+        attempted_live = 0
+        failures = 0
 
         for i, sample in enumerate(samples):
             question = sample.get("question", "")
             response = responses[i] if responses and i < len(responses) else ""
             answer = answers[i] if answers and i < len(answers) else sample.get("answer", "")
+            response_id = response_ids[i] if response_ids and i < len(response_ids) else ""
 
             if response:
                 # Try pre-classified data first (single source of truth)
-                style = self._lookup_pre_classified_style(question, response)
+                style = self._lookup_pre_classified_style(question, response, response_id)
                 if style is not None:
+                    preclassified += 1
                     splits[style].append(sample)
                     continue
 
                 # Fall back to live classification
+                self._require_live_classifier()
                 try:
+                    attempted_live += 1
                     result = classify_reasoning_style(
                         response=response,
                         question=question,
@@ -203,16 +277,32 @@ class DiversitySplit:
                     )
                     style = result.style
                 except ClassificationError as e:
+                    failures += 1
+                    if self.strict_classification:
+                        logger.error(f"Reasoning style classification failed for sample {i}: {e}")
+                        continue
                     style = list(ReasoningStyle)[i % len(ReasoningStyle)]
                     logger.warning(
                         f"Classification failed for sample {i}, "
                         f"assigned style '{style.value}' via round-robin fallback: {e}"
                     )
             else:
-                # Round-robin assignment if no responses available
+                if self.strict_classification:
+                    attempted_live += 1
+                    failures += 1
+                    logger.error(f"Missing response for strict reasoning style classification at sample {i}")
+                    continue
                 style = list(ReasoningStyle)[i % len(ReasoningStyle)]
 
             splits[style].append(sample)
+
+        self._record_classification_metrics(
+            "reasoning_style",
+            total=len(samples),
+            preclassified=preclassified,
+            attempted_live=attempted_live,
+            failures=failures,
+        )
 
         if self.balance:
             splits = self._balance_splits(splits)
@@ -230,6 +320,7 @@ class DiversitySplit:
         correct_answers: Optional[list[str]] = None,
         extracted_answers: Optional[list[str]] = None,
         dataset_name: str = "",
+        response_ids: Optional[list[str]] = None,
     ) -> list[RoutedTrainingItem]:
         """
         Route incorrect responses by multi-dimensional error profile.
@@ -251,18 +342,26 @@ class DiversitySplit:
         routed_items: list[RoutedTrainingItem] = []
         profile_counts = {dim: 0 for dim in ERROR_PROFILE_DIMENSIONS}
         profile_counts["general"] = 0
+        preclassified = 0
+        attempted_live = 0
+        failures = 0
 
         for i, (sample, response) in enumerate(zip(samples, responses)):
             question = sample.get("question", "")
             correct = correct_answers[i] if correct_answers and i < len(correct_answers) else sample.get("answer", "")
             extracted = extracted_answers[i] if extracted_answers and i < len(extracted_answers) else ""
+            response_id = response_ids[i] if response_ids and i < len(response_ids) else ""
 
             # Try pre-classified data first (single source of truth)
-            profile = self._lookup_pre_classified_error_profile(question, response)
+            profile = self._lookup_pre_classified_error_profile(question, response, response_id)
+            if profile is not None:
+                preclassified += 1
 
             # Fall back to live classification
             if profile is None:
+                self._require_live_classifier()
                 try:
+                    attempted_live += 1
                     result = classify_error_profile(
                         response=response,
                         question=question,
@@ -286,6 +385,10 @@ class DiversitySplit:
                         "evidence": result.evidence,
                     }
                 except ClassificationError as e:
+                    failures += 1
+                    if self.strict_classification:
+                        logger.error(f"Error profile classification failed for sample {i}: {e}")
+                        continue
                     profile = _unknown_profile(str(e))
                     logger.warning(
                         f"Error profile classification failed for sample {i}, "
@@ -306,7 +409,16 @@ class DiversitySplit:
                     skill=skill,
                     weight=weight,
                     profile=profile,
+                    response_id=response_id,
                 ))
+
+        self._record_classification_metrics(
+            "error_profile",
+            total=len(responses),
+            preclassified=preclassified,
+            attempted_live=attempted_live,
+            failures=failures,
+        )
 
         logger.info(
             "Error profile routing: "
@@ -481,3 +593,35 @@ def _content_hash(question: str, response: str) -> str:
     """Stable hash for (question, response) pair — used for lookup keys."""
     content = f"{question}||{response}"
     return hashlib.md5(content.encode()).hexdigest()[:12]
+
+
+def summarize_critic_training_pairs(preference_pairs: list[dict]) -> dict:
+    """Summarize selected critic pairs for experiment reporting."""
+    total = len(preference_pairs)
+    unique_pairs = {
+        (
+            p.get("sample", {}).get("question", ""),
+            p.get("actor_response", ""),
+        )
+        for p in preference_pairs
+    }
+    bucket_counts = Counter(
+        p.get("metadata", {}).get("source_bucket", "unknown")
+        for p in preference_pairs
+    )
+    assigned_skill_counts = Counter(
+        p.get("metadata", {}).get("assigned_skill", "unknown")
+        for p in preference_pairs
+    )
+    bucket_ratios = {
+        bucket: (bucket_counts.get(bucket, 0) / total if total else 0.0)
+        for bucket in ("general", "specialty", "calibration")
+    }
+    return {
+        "sample_count": total,
+        "unique_pair_count": len(unique_pairs),
+        "duplicate_rate": 1.0 - (len(unique_pairs) / total) if total else 0.0,
+        "source_bucket_counts": dict(bucket_counts),
+        "source_bucket_ratios": bucket_ratios,
+        "assigned_skill_counts": dict(assigned_skill_counts),
+    }

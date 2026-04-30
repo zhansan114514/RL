@@ -101,6 +101,33 @@ def load_bootstrap_trajectories(cache_dir: str) -> Dict[str, Any]:
     return trajectories
 
 
+def make_response_id(sample_id: str, round_num: int, agent_id: int) -> str:
+    return f"{sample_id}_round_{round_num}_agent_{agent_id}"
+
+
+def flatten_trajectory_responses(sample_id: str, traj: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Flatten initial and debate responses, preserving stable response_id."""
+    responses: List[Dict[str, Any]] = []
+    for resp in traj.get("initial_responses", []):
+        item = dict(resp)
+        round_num = int(item.get("round", 0))
+        agent_id = int(item.get("agent_id", 0))
+        item["response_id"] = item.get("response_id") or make_response_id(
+            sample_id, round_num, agent_id,
+        )
+        responses.append(item)
+    for round_responses in traj.get("debate_rounds", []):
+        for resp in round_responses:
+            item = dict(resp)
+            round_num = int(item.get("round", 0))
+            agent_id = int(item.get("agent_id", 0))
+            item["response_id"] = item.get("response_id") or make_response_id(
+                sample_id, round_num, agent_id,
+            )
+            responses.append(item)
+    return responses
+
+
 def build_preference_pairs_for_style(
     classified_results: List[Dict],
     trajectories: Dict[str, Any],
@@ -122,15 +149,17 @@ def build_preference_pairs_for_style(
 
     preference_pairs = []
 
-    # Build a per-response style lookup:
-    # sample_id -> {response_index: reasoning_style}
-    per_response_lookup: Dict[str, Dict[int, str]] = {}
+    # Build a per-response style lookup keyed by stable response_id.
+    per_response_lookup: Dict[str, str] = {}
     for r in classified_results:
-        sid = r["sample_id"]
-        per_response_lookup[sid] = {}
-        for ri, label in enumerate(r.get("per_response_labels", [])):
+        for label in r.get("per_response_labels", []):
             if label.get("reasoning_style"):
-                per_response_lookup[sid][ri] = label["reasoning_style"]
+                response_id = label.get("response_id")
+                if not response_id:
+                    raise ValueError(
+                        f"Missing response_id in classified label for sample {r['sample_id']}"
+                    )
+                per_response_lookup[response_id] = label["reasoning_style"]
 
     # Collect all samples that have at least one response matching this style
     matched_sample_count = 0
@@ -169,9 +198,7 @@ def build_preference_pairs_for_style(
         task_type = sample.get("task_type", "math")
 
         # Get responses from all rounds (initial + debate) for more diversity
-        all_responses = list(traj.get("initial_responses", []))
-        for round_responses in traj.get("debate_rounds", []):
-            all_responses.extend(round_responses)
+        all_responses = flatten_trajectory_responses(sample_id, traj)
 
         if not all_responses:
             continue
@@ -179,8 +206,9 @@ def build_preference_pairs_for_style(
         # Collect style-matching correct responses and any incorrect responses
         style_correct_responses = []
         incorrect_responses = []
-        for ri, resp in enumerate(all_responses):
+        for resp in all_responses:
             response_text = resp.get("response", "")
+            response_id = resp.get("response_id", "")
             extracted_answer = extract_answer(response_text, task_type)
 
             from src.algorithms.reward import math_answers_equal
@@ -191,20 +219,20 @@ def build_preference_pairs_for_style(
 
             if is_correct:
                 # Only include as "chosen" if the per-response label matches this style
-                resp_style = per_response_lookup.get(sample_id, {}).get(ri)
+                resp_style = per_response_lookup.get(response_id)
                 if resp_style == thinking_style:
-                    style_correct_responses.append(response_text)
+                    style_correct_responses.append((response_text, response_id))
                 # Skip correct responses that don't match this style
             else:
-                incorrect_responses.append(response_text)
+                incorrect_responses.append((response_text, response_id))
 
         chosen_response = None
         rejected_response = None
 
         if style_correct_responses and incorrect_responses:
             # Ideal: style-matching correct vs incorrect — strong preference signal
-            chosen_response = style_correct_responses[0]
-            rejected_response = incorrect_responses[0]
+            chosen_response, chosen_response_id = style_correct_responses[0]
+            rejected_response, rejected_response_id = incorrect_responses[0]
         elif len(style_correct_responses) >= 2:
             # All matching-style correct: no meaningful preference signal.
             continue
@@ -220,6 +248,8 @@ def build_preference_pairs_for_style(
                 "metadata": {
                     "thinking_style": thinking_style,
                     "sample_id": sample_id,
+                    "chosen_response_id": chosen_response_id,
+                    "rejected_response_id": rejected_response_id,
                 },
             })
 

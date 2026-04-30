@@ -73,6 +73,8 @@ STEP_DEFAULTS = {
     "api_key": "",
     "api_base": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
     "api_model": "glm-4-flash",
+    "strict_classification": True,
+    "max_classification_failure_rate": 0.0,
 }
 
 
@@ -227,6 +229,8 @@ def build_critic_preference_pairs(
     specialty_ratio: float = 0.7,
     general_ratio: float = 0.2,
     calibration_ratio: float = 0.1,
+    strict_classification: bool = True,
+    max_classification_failure_rate: float = 0.0,
 ) -> List[Dict[str, Any]]:
     """
     Build DPO preference pairs for Critic training using Algorithm 1.
@@ -362,6 +366,8 @@ def build_critic_preference_pairs(
                 api_key=api_key,
                 api_base=api_base,
                 api_model=api_model,
+                strict_classification=strict_classification,
+                max_classification_failure_rate=max_classification_failure_rate,
             )
             routed_items = splitter.split_by_error_profile(
                 samples=[p["sample"] for p in raw_pairs],
@@ -474,6 +480,8 @@ def build_critic_preference_pairs(
         logger.error(f"  Failed to generate Critic pairs for '{critic_skill}': {e}")
         if _owns_engine:
             _cleanup_gpu()
+        if strict_classification:
+            raise
 
     return preference_pairs
 
@@ -582,6 +590,11 @@ def main():
         api_key = os.environ.get("GLM_API_KEY", "")
     if api_key:
         os.environ["GLM_API_KEY"] = api_key
+    elif getattr(args, "strict_classification", True):
+        raise RuntimeError(
+            "strict_classification=True requires GLM_API_KEY or "
+            "step04_diversify_critics.api_key"
+        )
     else:
         logger.warning(
             "GLM_API_KEY not set (neither config nor env var). "
@@ -698,6 +711,7 @@ def main():
 
     critic_paths = {}
     inactive_critics = {}
+    critic_metrics = {}
 
     # Create a single vLLM engine shared across all critic skills
     from src.inference.vllm_server import VLLMInference
@@ -781,9 +795,13 @@ def main():
                 specialty_ratio=args.specialty_ratio,
                 general_ratio=args.general_ratio,
                 calibration_ratio=args.calibration_ratio,
+                strict_classification=getattr(args, "strict_classification", True),
+                max_classification_failure_rate=getattr(args, "max_classification_failure_rate", 0.0),
             )
 
             if preference_pairs:
+                from src.society.diversity_split import summarize_critic_training_pairs
+                critic_metrics[critic_skill] = summarize_critic_training_pairs(preference_pairs)
                 if len(preference_pairs) < args.min_pairs_per_critic:
                     inactive_critics[critic_skill] = {
                         "reason": "selected_pairs_below_min_pairs_per_critic",
@@ -820,6 +838,9 @@ def main():
         # Phase 2: Train each critic (no engine needed, DPO runs in subprocess)
         for critic_skill, preference_pairs in all_pairs.items():
             logger.info(f"\n--- Training Critic: {critic_skill} ---")
+            if critic_skill not in critic_metrics:
+                from src.society.diversity_split import summarize_critic_training_pairs
+                critic_metrics[critic_skill] = summarize_critic_training_pairs(preference_pairs)
 
             if len(preference_pairs) < args.min_pairs_per_critic:
                 inactive_critics[critic_skill] = {
@@ -866,6 +887,18 @@ def main():
     registry_file = os.path.join(output_dir, "critic_registry.json")
     registry_critics = {}
     for critic_skill in args.critic_skills:
+        critic_metrics.setdefault(critic_skill, {
+            "sample_count": 0,
+            "unique_pair_count": 0,
+            "duplicate_rate": 0.0,
+            "source_bucket_counts": {},
+            "source_bucket_ratios": {
+                "general": 0.0,
+                "specialty": 0.0,
+                "calibration": 0.0,
+            },
+            "assigned_skill_counts": {},
+        })
         if critic_skill in critic_paths:
             registry_critics[critic_skill] = {
                 "critic_skill": critic_skill,
@@ -874,6 +907,7 @@ def main():
                 "status": "active",
                 "participates": True,
                 "base_model_only": False,
+                "metrics": critic_metrics[critic_skill],
             }
         else:
             registry_critics[critic_skill] = {
@@ -884,6 +918,7 @@ def main():
                 "participates": True,
                 "base_model_only": True,
                 "inactive_reason": inactive_critics.get(critic_skill, {}),
+                "metrics": critic_metrics[critic_skill],
             }
 
     with open(registry_file, "w") as f:
@@ -904,10 +939,22 @@ def main():
                     "general_ratio": args.general_ratio,
                     "calibration_ratio": args.calibration_ratio,
                 },
+                "strict_classification": getattr(args, "strict_classification", True),
+                "max_classification_failure_rate": getattr(args, "max_classification_failure_rate", 0.0),
+                "critic_metrics": critic_metrics,
             },
         }, f, indent=2)
 
     logger.info(f"  Registry saved: {registry_file}")
+
+    metrics_file = os.path.join(output_dir, "critic_training_metrics.json")
+    with open(metrics_file, "w") as f:
+        json.dump({
+            "critic_metrics": critic_metrics,
+            "strict_classification": getattr(args, "strict_classification", True),
+            "max_classification_failure_rate": getattr(args, "max_classification_failure_rate", 0.0),
+        }, f, indent=2)
+    logger.info(f"  Metrics saved: {metrics_file}")
 
     logger.info("=" * 60)
     logger.info("Critic diversification complete!")

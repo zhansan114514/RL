@@ -54,6 +54,8 @@ class AgentResponse:
     round: int
     response: str
     answer: Optional[str]
+    sample_id: str = ""
+    response_id: str = ""
 
 
 @dataclass
@@ -82,6 +84,11 @@ def parse_args():
     return cfg.step("step01_bootstrap", defaults=STEP_DEFAULTS).to_namespace()
 
 
+def make_response_id(sample_id: str, round_num: int, agent_id: int) -> str:
+    """Stable identifier for a bootstrap response."""
+    return f"{sample_id}_round_{round_num}_agent_{agent_id}"
+
+
 def generate_initial_responses(
     model,
     sample: dict,
@@ -90,6 +97,7 @@ def generate_initial_responses(
     temperature: float,
     max_tokens: int,
     base_seed: int,
+    sample_id: str = "sample",
 ) -> list[AgentResponse]:
     """Generate N independent responses with different seeds."""
     from src.prompts.formatter import format_prompt
@@ -131,6 +139,8 @@ def generate_initial_responses(
             round=0,
             response=response_text,
             answer=answer,
+            sample_id=sample_id,
+            response_id=make_response_id(sample_id, 0, agent_id),
         ))
 
     return responses
@@ -156,6 +166,7 @@ def generate_initial_responses_batch(
     temperature: float,
     max_tokens: int,
     base_seed: int,
+    sample_ids: Optional[list[str]] = None,
 ) -> list[list[AgentResponse]]:
     """Generate initial responses for multiple samples and agents in one call."""
     from src.prompts.formatter import format_prompt
@@ -164,6 +175,12 @@ def generate_initial_responses_batch(
 
     prompts: list[str] = []
     meta: list[tuple[int, int]] = []
+    sample_ids = sample_ids or [
+        str(sample.get("sample_id", f"sample_{sample_idx}"))
+        for sample_idx, sample in enumerate(samples)
+    ]
+    if len(sample_ids) != len(samples):
+        raise ValueError("sample_ids and samples must have equal length")
     for sample_idx, sample in enumerate(samples):
         for agent_id in range(num_agents):
             prompts.append(
@@ -201,6 +218,8 @@ def generate_initial_responses_batch(
             round=0,
             response=response_text,
             answer=answer,
+            sample_id=sample_ids[sample_idx],
+            response_id=make_response_id(sample_ids[sample_idx], 0, agent_id),
         ))
 
     return responses_by_sample
@@ -215,6 +234,7 @@ def simulate_debate_round(
     temperature: float,
     max_tokens: int,
     base_seed: int,
+    sample_id: str = "sample",
 ) -> list[AgentResponse]:
     """Simulate one round of debate where agents see others' responses."""
     from src.prompts.formatter import format_prompt
@@ -262,6 +282,8 @@ def simulate_debate_round(
             round=round_num,
             response=response_text,
             answer=answer,
+            sample_id=sample_id,
+            response_id=make_response_id(sample_id, round_num, agent_id),
         ))
 
     return responses
@@ -276,6 +298,7 @@ def simulate_debate_round_batch(
     temperature: float,
     max_tokens: int,
     base_seed: int,
+    sample_ids: Optional[list[str]] = None,
 ) -> list[list[AgentResponse]]:
     """Simulate one debate round for multiple samples and agents in one call."""
     from src.prompts.formatter import format_prompt
@@ -287,6 +310,12 @@ def simulate_debate_round_batch(
 
     prompts: list[str] = []
     meta: list[tuple[int, int]] = []
+    sample_ids = sample_ids or [
+        str(sample.get("sample_id", f"sample_{sample_idx}"))
+        for sample_idx, sample in enumerate(samples)
+    ]
+    if len(sample_ids) != len(samples):
+        raise ValueError("sample_ids and samples must have equal length")
     for sample_idx, (sample, previous_responses) in enumerate(
         zip(samples, previous_responses_by_sample)
     ):
@@ -332,6 +361,8 @@ def simulate_debate_round_batch(
             round=round_num,
             response=response_text,
             answer=answer,
+            sample_id=sample_ids[sample_idx],
+            response_id=make_response_id(sample_ids[sample_idx], round_num, agent_id),
         ))
 
     return responses_by_sample
@@ -450,6 +481,7 @@ def main():
         batch_entries = pending[batch_start:batch_start + batch_size]
         batch_indices = [idx for idx, _ in batch_entries]
         batch_samples = [sample for _, sample in batch_entries]
+        batch_sample_ids = [f"{args.dataset}_{idx}" for idx in batch_indices]
         first_display_idx = batch_start + 1
         last_display_idx = batch_start + len(batch_entries)
         logger.info(
@@ -467,6 +499,7 @@ def main():
             args.temperature,
             args.max_tokens,
             base_seed,
+            sample_ids=batch_sample_ids,
         )
 
         # Simulate debate rounds, batching all samples x agents per round.
@@ -485,6 +518,7 @@ def main():
                 args.temperature,
                 args.max_tokens,
                 base_seed,
+                sample_ids=batch_sample_ids,
             )
             for local_idx, round_responses in enumerate(round_responses_batch):
                 debate_rounds_batch[local_idx].append(round_responses)

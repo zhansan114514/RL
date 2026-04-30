@@ -16,7 +16,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-from src.society.agent_registry import AgentRegistry
+from src.society.agent_registry import AgentConfig, AgentRegistry
 from src.society.multi_deliberation import (
     multi_agent_deliberate_single_gpu,
     MultiDeliberationResult,
@@ -24,6 +24,16 @@ from src.society.multi_deliberation import (
 from src.society.router import CriticRouter
 
 logger = logging.getLogger(__name__)
+
+
+def clone_registry_without_lora(registry: AgentRegistry) -> AgentRegistry:
+    """Clone a registry while forcing every agent to use the base model only."""
+    cloned = AgentRegistry(base_model_path=registry.base_model_path)
+    for agent in registry.list_actors() + registry.list_critics():
+        data = agent.to_dict()
+        data["lora_path"] = None
+        cloned.register(AgentConfig.from_dict(data))
+    return cloned
 
 
 @dataclass
@@ -113,6 +123,9 @@ def society_inference(
     Returns:
         InferenceResult with final answer and metadata.
     """
+    if ablation_label == "A0":
+        registry = clone_registry_without_lora(registry)
+
     all_actors = registry.list_actors()
     all_critics = registry.list_critics()
 
@@ -170,6 +183,7 @@ def society_inference(
             "num_critics": len(critics),
             "router_top_k": router_top_k,
             "num_rounds": num_rounds,
+            "lora_enabled": any(a.lora_path for a in actors + critics),
         },
     )
 
@@ -448,6 +462,11 @@ def run_ablation(
     for config_name in configs:
         config = ABLATION_CONFIGS[config_name]
         logger.info(f"Running ablation {config_name}: {config['description']}")
+        effective_registry = (
+            clone_registry_without_lora(registry)
+            if config_name == "A0"
+            else registry
+        )
 
         config_results = []
         for i, sample in enumerate(samples):
@@ -455,7 +474,7 @@ def run_ablation(
             voting_strategy = "weighted" if config_name in {"A3", "A4", "A5"} else "majority_vote"
 
             result = society_inference(
-                registry=registry,
+                registry=effective_registry,
                 sample=sample,
                 dataset_name=dataset_name,
                 inference_engine=inference_engine,

@@ -49,6 +49,7 @@ from src.society.inference_pipeline import (
     _weighted_vote,
     _best_actor,
     ABLATION_CONFIGS,
+    clone_registry_without_lora,
 )
 from src.algorithms.reward import extract_answer
 from src.data.preprocessor import generate_wrong_answer
@@ -307,6 +308,17 @@ class TestAgentRegistry:
         critics = registry.list_critics()
         critic_specialties = {c.error_specialty for c in critics}
         assert critic_specialties == set(CriticSkill)
+
+    def test_clone_registry_without_lora_preserves_agents(self):
+        """A0 baseline should use the same agents without adapters."""
+        registry = AgentRegistry.create_default(base_model_path="/models/qwen")
+        cloned = clone_registry_without_lora(registry)
+
+        assert len(cloned.list_actors()) == len(registry.list_actors())
+        assert len(cloned.list_critics()) == len(registry.list_critics())
+        assert all(agent.lora_path is None for agent in cloned.list_actors())
+        assert all(agent.lora_path is None for agent in cloned.list_critics())
+        assert all(agent.lora_path for agent in registry.list_actors())
 
     def test_repr(self):
         """String representation should show actor/critic counts."""
@@ -1134,6 +1146,26 @@ class TestDiversitySplit:
         # Should distribute across all styles via round-robin
         total = sum(len(v) for v in splits.values())
         assert total == 9  # Due to how the split works, one sample gets filtered
+
+    def test_strict_reasoning_style_fails_without_classifier(self, monkeypatch):
+        """Strict style splitting should not round-robin when API is unavailable."""
+        monkeypatch.delenv("GLM_API_KEY", raising=False)
+        splitter = DiversitySplit(strict_classification=True, use_api=True, api_key="")
+        samples = [{"question": "Q", "answer": "A"}]
+        responses = ["Let x = 1"]
+
+        with pytest.raises(ClassificationError, match="requires GLM_API_KEY"):
+            splitter.split_by_reasoning_style(samples, responses)
+
+    def test_strict_error_profile_fails_without_classifier(self, monkeypatch):
+        """Strict error routing should not send API failures to the general pool."""
+        monkeypatch.delenv("GLM_API_KEY", raising=False)
+        splitter = DiversitySplit(balance=False, strict_classification=True, use_api=True, api_key="")
+        samples = [{"question": "Q", "answer": "42"}]
+        responses = ["wrong"]
+
+        with pytest.raises(ClassificationError, match="requires GLM_API_KEY"):
+            splitter.split_by_error_profile(samples, responses)
 
     def test_adaptive_critic_mix_skips_sparse_specialty(self):
         """Should not train specialists when target data is too sparse."""

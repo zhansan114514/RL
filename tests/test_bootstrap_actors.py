@@ -67,8 +67,18 @@ def test_initial_responses_are_batched_across_samples_and_agents():
 
     assert [r.agent_id for r in responses[0]] == [0, 1, 2]
     assert [r.response for r in responses[0]] == ["response-0", "response-1", "response-2"]
+    assert [r.response_id for r in responses[0]] == [
+        "sample_0_round_0_agent_0",
+        "sample_0_round_0_agent_1",
+        "sample_0_round_0_agent_2",
+    ]
     assert [r.agent_id for r in responses[1]] == [0, 1, 2]
     assert [r.response for r in responses[1]] == ["response-3", "response-4", "response-5"]
+    assert [r.response_id for r in responses[1]] == [
+        "sample_1_round_0_agent_0",
+        "sample_1_round_0_agent_1",
+        "sample_1_round_0_agent_2",
+    ]
 
 
 def test_debate_round_batch_keeps_sample_contexts_separate():
@@ -122,5 +132,13 @@ def test_debate_round_batch_keeps_sample_contexts_separate():
     assert [r.agent_id for r in responses[0]] == [0, 1]
     assert [r.round for r in responses[0]] == [1, 1]
     assert [r.response for r in responses[0]] == ["response-0", "response-1"]
+    assert [r.response_id for r in responses[0]] == [
+        "sample_0_round_1_agent_0",
+        "sample_0_round_1_agent_1",
+    ]
     assert [r.agent_id for r in responses[1]] == [0, 1]
     assert [r.response for r in responses[1]] == ["response-2", "response-3"]
+    assert [r.response_id for r in responses[1]] == [
+        "sample_1_round_1_agent_0",
+        "sample_1_round_1_agent_1",
+    ]

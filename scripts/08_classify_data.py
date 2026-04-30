@@ -43,6 +43,8 @@ STEP_DEFAULTS = {
     "api_temperature": 0.1,
     "input_dir": "output/society/bootstrap",
     "output_dir": "output/society/classified",
+    "strict_classification": True,
+    "max_classification_failure_rate": 0.0,
 }
 
 
@@ -419,6 +421,43 @@ def save_checkpoint(output_dir: str, checkpoint_data: Dict[str, Any]):
         json.dump(checkpoint_data, f, indent=2)
 
 
+def make_response_id(sample_id: str, round_num: int, agent_id: int) -> str:
+    return f"{sample_id}_round_{round_num}_agent_{agent_id}"
+
+
+def iter_trajectory_responses(traj: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return every bootstrap response with a stable response_id."""
+    sample_id = traj.get("sample_id", "sample")
+    responses: List[Dict[str, Any]] = []
+
+    for resp in traj.get("initial_responses", []):
+        item = dict(resp)
+        round_num = int(item.get("round", 0))
+        agent_id = int(item.get("agent_id", 0))
+        item["sample_id"] = sample_id
+        item["round"] = round_num
+        item["agent_id"] = agent_id
+        item["response_id"] = item.get("response_id") or make_response_id(
+            sample_id, round_num, agent_id,
+        )
+        responses.append(item)
+
+    for round_responses in traj.get("debate_rounds", []):
+        for resp in round_responses:
+            item = dict(resp)
+            round_num = int(item.get("round", 0))
+            agent_id = int(item.get("agent_id", 0))
+            item["sample_id"] = sample_id
+            item["round"] = round_num
+            item["agent_id"] = agent_id
+            item["response_id"] = item.get("response_id") or make_response_id(
+                sample_id, round_num, agent_id,
+            )
+            responses.append(item)
+
+    return responses
+
+
 def main():
     # Import math answer comparison for robust checking (e.g., "42" == "42.0")
     from src.algorithms.reward import math_answers_equal
@@ -446,6 +485,8 @@ def main():
     checkpoint = load_checkpoint(output_dir)
     completed_ids = set(checkpoint["completed"])
     results = checkpoint["results"]
+    classification_attempts = 0
+    classification_failures = 0
 
     logger.info(f"  Already classified: {len(completed_ids)}/{len(trajectories)}")
 
@@ -485,12 +526,7 @@ def main():
 
         question = traj["sample"].get("question", "")
 
-        # Get the final round responses for classification
-        debate_rounds = traj.get("debate_rounds", [])
-        if debate_rounds:
-            final_responses = debate_rounds[-1]
-        else:
-            final_responses = traj.get("initial_responses", [])
+        all_responses = iter_trajectory_responses(traj)
 
         # Classify reasoning style for correct responses
         # and error profile for incorrect responses
@@ -503,10 +539,13 @@ def main():
         # Per-response classifications (preserve agent-level diversity)
         per_response_labels = []
 
-        for resp in final_responses:
+        for resp in all_responses:
             response_text = resp.get("response", "")
             answer = resp.get("answer")
             agent_name = resp.get("agent_name", "")
+            response_id = resp.get("response_id", "")
+            round_num = resp.get("round", 0)
+            agent_id = resp.get("agent_id", 0)
             # Use ground truth from sample, not consensus (consensus may be wrong)
             correct_answer = traj.get("sample", {}).get("answer", "")
 
@@ -520,6 +559,10 @@ def main():
                 is_correct = False
 
             per_response_labels.append({
+                "sample_id": sample_id,
+                "response_id": response_id,
+                "round": round_num,
+                "agent_id": agent_id,
                 "agent_name": agent_name,
                 "response": response_text,
                 "answer": answer,
@@ -531,16 +574,30 @@ def main():
 
             if is_correct:
                 # Correct response - classify reasoning style
-                style, conf = classifier.classify_reasoning_style(question, response_text)
+                classification_attempts += 1
+                try:
+                    style, conf = classifier.classify_reasoning_style(question, response_text)
+                except Exception as e:
+                    logger.warning(f"Reasoning style classification failed for {response_id}: {e}")
+                    style, conf = None, 0.0
+                if style is None:
+                    classification_failures += 1
                 reasoning_styles.append((style, conf))
                 per_response_labels[-1]["reasoning_style"] = style
                 per_response_labels[-1]["reasoning_style_confidence"] = conf
             else:
                 # Incorrect response - classify multi-dimensional error profile
-                profile = classifier.classify_error_profile(
-                    question, response_text, sample=traj.get("sample", {}),
-                    extracted_answer=answer or "",
-                )
+                classification_attempts += 1
+                try:
+                    profile = classifier.classify_error_profile(
+                        question, response_text, sample=traj.get("sample", {}),
+                        extracted_answer=answer or "",
+                    )
+                except Exception as e:
+                    logger.warning(f"Error profile classification failed for {response_id}: {e}")
+                    profile = None
+                if profile is None:
+                    classification_failures += 1
                 if profile:
                     error_profiles.append(profile)
                 per_response_labels[-1]["error_profile"] = profile
@@ -586,6 +643,7 @@ def main():
             metadata={
                 "num_correct": len(reasoning_styles),
                 "num_incorrect": len(error_profiles),
+                "num_responses": len(all_responses),
             },
         )
 
@@ -601,6 +659,19 @@ def main():
 
         completed_ids.add(sample_id)
 
+    failure_rate = (
+        classification_failures / classification_attempts
+        if classification_attempts
+        else 0.0
+    )
+    strict_classification = bool(getattr(args, "strict_classification", True))
+    max_failure_rate = float(getattr(args, "max_classification_failure_rate", 0.0))
+    if strict_classification and failure_rate > max_failure_rate:
+        raise RuntimeError(
+            f"Classification failure rate {failure_rate:.3f} exceeds threshold "
+            f"{max_failure_rate:.3f} ({classification_failures}/{classification_attempts})"
+        )
+
     # Save final results
     logger.info("[Step 5] Saving results...")
 
@@ -611,6 +682,11 @@ def main():
             "metadata": {
                 "total_trajectories": len(trajectories),
                 "api_model": args.api_model,
+                "strict_classification": strict_classification,
+                "classification_attempts": classification_attempts,
+                "classification_failures": classification_failures,
+                "classification_failure_rate": failure_rate,
+                "max_classification_failure_rate": max_failure_rate,
             },
         }, f, indent=2, ensure_ascii=False)
 
@@ -637,13 +713,15 @@ def main():
 
         # Build per-response splits for finer-grained data diversification
         per_labels = result.get("per_response_labels", [])
-        for ri, label in enumerate(per_labels):
+        for label in per_labels:
             if label.get("reasoning_style"):
                 per_response_style_splits.setdefault(
                     label["reasoning_style"], [],
                 ).append({
                     "sample_id": sample_id,
-                    "response_index": ri,
+                    "response_id": label.get("response_id", ""),
+                    "round": label.get("round", 0),
+                    "agent_id": label.get("agent_id", 0),
                     "agent_name": label.get("agent_name", ""),
                     "is_correct": label.get("is_correct", False),
                 })
@@ -653,7 +731,9 @@ def main():
                     profile["primary"], [],
                 ).append({
                     "sample_id": sample_id,
-                    "response_index": ri,
+                    "response_id": label.get("response_id", ""),
+                    "round": label.get("round", 0),
+                    "agent_id": label.get("agent_id", 0),
                     "agent_name": label.get("agent_name", ""),
                     "is_correct": label.get("is_correct", False),
                     "scores": profile.get("scores", {}),
