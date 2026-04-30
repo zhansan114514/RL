@@ -4,6 +4,8 @@ import pytest
 
 from src.algorithms.reward import (
     extract_answer,
+    extract_answer_with_source,
+    compute_extraction_success_rates,
     normalize_answer,
     compute_accuracy,
     compute_accuracy_with_ci,
@@ -68,6 +70,33 @@ class TestExtractAnswer:
     def test_mixed_fallback_yes_no(self):
         result = extract_answer("The answer is Yes.", task_type="mixed")
         assert result == "YES"
+
+    def test_strict_extraction_source(self):
+        result = extract_answer_with_source("FINAL_ANSWER: B", task_type="multiple_choice")
+        assert result.answer == "B"
+        assert result.source == "strict"
+
+    def test_fallback_extraction_source(self):
+        result = extract_answer_with_source(
+            "Therefore, B.",
+            task_type="multiple_choice",
+        )
+        assert result.answer == "B"
+        assert result.source == "fallback"
+
+    def test_extraction_success_rates_split_strict_and_fallback(self):
+        rates = compute_extraction_success_rates(
+            [
+                "FINAL_ANSWER: Yes",
+                "The answer is No.",
+                "Unrecoverable output.",
+            ],
+            task_type="yes_no",
+        )
+        assert rates["strict_extract_success_rate"] == pytest.approx(1 / 3)
+        assert rates["fallback_extract_success_rate"] == pytest.approx(1 / 3)
+        assert rates["extract_success_rate"] == pytest.approx(2 / 3)
+        assert rates["extract_failure_count"] == 1
 
 
 class TestNormalizeAnswer:
@@ -181,6 +210,8 @@ class TestEvaluateBenchmark:
             assert "dataset" in results
             assert "final_accuracy" in results
             assert "per_round_accuracy" in results
+            assert "strict_extract_success_rate" in results
+            assert "fallback_extract_success_rate" in results
             assert "improvement_rate" in results
             assert results["num_samples"] == 2
             assert results["num_rounds"] == 3

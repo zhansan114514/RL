@@ -75,6 +75,23 @@ class TestDeliberateEngine:
         # Round 0 prompt should be the single-shot prompt
         assert "yes-no question" in traj[0]["actor_prompt"]
 
+    def test_critic_prompt_receives_previous_responses(self):
+        from src.algorithms.deliberation import deliberate
+
+        actor = MockInference(responses=["FINAL_ANSWER: Yes", "FINAL_ANSWER: No"])
+        critic = MockInference(responses=["Round 0 feedback.", "Round 1 feedback."])
+        sample = {
+            "question": "Is X true?",
+            "passage": "Evidence for X.",
+            "answer": "yes",
+            "task_type": "yes_no",
+        }
+        traj = deliberate(actor, critic, sample, "boolq", num_rounds=2)
+
+        assert "Person 1 said: FINAL_ANSWER: Yes" in traj[1]["critic_prompt"]
+        assert "Person 2 said: Round 0 feedback." in traj[1]["critic_prompt"]
+        assert "{responses_text}" not in traj[1]["critic_prompt"]
+
 
 class TestDeliberationEdgeCases:
     """Test edge cases and malformed inputs for deliberation engine."""

@@ -66,6 +66,7 @@ def deliberate(
         critic_prompt = format_prompt(
             dataset_name, PromptType.DELIBERATION_CRITIC, sample,
             actor_response=actor_response,
+            responses=previous_responses,
         )
         critic_response = critic_model.generate_single(
             critic_prompt, max_tokens=max_tokens, temperature=temperature,
@@ -154,6 +155,7 @@ def deliberate_batch(
             prompt = format_prompt(
                 dataset_name, PromptType.DELIBERATION_CRITIC, sample,
                 actor_response=actor_responses[i],
+                responses=all_previous[i],
             )
             critic_prompts.append(prompt)
 

@@ -108,6 +108,24 @@ class TestPromptFormatting:
             actor_response="I think the answer is Yes.",
         )
         assert "I think the answer is Yes." in result
+        assert "{responses_text}" not in result
+        assert "{actor_response}" not in result
+
+    def test_critic_prompt_can_include_prior_responses(self):
+        sample = {
+            "question": "Is the sky blue?",
+            "passage": "The sky appears blue.",
+        }
+        result = format_prompt(
+            "boolq",
+            PromptType.DELIBERATION_CRITIC,
+            sample,
+            actor_response="FINAL_ANSWER: Yes",
+            responses=["Earlier actor answer.", "Earlier critic feedback."],
+        )
+        assert "Person 1 said: Earlier actor answer." in result
+        assert "Person 2 said: Earlier critic feedback." in result
+        assert "FINAL_ANSWER: Yes" in result
 
     def test_mmlu_with_choices(self):
         sample = {

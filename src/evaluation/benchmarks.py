@@ -10,10 +10,11 @@ import time
 
 from src.algorithms.deliberation import deliberate_batch
 from src.algorithms.reward import (
-    extract_answer,
+    extract_answer_with_source,
     compute_accuracy_with_ci,
     compute_per_round_accuracy,
     compute_improvement_rate,
+    compute_extraction_success_rates,
 )
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,7 @@ def evaluate_benchmark_batch(
     """Evaluate Actor-Critic team with batched deliberation."""
     labels = []
     all_round_answers = [[] for _ in range(num_rounds)]
+    all_round_responses = [[] for _ in range(num_rounds)]
     sample_details = []
     eval_start = time.time()
 
@@ -105,10 +107,15 @@ def evaluate_benchmark_batch(
             labels.append(label)
 
             round_answers = []
+            round_extraction_sources = []
             for t, round_data in enumerate(trajectory):
-                answer = extract_answer(round_data["actor_response"], task_type)
+                response = round_data["actor_response"]
+                extraction = extract_answer_with_source(response, task_type)
+                answer = extraction.answer
                 all_round_answers[t].append(answer or "")
+                all_round_responses[t].append(response)
                 round_answers.append(answer or "")
+                round_extraction_sources.append(extraction.source or "none")
 
             initial_pred = round_answers[0] if round_answers else ""
             final_pred = round_answers[-1] if round_answers else ""
@@ -127,6 +134,12 @@ def evaluate_benchmark_batch(
                 "index": i,
                 "initial_answer": initial_pred,
                 "final_answer": final_pred,
+                "initial_extract_source": (
+                    round_extraction_sources[0] if round_extraction_sources else "none"
+                ),
+                "final_extract_source": (
+                    round_extraction_sources[-1] if round_extraction_sources else "none"
+                ),
                 "label": label,
                 "initially_correct": initially_correct,
                 "finally_correct": finally_correct,
@@ -140,6 +153,16 @@ def evaluate_benchmark_batch(
 
     # Compute metrics
     task_type = test_samples[0].get("task_type", "yes_no") if test_samples else "yes_no"
+    sample_task_types = [sample.get("task_type", "yes_no") for sample in test_samples]
+    per_round_extraction_rates = [
+        compute_extraction_success_rates(round_responses, sample_task_types)
+        for round_responses in all_round_responses
+    ]
+    final_extraction_rates = (
+        per_round_extraction_rates[-1]
+        if per_round_extraction_rates
+        else compute_extraction_success_rates([])
+    )
     per_round_acc = compute_per_round_accuracy(all_round_answers, labels, task_type=task_type)
     final_acc, ci_margin = compute_accuracy_with_ci(
         all_round_answers[-1], labels, task_type=task_type,
@@ -168,6 +191,10 @@ def evaluate_benchmark_batch(
         "ci_95": [max(0, final_acc - ci_margin), min(1, final_acc + ci_margin)],
         "improvement_rate": improvement,
         "absolute_improvement": final_acc - initial_acc,
+        "strict_extract_success_rate": final_extraction_rates["strict_extract_success_rate"],
+        "fallback_extract_success_rate": final_extraction_rates["fallback_extract_success_rate"],
+        "extract_success_rate": final_extraction_rates["extract_success_rate"],
+        "per_round_extraction_rates": per_round_extraction_rates,
         "per_round_accuracy": per_round_acc,
         "per_round_delta": round_deltas,
         "flip_statistics": {
@@ -219,6 +246,13 @@ def _print_results_table(results: dict) -> None:
                 f"({results['improvement_rate']*100:.2f}%)")
     logger.info(f"    Absolute gain:      {results['absolute_improvement']:+.4f}  "
                 f"({results['absolute_improvement']*100:+.2f}pp)")
+    logger.info("  EXTRACTION")
+    logger.info(f"    Strict FINAL_ANSWER:{results['strict_extract_success_rate']:.4f}  "
+                f"({results['strict_extract_success_rate']*100:.2f}%)")
+    logger.info(f"    Fallback parsed:    {results['fallback_extract_success_rate']:.4f}  "
+                f"({results['fallback_extract_success_rate']*100:.2f}%)")
+    logger.info(f"    Total extracted:    {results['extract_success_rate']:.4f}  "
+                f"({results['extract_success_rate']*100:.2f}%)")
     logger.info(thin)
 
     # Per-round table

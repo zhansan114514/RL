@@ -11,6 +11,7 @@ All modules should import from here, not from src/reward/ or src/data/preprocess
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import re
 import logging
 from typing import Optional
@@ -19,6 +20,20 @@ import numpy as np
 from scipy import stats as scipy_stats
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AnswerExtraction:
+    """Structured answer extraction result.
+
+    source is:
+      - "strict" when the answer came from the prompt contract marker FINAL_ANSWER:
+      - "fallback" when the answer came from weaker diagnostic patterns
+      - None when no answer could be extracted
+    """
+
+    answer: Optional[str]
+    source: Optional[str]
 
 
 # ============================================================
@@ -36,26 +51,38 @@ def extract_answer(response: str, task_type: str = "yes_no") -> Optional[str]:
     Returns:
         Extracted answer string (YES/NO for boolq, A/B/C/D for MC, numeric/math expression for math), or None.
     """
+    return extract_answer_with_source(response, task_type).answer
+
+
+def extract_answer_with_source(response: str, task_type: str = "yes_no") -> AnswerExtraction:
+    """
+    Extract a structured answer and record whether it followed the strict
+    FINAL_ANSWER contract or required fallback parsing.
+    """
     if not response or not response.strip():
-        return None
+        return AnswerExtraction(answer=None, source=None)
 
     if task_type == "yes_no":
-        return _extract_yes_no(response)
+        return _extract_yes_no_with_source(response)
     elif task_type == "multiple_choice":
-        return _extract_mc(response)
+        return _extract_mc_with_source(response)
     elif task_type == "math":
-        return _extract_math(response)
+        return _extract_math_with_source(response)
     elif task_type == "mixed":
-        result = _extract_mc(response)
-        if result:
+        result = _extract_mc_with_source(response)
+        if result.answer:
             return result
-        return _extract_yes_no(response)
+        return _extract_yes_no_with_source(response)
     else:
         logger.warning(f"Unknown task_type: {task_type}")
-        return None
+        return AnswerExtraction(answer=None, source=None)
 
 
 def _extract_yes_no(text: str) -> Optional[str]:
+    return _extract_yes_no_with_source(text).answer
+
+
+def _extract_yes_no_with_source(text: str) -> AnswerExtraction:
     """Extract Yes/No from response (returns uppercase).
 
     Priority:
@@ -64,17 +91,12 @@ def _extract_yes_no(text: str) -> Optional[str]:
       3. Last standalone Yes/No in tail (weak)
     """
     if not text:
-        return None
+        return AnswerExtraction(answer=None, source=None)
 
-    # Layer 1: strict FINAL_ANSWER marker (uppercase only)
-    strict_patterns = [
-        r"(?m)^\s*FINAL[_\s]ANSWER\s*:\s*(Yes|No)\s*$",
-        r"(?m)^\s*FINAL_ANSWER\s*:\s*(Yes|No)\s*$",
-    ]
-    for pat in strict_patterns:
-        matches = re.findall(pat, text, re.IGNORECASE)
-        if matches:
-            return matches[-1].strip().upper()
+    # Layer 1: strict FINAL_ANSWER marker from the prompt contract.
+    matches = re.findall(r"(?m)^\s*FINAL_ANSWER\s*:\s*((?i:yes|no))\s*$", text)
+    if matches:
+        return AnswerExtraction(answer=matches[-1].strip().upper(), source="strict")
 
     # Tail region for weaker patterns
     lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
@@ -89,17 +111,21 @@ def _extract_yes_no(text: str) -> Optional[str]:
     for pat in medium_patterns:
         matches = re.findall(pat, tail, re.IGNORECASE)
         if matches:
-            return matches[-1].strip().upper()
+            return AnswerExtraction(answer=matches[-1].strip().upper(), source="fallback")
 
     # Layer 3: weak fallback — last Yes/No in the tail only
     matches = re.findall(r"\b(Yes|No)\b", tail, re.IGNORECASE)
     if matches:
-        return matches[-1].strip().upper()
+        return AnswerExtraction(answer=matches[-1].strip().upper(), source="fallback")
 
-    return None
+    return AnswerExtraction(answer=None, source=None)
 
 
 def _extract_mc(text: str) -> Optional[str]:
+    return _extract_mc_with_source(text).answer
+
+
+def _extract_mc_with_source(text: str) -> AnswerExtraction:
     """Extract A/B/C/D from multiple choice response.
 
     Three-layer priority (conservative — avoids grabbing option letters
@@ -109,22 +135,17 @@ def _extract_mc(text: str) -> Optional[str]:
       3. Very weak: standalone letter at line end (last 5 lines only)
     """
     if not text:
-        return None
+        return AnswerExtraction(answer=None, source=None)
 
     text = text.replace("\uff1a", ":")  # fullwidth colon
     lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
     tail = "\n".join(lines[-5:])
 
     # Layer 1: strict FINAL_ANSWER marker (scan full text)
-    # Only matches the exact uppercase marker we inject into prompts.
-    strict_patterns = [
-        r"(?m)^\s*FINAL[_\s]ANSWER\s*:\s*\(?\s*([A-D])\s*\)?\s*$",
-        r"(?m)^\s*FINAL_ANSWER\s*:\s*\(?\s*([A-D])\s*\)?\s*$",
-    ]
-    for pat in strict_patterns:
-        matches = re.findall(pat, text, re.IGNORECASE)
-        if matches:
-            return matches[-1].upper()
+    # Only matches the exact marker injected into prompts.
+    matches = re.findall(r"(?m)^\s*FINAL_ANSWER\s*:\s*\(?\s*([A-Da-d])\s*\)?\s*$", text)
+    if matches:
+        return AnswerExtraction(answer=matches[-1].upper(), source="strict")
 
     # Layer 2: medium-confidence patterns in tail only
     medium_patterns = [
@@ -136,7 +157,7 @@ def _extract_mc(text: str) -> Optional[str]:
     for pat in medium_patterns:
         matches = re.findall(pat, tail, re.IGNORECASE)
         if matches:
-            return matches[-1].upper()
+            return AnswerExtraction(answer=matches[-1].upper(), source="fallback")
 
     # Layer 3: weak fallback — restricted to tail only (last 5 lines).
     # The old \b([A-D])\b was dangerous because it scanned the full text,
@@ -149,14 +170,14 @@ def _extract_mc(text: str) -> Optional[str]:
     for pat in weak_patterns:
         matches = re.findall(pat, tail, re.IGNORECASE)
         if matches:
-            return matches[-1].upper()
+            return AnswerExtraction(answer=matches[-1].upper(), source="fallback")
 
     # Last resort: find the last standalone A-D letter in the tail only.
     matches = re.findall(r"\b([A-D])\b", tail)
     if matches:
-        return matches[-1].upper()
+        return AnswerExtraction(answer=matches[-1].upper(), source="fallback")
 
-    return None
+    return AnswerExtraction(answer=None, source=None)
 
 
 def extract_balanced_braces(text: str, start: int) -> Optional[str]:
@@ -180,6 +201,10 @@ def extract_balanced_braces(text: str, start: int) -> Optional[str]:
 
 
 def _extract_math(text: str) -> Optional[str]:
+    return _extract_math_with_source(text).answer
+
+
+def _extract_math_with_source(text: str) -> AnswerExtraction:
     """Extract mathematical answer from response (supports \\boxed{}, FINAL_ANSWER, and numeric answers).
 
     Priority:
@@ -189,18 +214,14 @@ def _extract_math(text: str) -> Optional[str]:
       4. Weak fallback near end
     """
     if not text:
-        return None
+        return AnswerExtraction(answer=None, source=None)
 
     # Layer 1: strict FINAL_ANSWER marker (uppercase only, exact format)
     final_answer_match = re.search(
-        r"(?m)^\s*FINAL[_\s]ANSWER\s*:\s*(.+?)\s*$", text,
+        r"(?m)^\s*FINAL_ANSWER\s*:\s*(.+?)\s*$", text,
     )
-    if not final_answer_match:
-        final_answer_match = re.search(
-            r"(?m)^\s*FINAL_ANSWER\s*:\s*(.+?)\s*$", text,
-        )
     if final_answer_match:
-        return final_answer_match.group(1).strip()
+        return AnswerExtraction(answer=final_answer_match.group(1).strip(), source="strict")
 
     # Layer 2: \boxed{...} with balanced brace matching
     boxed_prefixes = [
@@ -213,7 +234,7 @@ def _extract_math(text: str) -> Optional[str]:
             brace_start = m.end() - 1  # position of the opening '{'
             content = extract_balanced_braces(text, brace_start)
             if content is not None:
-                return content.strip()
+                return AnswerExtraction(answer=content.strip(), source="fallback")
 
     # Layer 3: Answer patterns (tail only)
     lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
@@ -228,7 +249,7 @@ def _extract_math(text: str) -> Optional[str]:
     for pat in answer_patterns:
         m = re.search(pat, tail)
         if m:
-            return m.group(1).strip()
+            return AnswerExtraction(answer=m.group(1).strip(), source="fallback")
 
     # Layer 4: weak fallback
     fallback_patterns = [
@@ -238,9 +259,9 @@ def _extract_math(text: str) -> Optional[str]:
     for pat in fallback_patterns:
         matches = re.findall(pat, tail, re.IGNORECASE)
         if matches:
-            return matches[-1].strip()
+            return AnswerExtraction(answer=matches[-1].strip(), source="fallback")
 
-    return None
+    return AnswerExtraction(answer=None, source=None)
 
 
 def normalize_answer(answer: str, task_type: str = "yes_no") -> str:
@@ -318,6 +339,50 @@ def math_answers_equal(pred: str, label: str) -> bool:
     except (ValueError, OverflowError):
         pass
     return norm_pred == norm_label
+
+
+def compute_extraction_success_rates(
+    responses: list[str],
+    task_type: str | list[str] = "yes_no",
+) -> dict[str, float | int]:
+    """
+    Compute answer extraction diagnostics.
+
+    strict_extract_success_rate tracks outputs that obeyed the FINAL_ANSWER
+    contract. fallback_extract_success_rate tracks outputs that were only
+    recoverable through weaker parsing and should be treated as a format warning.
+    """
+    total = len(responses)
+    if total == 0:
+        return {
+            "strict_extract_success_rate": 0.0,
+            "fallback_extract_success_rate": 0.0,
+            "extract_success_rate": 0.0,
+            "strict_extract_success_count": 0,
+            "fallback_extract_success_count": 0,
+            "extract_failure_count": 0,
+        }
+
+    strict_count = 0
+    fallback_count = 0
+
+    for i, response in enumerate(responses):
+        current_task_type = task_type[i] if isinstance(task_type, list) else task_type
+        extraction = extract_answer_with_source(response, current_task_type)
+        if extraction.source == "strict":
+            strict_count += 1
+        elif extraction.source == "fallback":
+            fallback_count += 1
+
+    extracted_count = strict_count + fallback_count
+    return {
+        "strict_extract_success_rate": strict_count / total,
+        "fallback_extract_success_rate": fallback_count / total,
+        "extract_success_rate": extracted_count / total,
+        "strict_extract_success_count": strict_count,
+        "fallback_extract_success_count": fallback_count,
+        "extract_failure_count": total - extracted_count,
+    }
 
 
 # ============================================================

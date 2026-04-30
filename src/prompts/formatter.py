@@ -55,17 +55,11 @@ def format_prompt(
         for label in "abcd":
             fmt_vars[f"choice_{label}"] = ""
 
-    # Guided prompt: target answer
-    if "target_answer" in kwargs:
-        fmt_vars["target_answer"] = kwargs["target_answer"]
-
-    # Deliberation: responses text
-    if "responses" in kwargs:
-        fmt_vars["responses_text"] = _format_responses(kwargs["responses"])
-
-    # Critic: actor's response
-    if "actor_response" in kwargs:
-        fmt_vars["actor_response"] = kwargs["actor_response"]
+    # Common optional template variables.  Defaults are intentional: prompt
+    # templates should never leak unresolved placeholders into model input.
+    fmt_vars["responses_text"] = _format_responses(kwargs.get("responses", []))
+    fmt_vars["actor_response"] = kwargs.get("actor_response", "")
+    fmt_vars["target_answer"] = kwargs.get("target_answer", "")
 
     # Fill remaining kwargs
     for key, value in kwargs.items():
