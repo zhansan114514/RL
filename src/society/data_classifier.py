@@ -420,11 +420,15 @@ def _load_cache(cache_path: Path) -> Optional[dict]:
 
 def _save_cache(cache_path: Path, data: dict) -> None:
     """Save classification result to cache (atomic write)."""
+    import threading
+    import uuid
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = cache_path.with_suffix(".tmp")
+    tmp_path = cache_path.with_name(
+        f"{cache_path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp"
+    )
     with open(tmp_path, "w") as f:
         json.dump(data, f)
-    tmp_path.rename(cache_path)
+    os.replace(tmp_path, cache_path)
 
 
 # ============================================================

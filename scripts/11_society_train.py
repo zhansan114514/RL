@@ -69,6 +69,7 @@ STEP_DEFAULTS = {
     "api_model": "glm-4-flash",
     "strict_classification": True,
     "max_classification_failure_rate": 0.0,
+    "max_classification_workers": 4,
 }
 
 
@@ -344,6 +345,7 @@ def main():
         api_model=api_model,
         strict_classification=getattr(args, "strict_classification", True),
         max_classification_failure_rate=getattr(args, "max_classification_failure_rate", 0.0),
+        max_classification_workers=getattr(args, "max_classification_workers", 4),
     )
 
     # Save final registry

@@ -43,7 +43,7 @@ def _generate_guided_pairs_for_sample(
 
     Given the natural deliberation trajectory already produced by
     ``deliberate()`` or ``deliberate_batch()``, this function implements the
-    core of Algorithm 1: for each round t >= 1, generate guided trajectories
+    core of Algorithm 1: for each available round, generate guided trajectories
     (toward correct / toward wrong), run MC roll-out reward estimation, and
     build preference pairs where the reward delta exceeds *reward_threshold*.
 
@@ -52,7 +52,7 @@ def _generate_guided_pairs_for_sample(
     task_type = sample.get("task_type", "yes_no")
     preference_pairs: list[dict] = []
 
-    for t in range(1, len(natural_trajectory)):
+    for t in range(len(natural_trajectory)):
         round_data = natural_trajectory[t]
         actor_response = round_data["actor_response"]
         critic_response = round_data["critic_response"]
@@ -253,7 +253,7 @@ def _generate_guided_pairs_for_batch(
     preference_pairs: list[dict] = []
     max_rounds = max((len(traj) for traj in natural_trajectories), default=0)
 
-    for t in range(1, max_rounds):
+    for t in range(max_rounds):
         active = [
             i for i, traj in enumerate(natural_trajectories)
             if t < len(traj)

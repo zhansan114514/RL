@@ -16,6 +16,7 @@ import hashlib
 import json
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -78,6 +79,7 @@ class DiversitySplit:
         api_model: str = "",
         strict_classification: bool = False,
         max_classification_failure_rate: float = 0.0,
+        max_classification_workers: int = 4,
     ):
         self.balance = balance
         self.rng = np.random.default_rng(seed)
@@ -90,6 +92,7 @@ class DiversitySplit:
         self._api_model = api_model
         self.strict_classification = strict_classification
         self.max_classification_failure_rate = max(0.0, max_classification_failure_rate)
+        self.max_classification_workers = max(1, int(max_classification_workers))
         self.last_classification_metrics: dict[str, dict] = {}
 
         if pre_classified_file:
@@ -345,6 +348,8 @@ class DiversitySplit:
         preclassified = 0
         attempted_live = 0
         failures = 0
+        profile_by_index: dict[int, dict] = {}
+        live_groups: dict[str, dict] = {}
 
         for i, (sample, response) in enumerate(zip(samples, responses)):
             question = sample.get("question", "")
@@ -356,44 +361,94 @@ class DiversitySplit:
             profile = self._lookup_pre_classified_error_profile(question, response, response_id)
             if profile is not None:
                 preclassified += 1
+                profile_by_index[i] = profile
+                continue
 
-            # Fall back to live classification
-            if profile is None:
-                self._require_live_classifier()
-                try:
-                    attempted_live += 1
-                    result = classify_error_profile(
-                        response=response,
-                        question=question,
-                        extracted_answer=extracted,
-                        correct_answer=correct,
-                        choices=sample.get("choices", ""),
-                        dataset_name=dataset_name,
-                        task_type=sample.get("task_type", ""),
-                        subject=sample.get("subject", sample.get("category", "")),
-                        use_api=self.use_api,
-                        cache_dir=self.cache_dir,
-                        api_key=self._api_key,
-                        api_base=self._api_base,
-                        api_model=self._api_model,
-                    )
-                    profile = {
-                        "scores": result.scores,
-                        "primary": result.primary,
-                        "secondary": result.secondary,
-                        "confidence": result.confidence,
-                        "evidence": result.evidence,
+            key = _live_profile_key(
+                question=question,
+                response=response,
+                correct=correct,
+                extracted=extracted,
+                choices=sample.get("choices", ""),
+                dataset_name=dataset_name,
+                task_type=sample.get("task_type", ""),
+                subject=sample.get("subject", sample.get("category", "")),
+            )
+            live_groups.setdefault(key, {
+                "indices": [],
+                "sample": sample,
+                "response": response,
+                "correct": correct,
+                "extracted": extracted,
+                "dataset_name": dataset_name,
+            })["indices"].append(i)
+
+        if live_groups:
+            self._require_live_classifier()
+
+        def classify_group(payload: dict) -> tuple[list[int], dict | None, ClassificationError | None]:
+            sample = payload["sample"]
+            try:
+                result = classify_error_profile(
+                    response=payload["response"],
+                    question=sample.get("question", ""),
+                    extracted_answer=payload["extracted"],
+                    correct_answer=payload["correct"],
+                    choices=sample.get("choices", ""),
+                    dataset_name=payload["dataset_name"],
+                    task_type=sample.get("task_type", ""),
+                    subject=sample.get("subject", sample.get("category", "")),
+                    use_api=self.use_api,
+                    cache_dir=self.cache_dir,
+                    api_key=self._api_key,
+                    api_base=self._api_base,
+                    api_model=self._api_model,
+                )
+                return payload["indices"], {
+                    "scores": result.scores,
+                    "primary": result.primary,
+                    "secondary": result.secondary,
+                    "confidence": result.confidence,
+                    "evidence": result.evidence,
+                }, None
+            except ClassificationError as e:
+                return payload["indices"], None, e
+
+        if live_groups:
+            attempted_live = len(live_groups)
+            if self.max_classification_workers == 1:
+                group_results = [classify_group(payload) for payload in live_groups.values()]
+            else:
+                group_results = []
+                with ThreadPoolExecutor(max_workers=self.max_classification_workers) as executor:
+                    future_map = {
+                        executor.submit(classify_group, payload): key
+                        for key, payload in live_groups.items()
                     }
-                except ClassificationError as e:
+                    for future in as_completed(future_map):
+                        group_results.append(future.result())
+
+            for indices, profile, error in group_results:
+                if profile is None:
                     failures += 1
                     if self.strict_classification:
-                        logger.error(f"Error profile classification failed for sample {i}: {e}")
+                        logger.error(
+                            f"Error profile classification failed for {len(indices)} duplicated item(s): {error}"
+                        )
                         continue
-                    profile = _unknown_profile(str(e))
+                    profile = _unknown_profile(str(error))
                     logger.warning(
-                        f"Error profile classification failed for sample {i}, "
-                        f"routed to general pool: {e}"
+                        f"Error profile classification failed for {len(indices)} duplicated item(s), "
+                        f"routed to general pool: {error}"
                     )
+                for idx in indices:
+                    profile_by_index[idx] = profile
+
+        for i, (sample, response) in enumerate(zip(samples, responses)):
+            profile = profile_by_index.get(i)
+            if profile is None:
+                continue
+            response_id = response_ids[i] if response_ids and i < len(response_ids) else ""
 
             assignments = assign_error_profile(profile)
             for label, weight in assignments:
@@ -592,6 +647,31 @@ def _unknown_profile(evidence: str = "") -> dict:
 def _content_hash(question: str, response: str) -> str:
     """Stable hash for (question, response) pair — used for lookup keys."""
     content = f"{question}||{response}"
+    return hashlib.md5(content.encode()).hexdigest()[:12]
+
+
+def _live_profile_key(
+    question: str,
+    response: str,
+    correct: str,
+    extracted: str,
+    choices: str | list | dict = "",
+    dataset_name: str = "",
+    task_type: str = "",
+    subject: str = "",
+) -> str:
+    """Stable key for deduplicating live error-profile classifications."""
+    payload = {
+        "question": question,
+        "response": response,
+        "correct": correct,
+        "extracted": extracted,
+        "choices": choices,
+        "dataset_name": dataset_name,
+        "task_type": task_type,
+        "subject": subject,
+    }
+    content = json.dumps(payload, sort_keys=True, ensure_ascii=False)
     return hashlib.md5(content.encode()).hexdigest()[:12]
 
 

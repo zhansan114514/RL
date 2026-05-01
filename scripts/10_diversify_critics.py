@@ -75,6 +75,7 @@ STEP_DEFAULTS = {
     "api_model": "glm-4-flash",
     "strict_classification": True,
     "max_classification_failure_rate": 0.0,
+    "max_classification_workers": 4,
 }
 
 
@@ -231,6 +232,7 @@ def build_critic_preference_pairs(
     calibration_ratio: float = 0.1,
     strict_classification: bool = True,
     max_classification_failure_rate: float = 0.0,
+    max_classification_workers: int = 4,
 ) -> List[Dict[str, Any]]:
     """
     Build DPO preference pairs for Critic training using Algorithm 1.
@@ -368,6 +370,7 @@ def build_critic_preference_pairs(
                 api_model=api_model,
                 strict_classification=strict_classification,
                 max_classification_failure_rate=max_classification_failure_rate,
+                max_classification_workers=max_classification_workers,
             )
             routed_items = splitter.split_by_error_profile(
                 samples=[p["sample"] for p in raw_pairs],
@@ -797,6 +800,7 @@ def main():
                 calibration_ratio=args.calibration_ratio,
                 strict_classification=getattr(args, "strict_classification", True),
                 max_classification_failure_rate=getattr(args, "max_classification_failure_rate", 0.0),
+                max_classification_workers=getattr(args, "max_classification_workers", 4),
             )
 
             if preference_pairs:

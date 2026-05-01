@@ -151,6 +151,7 @@ def society_alternating_train(
     api_model: str = "",
     strict_classification: bool = True,
     max_classification_failure_rate: float = 0.0,
+    max_classification_workers: int = 4,
 ) -> SocietyTrainingResult:
     """
     Train N Actors + M Critics in alternating fashion.
@@ -288,6 +289,7 @@ def society_alternating_train(
                 api_model=api_model,
                 strict_classification=strict_classification,
                 max_classification_failure_rate=max_classification_failure_rate,
+                max_classification_workers=max_classification_workers,
                 min_specialty_items=min_specialty_items,
                 min_specialty_ratio=min_specialty_ratio,
                 specialty_ratio=specialty_ratio,
@@ -308,6 +310,17 @@ def society_alternating_train(
                     "min_pairs_per_critic": min_pairs_per_critic,
                     "critic_training_metrics": summarize_critic_training_pairs(preference_pairs),
                 }
+                phase_a_done.add(critic.name)
+                _save_checkpoint(ckpt_file, {
+                    "iteration": iteration,
+                    "actor_paths": actor_paths,
+                    "critic_paths": critic_paths,
+                    "metrics": metrics,
+                    "phase_done": {
+                        **phase_done,
+                        "phase_A": sorted(phase_a_done),
+                    },
+                })
                 continue
 
             # Destroy vLLM engine before DPO to free GPU memory.
@@ -436,6 +449,18 @@ def society_alternating_train(
             if not preference_pairs:
                 logger.warning(f"  No preference pairs for {actor.name}, skipping")
                 metrics[f"actor_{actor.name}_iter{iteration}"] = {"status": "skipped", "pairs": 0}
+                phase_b_done.add(actor.name)
+                _save_checkpoint(ckpt_file, {
+                    "iteration": iteration,
+                    "actor_paths": actor_paths,
+                    "critic_paths": critic_paths,
+                    "metrics": metrics,
+                    "phase_done": {
+                        **phase_done,
+                        "phase_A": phase_done.get("phase_A", []),
+                        "phase_B": sorted(phase_b_done),
+                    },
+                })
                 continue
 
             # Destroy vLLM engine before DPO to free GPU memory.
@@ -646,6 +671,7 @@ def _generate_critic_pairs_algorithm1(
     api_model: str = "",
     strict_classification: bool = True,
     max_classification_failure_rate: float = 0.0,
+    max_classification_workers: int = 4,
     min_specialty_items: int = 32,
     min_specialty_ratio: float = 0.08,
     specialty_ratio: float = 0.7,
@@ -801,6 +827,7 @@ def _generate_critic_pairs_algorithm1(
                 api_model=api_model,
                 strict_classification=strict_classification,
                 max_classification_failure_rate=max_classification_failure_rate,
+                max_classification_workers=max_classification_workers,
             )
             routed_items = splitter.split_by_error_profile(
                 samples=[p["sample"] for p in raw_pairs],

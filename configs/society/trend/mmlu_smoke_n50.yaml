@@ -1,13 +1,13 @@
-# Qwen2.5-7B-Instruct + MMLU + 300 samples, GPU 4
+# Qwen2.5-7B-Instruct + MMLU smoke test, n=50
 # Diverse Actor-Critic Society 全流程 (07-12)
 
 common:
   model_name: "Qwen/Qwen2.5-7B-Instruct"
   base_model: "Qwen/Qwen2.5-7B-Instruct"
   dataset: "mmlu"
-  cache_dir: "output/society_mmlu"
+  cache_dir: "output/society_mmlu_smoke_n50"
   seed: 42
-  max_samples: 300
+  max_samples: 50
   device: 6
   dtype: "bfloat16"
   gpu_memory_utilization: 0.80
@@ -15,7 +15,7 @@ common:
 
 # Phase 1: Bootstrap data generation
 step01_bootstrap:
-  output_dir: "output/society_mmlu/bootstrap"
+  output_dir: "output/society_mmlu_smoke_n50/bootstrap"
   num_agents: 5
   num_debate_rounds: 2
   temperature: 0.8
@@ -24,8 +24,8 @@ step01_bootstrap:
 
 # Phase 2: Data classification (GLM API)
 step02_classify:
-  input_dir: "output/society_mmlu/bootstrap"
-  output_dir: "output/society_mmlu/classified"
+  input_dir: "output/society_mmlu_smoke_n50/bootstrap"
+  output_dir: "output/society_mmlu_smoke_n50/classified"
   api_key: "69b94b7210714cb7a7e3b989e4559114.8cDGdODef5b4cLH1"
   api_base: "https://open.bigmodel.cn/api/paas/v4/chat/completions"
   api_model: "glm-4-flash"
@@ -35,8 +35,8 @@ step02_classify:
 
 # Phase 3: Actor diversification
 step03_diversify_actors:
-  input_dir: "output/society_mmlu/classified"
-  output_dir: "output/society_mmlu/actors"
+  input_dir: "output/society_mmlu_smoke_n50/classified"
+  output_dir: "output/society_mmlu_smoke_n50/actors"
   reasoning_styles: ["algebraic", "direct", "backtracking"]
   lora_r: 256
   lora_alpha: 512
@@ -48,21 +48,21 @@ step03_diversify_actors:
 
 # Phase 4: Critic diversification
 step04_diversify_critics:
-  input_dir: "output/society_mmlu/classified"
-  actor_base_dir: "output/society_mmlu/actors"
-  output_dir: "output/society_mmlu/critics"
+  input_dir: "output/society_mmlu_smoke_n50/classified"
+  actor_base_dir: "output/society_mmlu_smoke_n50/actors"
+  output_dir: "output/society_mmlu_smoke_n50/critics"
   critic_skills: ["reasoning", "knowledge", "computation", "verification"]
-  max_delib_samples: 100
-  num_rounds: 3
-  num_simulations: 2
+  max_delib_samples: 30
+  num_rounds: 2
+  num_simulations: 1
   max_classification_workers: 4
   max_tokens: 192
-  min_pairs_per_critic: 64
-  min_specialty_items: 32
-  min_specialty_ratio: 0.08
-  specialty_ratio: 0.7
-  general_ratio: 0.2
-  calibration_ratio: 0.1
+  min_pairs_per_critic: 8
+  min_specialty_items: 1
+  min_specialty_ratio: 0.0
+  specialty_ratio: 0.5
+  general_ratio: 0.35
+  calibration_ratio: 0.15
   lora_r: 64
   lora_alpha: 128
   learning_rate: 5.0e-5
@@ -73,15 +73,22 @@ step04_diversify_critics:
 
 # Phase 5: Society alternating training
 step05_train_society:
-  actor_base_dir: "output/society_mmlu/actors"
-  critic_base_dir: "output/society_mmlu/critics"
-  output_dir: "output/society_mmlu/society"
+  actor_base_dir: "output/society_mmlu_smoke_n50/actors"
+  critic_base_dir: "output/society_mmlu_smoke_n50/critics"
+  output_dir: "output/society_mmlu_smoke_n50/society"
   num_iterations: 1
-  num_rounds: 2
-  num_simulations: 2
+  num_rounds: 1
+  num_simulations: 1
   max_classification_workers: 4
+  max_samples: 12
   trajectory_max_tokens: 192
   reward_threshold: 0.0
+  min_pairs_per_critic: 8
+  min_specialty_items: 1
+  min_specialty_ratio: 0.0
+  specialty_ratio: 0.5
+  general_ratio: 0.35
+  calibration_ratio: 0.15
   lora_r: 64
   lora_alpha: 128
   learning_rate: 5.0e-5
@@ -89,12 +96,13 @@ step05_train_society:
   batch_size: 4
   num_epochs: 1
   max_length: 2048
-  checkpoint_dir: "output/society_mmlu/checkpoints"
+  checkpoint_dir: "output/society_mmlu_smoke_n50/checkpoints"
 
 # Phase 6: Evaluation + ablation
 step06_evaluate:
-  society_dir: "output/society_mmlu/society"
-  output_dir: "output/society_mmlu/eval"
+  society_dir: "output/society_mmlu_smoke_n50/society"
+  output_dir: "output/society_mmlu_smoke_n50/eval"
+  max_samples: 10
   num_rounds: 2
   max_tokens: 128
   temperature: 0.0

@@ -463,6 +463,43 @@ def _run_deliberation_on_samples(
     )
 
 
+def _build_results_payload(
+    ablation_results: Dict[str, EvalResult],
+    total_time: Optional[float] = None,
+) -> Dict[str, Any]:
+    first_result = list(ablation_results.values())[0] if ablation_results else None
+    main_result = ablation_results.get("A5_full_system") or first_result
+    return {
+        "ablation_results": {
+            name: {
+                "initial_accuracy": r.initial_accuracy,
+                "final_accuracy": r.final_accuracy,
+                "per_round_accuracy": r.per_round_accuracy,
+                "improvement_rate": r.improvement_rate,
+                "absolute_improvement": r.absolute_improvement,
+                "consensus_accuracy": r.consensus_accuracy,
+                "diversity_score": r.diversity_score,
+                "ci_95": list(r.ci_95),
+                "num_samples": r.num_samples,
+                "eval_time_seconds": r.eval_time_seconds,
+            }
+            for name, r in ablation_results.items()
+        },
+        "total_eval_time_seconds": total_time,
+        "sample_details": main_result.sample_details if main_result else [],
+    }
+
+
+def _save_results(
+    results_file: str,
+    ablation_results: Dict[str, EvalResult],
+    total_time: Optional[float] = None,
+):
+    os.makedirs(os.path.dirname(results_file), exist_ok=True)
+    with open(results_file, "w") as f:
+        json.dump(_build_results_payload(ablation_results, total_time), f, indent=2)
+
+
 # ============================================================
 # Main evaluation with shared engine
 # ============================================================
@@ -483,6 +520,7 @@ def run_all_evaluations(
     router_top_k: int = 2,
     phase_actor_dir: str = "output/society/actors",
     phase_critic_dir: str = "output/society/critics",
+    results_file: Optional[str] = None,
 ) -> Dict[str, EvalResult]:
     """Load base model ONCE, run all evaluations sharing the same engine.
 
@@ -551,6 +589,8 @@ def run_all_evaluations(
                 router_top_k=1,
             )
             logger.info(f"  A0: initial={results['A0_base_model'].initial_accuracy:.3f} final={results['A0_base_model'].final_accuracy:.3f}")
+            if results_file:
+                _save_results(results_file, results)
 
             # A1: 1 Actor + 1 Critic from phase registries (pre-society-training)
             # This is the true ACC-Collab baseline: independently diversified
@@ -578,6 +618,8 @@ def run_all_evaluations(
                     router_top_k=1,
                 )
             logger.info(f"  A1: initial={results['A1_acc_collab'].initial_accuracy:.3f} final={results['A1_acc_collab'].final_accuracy:.3f}")
+            if results_file:
+                _save_results(results_file, results)
 
             # A2: 3 diverse Actors (phase 3) + 1 Critic (phase 4) — Actor diversity only
             # Uses PRE-society-training LoRA from phase 3/4 diversification.
@@ -610,6 +652,8 @@ def run_all_evaluations(
                     router_top_k=1,
                 )
             logger.info(f"  A2: initial={results['A2_actor_diversity'].initial_accuracy:.3f} final={results['A2_actor_diversity'].final_accuracy:.3f}")
+            if results_file:
+                _save_results(results_file, results)
 
             # A3: 1 Actor (phase 3) + 4 Critics (phase 4) + Router — Critic specialization only
             # Uses PRE-society-training LoRA from phase 3/4 diversification.
@@ -642,6 +686,8 @@ def run_all_evaluations(
                     router_top_k=2,
                 )
             logger.info(f"  A3: initial={results['A3_critic_specialization'].initial_accuracy:.3f} final={results['A3_critic_specialization'].final_accuracy:.3f}")
+            if results_file:
+                _save_results(results_file, results)
 
             # A4: 3 Actors + 4 Critics from FINAL registry, uniform weights (no routing)
             # Uses POST-society-training LoRA — shows joint training + diversity effect.
@@ -660,6 +706,8 @@ def run_all_evaluations(
                 router_uniform=True,  # Equal weights (no softmax)
             )
             logger.info(f"  A4: initial={results['A4_no_routing'].initial_accuracy:.3f} final={results['A4_no_routing'].final_accuracy:.3f}")
+            if results_file:
+                _save_results(results_file, results)
 
             # A5: 3 Actors + 4 Critics from FINAL registry + Router (full system)
             logger.info("[A5] 3 Actors + 4 Critics + Router (full system)...")
@@ -675,6 +723,8 @@ def run_all_evaluations(
                 router_uniform=False,       # Softmax confidence weighting
             )
             logger.info(f"  A5: initial={results['A5_full_system'].initial_accuracy:.3f} final={results['A5_full_system'].final_accuracy:.3f}")
+            if results_file:
+                _save_results(results_file, results)
         else:
             # Single main evaluation with full system
             logger.info("[Main] Full system evaluation...")
@@ -740,6 +790,7 @@ def main():
     # Run all evaluations with shared engine
     logger.info("[Step 3] Running evaluation (shared base model)...")
     total_start = time.time()
+    results_file = os.path.join(output_dir, "results.json")
 
     # Resolve phase registry directories for pre-society-training ablations
     cache_dir = getattr(args, "cache_dir", "output/society")
@@ -762,6 +813,7 @@ def main():
         router_top_k=args.router_top_k,
         phase_actor_dir=phase_actor_dir,
         phase_critic_dir=phase_critic_dir,
+        results_file=results_file,
     )
     total_time = time.time() - total_start
     logger.info(f"Total evaluation time: {total_time:.1f}s")
@@ -769,28 +821,8 @@ def main():
     # Save results
     logger.info("[Step 4] Saving results...")
 
-    results_file = os.path.join(output_dir, "results.json")
     first_result = list(ablation_results.values())[0] if ablation_results else None
-    with open(results_file, "w") as f:
-        json.dump({
-            "ablation_results": {
-                name: {
-                    "initial_accuracy": r.initial_accuracy,
-                    "final_accuracy": r.final_accuracy,
-                    "per_round_accuracy": r.per_round_accuracy,
-                    "improvement_rate": r.improvement_rate,
-                    "absolute_improvement": r.absolute_improvement,
-                    "consensus_accuracy": r.consensus_accuracy,
-                    "diversity_score": r.diversity_score,
-                    "ci_95": list(r.ci_95),
-                    "num_samples": r.num_samples,
-                    "eval_time_seconds": r.eval_time_seconds,
-                }
-                for name, r in ablation_results.items()
-            },
-            "total_eval_time_seconds": total_time,
-            "sample_details": (ablation_results.get("A5_full_system") or first_result).sample_details if (ablation_results.get("A5_full_system") or first_result) else [],
-        }, f, indent=2)
+    _save_results(results_file, ablation_results, total_time)
 
     logger.info(f"  Results saved: {results_file}")
 
