@@ -8,8 +8,9 @@ Usage:
     # Get global config values:
     max_len = cfg.get("inference.max_model_len", 4096)
 
-    # Get step-specific config:
-    step_cfg = cfg.step("step01_bootstrap", defaults={"num_agents": 5})
+    # Get step-specific config. The ``defaults`` keys are required; values are
+    # not used to fill missing experiment config.
+    step_cfg = cfg.step("step01_bootstrap", defaults={"num_agents": None})
     args = step_cfg.to_namespace()  # argparse.Namespace for backward compat
 """
 
@@ -225,17 +226,19 @@ class ConfigManager:
         """
         Get merged config for a specific pipeline step.
 
-        Merge priority: ``defaults`` < ``common:`` section < top-level ``api:``
-        section for API fields < step-specific section.
+        Merge priority: ``common:`` section < top-level ``api:`` section for API
+        fields < step-specific section < selected ``api.providers`` entry.
+        ``defaults`` is retained as a required-key schema for legacy callers;
+        its values are not used to fill missing config.
 
         Args:
             step_key: e.g. ``"step01_bootstrap"`` or ``"step01"``.
-            defaults: Dict of default values (what was STEP_DEFAULTS).
+            defaults: Dict whose keys are required in the effective step config.
 
         Returns:
             StepConfig with attribute access and ``to_namespace()``.
         """
-        merged = dict(defaults) if defaults else {}
+        merged = {}
 
         cfg_dict = OmegaConf.to_container(self._config, resolve=True)
         if isinstance(cfg_dict, dict):
@@ -258,6 +261,9 @@ class ConfigManager:
                         if value:
                             merged[target] = value
                             break
+                provider = api_cfg.get("provider")
+                if provider:
+                    merged["api_provider"] = provider
 
             # Step-specific section overrides common and top-level API defaults.
             step_cfg = cfg_dict.get(step_key, {})
@@ -265,6 +271,44 @@ class ConfigManager:
                 for key, value in step_cfg.items():
                     if value is not None:
                         merged[key] = value
+
+            if isinstance(api_cfg, dict):
+                provider_name = merged.get("api_provider") or api_cfg.get("provider")
+                providers = api_cfg.get("providers", {})
+                if provider_name and isinstance(providers, dict):
+                    provider_cfg = providers.get(provider_name)
+                    if provider_cfg is None:
+                        raise ConfigKeyError(
+                            f"API provider '{provider_name}' is not defined in api.providers"
+                        )
+                    if not isinstance(provider_cfg, dict):
+                        provider_cfg = OmegaConf.to_container(provider_cfg, resolve=True)
+                    provider_aliases = {
+                        "api_key": ("api_key", "key"),
+                        "api_base": ("api_base", "base_url", "base"),
+                        "api_model": ("api_model", "model"),
+                    }
+                    for target, aliases in provider_aliases.items():
+                        for alias in aliases:
+                            value = provider_cfg.get(alias)
+                            if value:
+                                merged[target] = value
+                                break
+
+        if defaults:
+            missing = [
+                key for key in defaults
+                if (
+                    key not in merged
+                    or merged.get(key) is None
+                    or merged.get(key) == ""
+                )
+            ]
+            if missing:
+                raise ConfigKeyError(
+                    f"Missing required config key(s) for '{step_key}': "
+                    + ", ".join(sorted(missing))
+                )
 
         return StepConfig(merged)
 

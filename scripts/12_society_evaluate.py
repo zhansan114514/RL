@@ -44,6 +44,7 @@ STEP_DEFAULTS = {
     "cache_dir": "output/society",
     "society_dir": "output/society/society",
     "output_dir": "output/society/eval",
+    "max_samples": 200,
     "num_rounds": 2,
     "max_tokens": 1024,
     "temperature": 0.0,

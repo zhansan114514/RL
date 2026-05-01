@@ -40,6 +40,7 @@ STEP_DEFAULTS = {
     "num_iterations": 2,
     "num_rounds": 5,
     "num_simulations": 5,
+    "max_samples": 200,
     "trajectory_max_tokens": 1024,
     "reward_threshold": 0.0,
     "lora_r": 256,

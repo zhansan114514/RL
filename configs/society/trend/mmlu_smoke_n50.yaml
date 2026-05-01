@@ -1,5 +1,8 @@
 # Qwen2.5-7B-Instruct + MMLU smoke test, n=50
-# Diverse Actor-Critic Society 全流程 (07-12)
+# Select the API provider here. Provider credentials/endpoints live in configs/local.yaml.
+
+api:
+  provider: "glm"  # "glm" or "gpt"
 
 common:
   model_name: "Qwen/Qwen2.5-7B-Instruct"
@@ -22,15 +25,20 @@ step01_bootstrap:
   max_tokens: 192
   batch_size: 8
 
-# Phase 2: Data classification (GLM API)
+# Phase 2: Data classification
 step02_classify:
   input_dir: "output/society_mmlu_smoke_n50/bootstrap"
   output_dir: "output/society_mmlu_smoke_n50/classified"
-  api_base: "https://api.labforge.top"
-  api_model: "gpt-5.5"
-  use_batch_api: true
-  batch_api_max_responses: 20
-  max_workers: 4
+  batch_size: 10
+  request_timeout: 60
+  retry_delay: 5
+  max_retries: 3
+  api_temperature: 0.1
+  strict_classification: true
+  max_classification_failure_rate: 0.0
+  use_batch_api: false
+  batch_api_max_responses: 1
+  max_workers: 8
 
 # Phase 3: Actor diversification
 step03_diversify_actors:
@@ -40,66 +48,73 @@ step03_diversify_actors:
   lora_r: 256
   lora_alpha: 512
   learning_rate: 5.0e-5
-  beta: 0.1
   batch_size: 4
+  gradient_accumulation_steps: 4
   num_epochs: 1
   max_length: 2048
+  beta: 0.1
 
 # Phase 4: Critic diversification
 step04_diversify_critics:
   input_dir: "output/society_mmlu_smoke_n50/classified"
   actor_base_dir: "output/society_mmlu_smoke_n50/actors"
   output_dir: "output/society_mmlu_smoke_n50/critics"
-  api_base: "https://api.labforge.top"
-  api_model: "gpt-5.5"
   critic_skills: ["reasoning", "knowledge", "computation", "verification"]
   max_delib_samples: 30
   num_rounds: 2
   num_simulations: 1
-  max_classification_workers: 4
   max_tokens: 192
+  reward_threshold: 0.0
+  lora_r: 64
+  lora_alpha: 128
+  learning_rate: 5.0e-5
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  num_epochs: 1
+  max_length: 2048
+  beta: 0.1
   min_pairs_per_critic: 8
   min_specialty_items: 1
   min_specialty_ratio: 0.0
   specialty_ratio: 0.5
   general_ratio: 0.35
   calibration_ratio: 0.15
-  lora_r: 64
-  lora_alpha: 128
-  learning_rate: 5.0e-5
-  beta: 0.1
-  batch_size: 4
-  num_epochs: 1
-  max_length: 2048
+  max_lora_rank: 256
+  strict_classification: true
+  max_classification_failure_rate: 0.0
+  max_classification_workers: 4
 
 # Phase 5: Society alternating training
 step05_train_society:
   actor_base_dir: "output/society_mmlu_smoke_n50/actors"
   critic_base_dir: "output/society_mmlu_smoke_n50/critics"
   output_dir: "output/society_mmlu_smoke_n50/society"
-  api_base: "https://api.labforge.top"
-  api_model: "gpt-5.5"
   num_iterations: 1
   num_rounds: 1
   num_simulations: 1
-  max_classification_workers: 4
   max_samples: 12
   trajectory_max_tokens: 192
   reward_threshold: 0.0
+  lora_r: 64
+  lora_alpha: 128
+  learning_rate: 5.0e-5
+  batch_size: 4
+  num_epochs: 1
+  max_length: 2048
+  beta: 0.1
   min_pairs_per_critic: 8
   min_specialty_items: 1
   min_specialty_ratio: 0.0
   specialty_ratio: 0.5
   general_ratio: 0.35
   calibration_ratio: 0.15
-  lora_r: 64
-  lora_alpha: 128
-  learning_rate: 5.0e-5
-  beta: 0.1
-  batch_size: 4
-  num_epochs: 1
-  max_length: 2048
   checkpoint_dir: "output/society_mmlu_smoke_n50/checkpoints"
+  actor_temperature: 0.7
+  actor_max_tokens: 192
+  critic_max_tokens: 192
+  strict_classification: true
+  max_classification_failure_rate: 0.0
+  max_classification_workers: 4
 
 # Phase 6: Evaluation + ablation
 step06_evaluate:
@@ -109,3 +124,7 @@ step06_evaluate:
   num_rounds: 2
   max_tokens: 128
   temperature: 0.0
+  run_ablations: true
+  num_samples_for_qualitative: 5
+  max_lora_rank: 256
+  router_top_k: 2

@@ -203,10 +203,31 @@ def load_classified_data(input_dir: str) -> Dict[str, Any]:
     return data
 
 
-def build_critic_preference_pairs(
+def fingerprint_lora_paths(lora_paths: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
+    """Fingerprint adapter artifacts enough to invalidate stale pool caches."""
+    fingerprints: Dict[str, Dict[str, Any]] = {}
+    for name, path in sorted(lora_paths.items()):
+        model_file = os.path.join(path, "adapter_model.safetensors")
+        config_file = os.path.join(path, "adapter_config.json")
+        entries = []
+        for file_path in (model_file, config_file):
+            if os.path.exists(file_path):
+                stat = os.stat(file_path)
+                entries.append({
+                    "path": file_path,
+                    "size": stat.st_size,
+                    "mtime_ns": stat.st_mtime_ns,
+                })
+        fingerprints[name] = {
+            "path": path,
+            "files": entries,
+        }
+    return fingerprints
+
+
+def build_critic_raw_pairs(
     samples: List[Dict],
     actor_lora_paths: Dict[str, str],
-    critic_skill: str,
     model_name: str = "Qwen/Qwen2.5-7B-Instruct",
     dataset_name: str = "math",
     num_rounds: int = 5,
@@ -221,48 +242,23 @@ def build_critic_preference_pairs(
     max_model_len: int = 4096,
     max_lora_rank: int = 256,
     engine=None,
-    input_dir: str = "output/society/classified",
-    api_key: str = "",
-    api_base: str = "",
-    api_model: str = "",
-    min_specialty_items: int = 32,
-    min_specialty_ratio: float = 0.08,
-    specialty_ratio: float = 0.7,
-    general_ratio: float = 0.2,
-    calibration_ratio: float = 0.1,
-    strict_classification: bool = True,
-    max_classification_failure_rate: float = 0.0,
-    max_classification_workers: int = 4,
 ) -> List[Dict[str, Any]]:
     """
-    Build DPO preference pairs for Critic training using Algorithm 1.
+    Build the shared raw Critic-pair pool using Algorithm 1.
 
-    This mirrors society_trainer.py's _generate_critic_pairs_algorithm1():
-    1. Run generate_trajectories() with Actor LoRA + base Critic for each sample
-    2. Extract Critic pairs: chosen=positive_critic, rejected=negative_critic
-       where the Actor's negative response is wrong (error scenario for Critic)
-    3. Route by error profile and sample a shared/specialty/calibration mix
-
-    The Critic is always the base model (no LoRA) at this stage since no
-    Critic LoRA adapters exist yet. Actors use their trained LoRA adapters
-    from script 09, providing diverse real actor responses.
+    This work is independent of the target critic skill.  Generate it once,
+    route it once, then sample skill-specific mixtures from the routed pool.
     """
     from src.inference.vllm_server import VLLMInference
     from src.algorithms.trajectory import generate_trajectories_batch
     from src.algorithms.reward import extract_answer, math_answers_equal, normalize_answer
-    from src.society.diversity_split import DiversitySplit
-    from src.society.agent_registry import resolve_critic_skill
 
-    skill = resolve_critic_skill(critic_skill)
-    logger.info(f"  Generating Critic preference pairs for '{critic_skill}' via Algorithm 1")
+    logger.info("  Generating shared Critic raw-pair pool via Algorithm 1")
 
-    # Collect all unique LoRA paths to determine max_loras for engine
     all_lora_paths = {k: v for k, v in actor_lora_paths.items() if v}
-    # Need at most 1 actor LoRA at a time
-    max_loras = 1 if all_lora_paths else 0
-
+    max_loras = len(all_lora_paths) if all_lora_paths else 0
     n_samples = min(len(samples), max_samples)
-    preference_pairs: List[Dict] = []
+    raw_pairs: List[Dict[str, Any]] = []
     _owns_engine = engine is None
 
     try:
@@ -278,7 +274,6 @@ def build_critic_preference_pairs(
                 max_lora_rank=max_lora_rank,
             )
 
-        # Build adapters for all actors
         adapters = _build_adapters(engine, all_lora_paths)
         if not adapters:
             adapters = {"base_actor": _LoRAModelAdapter(engine, None)}
@@ -287,10 +282,6 @@ def build_critic_preference_pairs(
         # Base Critic adapter (no LoRA)
         critic_adapter = _LoRAModelAdapter(engine, None)
 
-        # Step 1: Run Algorithm 1 with samples grouped by round-robin actor.
-        # Each group batches natural deliberation, guided prompts, and MC
-        # rollout phases across samples.
-        raw_pairs: List[Dict] = []
         actor_groups: Dict[str, List[Dict]] = {}
         for i, sample in enumerate(samples[:n_samples]):
             actor_groups.setdefault(actor_names[i % len(actor_names)], []).append(sample)
@@ -298,7 +289,7 @@ def build_critic_preference_pairs(
         for actor_name, group_samples in actor_groups.items():
             actor_adapter = adapters[actor_name]
             logger.info(
-                f"    Algorithm 1 batch for '{critic_skill}' with actor "
+                "    Algorithm 1 shared batch with actor "
                 f"{actor_name}: {len(group_samples)} samples"
             )
 
@@ -319,11 +310,7 @@ def build_critic_preference_pairs(
                 f"{len(algo_pairs)} pairs"
             )
 
-            # Extract Critic preference pairs from Algorithm 1 results
             for pair in algo_pairs:
-                # pair has: positive, negative (actor),
-                #           positive_critic, negative_critic,
-                #           delta, direction
                 sample = pair.get("sample", {})
                 task_type = sample.get("task_type", "math")
                 correct_answer = sample.get("answer", "")
@@ -342,7 +329,10 @@ def build_critic_preference_pairs(
                     ) != normalize_answer(correct_answer, task_type)
 
                 if is_wrong:
+                    raw_pair_id = f"raw_{len(raw_pairs):06d}"
                     raw_pairs.append({
+                        "raw_pair_id": raw_pair_id,
+                        "actor_name": actor_name,
                         "sample": sample,
                         "chosen": pair["positive_critic"],
                         "rejected": pair["negative_critic"],
@@ -354,139 +344,224 @@ def build_critic_preference_pairs(
                         "direction": pair["direction"],
                     })
 
-        logger.info(
-            f"  Algorithm 1 produced {len(raw_pairs)} raw critic pairs "
-            f"for '{critic_skill}'"
-        )
-
-        # Step 2: Route by error profile, then build the critic training mix.
-        if raw_pairs:
-            splitter = DiversitySplit(
-                balance=False, seed=seed, use_api=True,
-                cache_dir=input_dir,
-                pre_classified_file=os.path.join(input_dir, "classified_data.json"),
-                api_key=api_key,
-                api_base=api_base,
-                api_model=api_model,
-                strict_classification=strict_classification,
-                max_classification_failure_rate=max_classification_failure_rate,
-                max_classification_workers=max_classification_workers,
-            )
-            routed_items = splitter.split_by_error_profile(
-                samples=[p["sample"] for p in raw_pairs],
-                responses=[p["actor_response"] for p in raw_pairs],
-                correct_answers=[p["correct_answer"] for p in raw_pairs],
-                extracted_answers=[p["actor_answer"] or "" for p in raw_pairs],
-                dataset_name=dataset_name,
-            )
-
-            raw_skill_dist = Counter(
-                item.skill.value if item.skill else "general"
-                for item in routed_items
-            )
-            unique_raw_pairs = {
-                (item.sample.get("question", ""), item.response)
-                for item in routed_items
-            }
-            logger.info(
-                f"  [{critic_skill}] raw routed profile distribution: "
-                f"{dict(raw_skill_dist)}"
-            )
-            logger.info(
-                f"  [{critic_skill}] raw unique_pairs: "
-                f"{len(unique_raw_pairs)} / {len(routed_items)}"
-            )
-
-            critic_items = splitter.build_critic_training_mix(
-                all_items=routed_items,
-                target_skill=skill,
-                max_items=max_samples,
-                min_specialty_items=min_specialty_items,
-                min_specialty_ratio=min_specialty_ratio,
-                specialty_ratio=specialty_ratio,
-                general_ratio=general_ratio,
-                calibration_ratio=calibration_ratio,
-            )
-
-            if not critic_items:
-                logger.info(
-                    f"  [{critic_skill}] inactive: specialty pool below "
-                    f"threshold; no specialist DPO pairs selected"
-                )
-                return []
-
-            # O(1) lookup by (question, actor_response)
-            pair_index: Dict[tuple, Dict] = {}
-            for p in raw_pairs:
-                key = (p["sample"].get("question", ""), p["actor_response"])
-                pair_index[key] = p
-
-            for item in critic_items:
-                key = (item.sample.get("question", ""), item.response)
-                p = pair_index.get(key)
-                if p is not None:
-                    preference_pairs.append({
-                        "sample": p["sample"],
-                        "chosen": p["chosen"],
-                        "rejected": p["rejected"],
-                        "actor_response": p.get("actor_response", ""),
-                        "metadata": {
-                            "target_skill": skill.value,
-                            "assigned_skill": item.skill.value if item.skill else "general",
-                            "source_bucket": item.source_bucket,
-                            "routing_weight": item.weight,
-                            "error_profile": item.profile,
-                            "delta": p["delta"],
-                            "direction": p["direction"],
-                        },
-                    })
-
-            logger.info(
-                f"  {len(preference_pairs)}/{len(raw_pairs)} pairs "
-                f"selected for skill '{skill.value}'"
-            )
-
-            # Log source-bucket and assigned-skill distributions to verify routing.
-            if preference_pairs:
-                skill_dist = Counter(
-                    p["metadata"]["assigned_skill"]
-                    for p in preference_pairs
-                )
-                bucket_dist = Counter(
-                    p["metadata"]["source_bucket"]
-                    for p in preference_pairs
-                )
-                selected_unique_pairs = {
-                    (p["sample"].get("question", ""), p.get("actor_response", ""))
-                    for p in preference_pairs
-                }
-                logger.info(
-                    f"  [{critic_skill}] source_bucket distribution: "
-                    f"{dict(bucket_dist)}"
-                )
-                logger.info(
-                    f"  [{critic_skill}] assigned_skill distribution: "
-                    f"{dict(skill_dist)}"
-                )
-                logger.info(
-                    f"  [{critic_skill}] selected unique_pairs: "
-                    f"{len(selected_unique_pairs)} / {len(preference_pairs)}"
-                )
-        else:
-            logger.warning(f"  No raw pairs produced for '{critic_skill}'")
-
         if _owns_engine:
             del engine
             _cleanup_gpu()
 
     except Exception as e:
-        logger.error(f"  Failed to generate Critic pairs for '{critic_skill}': {e}")
+        logger.error(f"  Failed to generate shared Critic raw-pair pool: {e}")
         if _owns_engine:
             _cleanup_gpu()
-        if strict_classification:
-            raise
+        raise
+
+    logger.info(f"  Algorithm 1 produced {len(raw_pairs)} shared raw critic pairs")
+    return raw_pairs
+
+
+def route_critic_raw_pairs(
+    raw_pairs: List[Dict[str, Any]],
+    dataset_name: str,
+    input_dir: str,
+    api_key: str,
+    api_base: str,
+    api_model: str,
+    seed: int,
+    strict_classification: bool,
+    max_classification_failure_rate: float,
+    max_classification_workers: int,
+):
+    """Route the shared raw-pair pool by error profile once."""
+    from src.society.diversity_split import DiversitySplit
+
+    if not raw_pairs:
+        logger.warning("  No shared raw pairs to route")
+        return []
+
+    splitter = DiversitySplit(
+        balance=False, seed=seed, use_api=True,
+        cache_dir=input_dir,
+        pre_classified_file=os.path.join(input_dir, "classified_data.json"),
+        api_key=api_key,
+        api_base=api_base,
+        api_model=api_model,
+        strict_classification=strict_classification,
+        max_classification_failure_rate=max_classification_failure_rate,
+        max_classification_workers=max_classification_workers,
+    )
+    routed_items = splitter.split_by_error_profile(
+        samples=[p["sample"] for p in raw_pairs],
+        responses=[p["actor_response"] for p in raw_pairs],
+        correct_answers=[p["correct_answer"] for p in raw_pairs],
+        extracted_answers=[p["actor_answer"] or "" for p in raw_pairs],
+        dataset_name=dataset_name,
+        response_ids=[p["raw_pair_id"] for p in raw_pairs],
+    )
+
+    raw_skill_dist = Counter(
+        item.skill.value if item.skill else "general"
+        for item in routed_items
+    )
+    unique_raw_pairs = {
+        (item.sample.get("question", ""), item.response)
+        for item in routed_items
+    }
+    logger.info(f"  Shared routed profile distribution: {dict(raw_skill_dist)}")
+    logger.info(
+        f"  Shared routed unique_pairs: {len(unique_raw_pairs)} / "
+        f"{len(routed_items)}"
+    )
+    return routed_items
+
+
+def select_critic_preference_pairs(
+    raw_pairs: List[Dict[str, Any]],
+    routed_items: List[Any],
+    critic_skill: str,
+    max_samples: int,
+    seed: int,
+    min_specialty_items: int,
+    min_specialty_ratio: float,
+    specialty_ratio: float,
+    general_ratio: float,
+    calibration_ratio: float,
+) -> List[Dict[str, Any]]:
+    """Sample a skill-specific DPO mix from the shared routed pool."""
+    from src.society.diversity_split import DiversitySplit
+    from src.society.agent_registry import resolve_critic_skill
+
+    skill = resolve_critic_skill(critic_skill)
+    splitter = DiversitySplit(balance=False, seed=seed, use_api=False)
+    critic_items = splitter.build_critic_training_mix(
+        all_items=routed_items,
+        target_skill=skill,
+        max_items=max_samples,
+        min_specialty_items=min_specialty_items,
+        min_specialty_ratio=min_specialty_ratio,
+        specialty_ratio=specialty_ratio,
+        general_ratio=general_ratio,
+        calibration_ratio=calibration_ratio,
+    )
+
+    if not critic_items:
+        logger.info(
+            f"  [{critic_skill}] inactive: specialty pool below threshold; "
+            "no specialist DPO pairs selected"
+        )
+        return []
+
+    pair_by_id = {
+        p.get("raw_pair_id"): p
+        for p in raw_pairs
+        if p.get("raw_pair_id")
+    }
+    pair_by_content = {
+        (p.get("sample", {}).get("question", ""), p.get("actor_response", "")): p
+        for p in raw_pairs
+    }
+
+    preference_pairs: List[Dict[str, Any]] = []
+    for item in critic_items:
+        p = pair_by_id.get(getattr(item, "response_id", ""))
+        if p is None:
+            p = pair_by_content.get((item.sample.get("question", ""), item.response))
+        if p is None:
+            continue
+        preference_pairs.append({
+            "sample": p["sample"],
+            "chosen": p["chosen"],
+            "rejected": p["rejected"],
+            "actor_response": p.get("actor_response", ""),
+            "metadata": {
+                "target_skill": skill.value,
+                "assigned_skill": item.skill.value if item.skill else "general",
+                "source_bucket": item.source_bucket,
+                "routing_weight": item.weight,
+                "error_profile": item.profile,
+                "raw_pair_id": p.get("raw_pair_id", ""),
+                "actor_name": p.get("actor_name", ""),
+                "delta": p["delta"],
+                "direction": p["direction"],
+            },
+        })
+
+    logger.info(
+        f"  {len(preference_pairs)}/{len(raw_pairs)} pairs selected "
+        f"for skill '{skill.value}'"
+    )
+
+    if preference_pairs:
+        skill_dist = Counter(
+            p["metadata"]["assigned_skill"]
+            for p in preference_pairs
+        )
+        bucket_dist = Counter(
+            p["metadata"]["source_bucket"]
+            for p in preference_pairs
+        )
+        selected_unique_pairs = {
+            (p["sample"].get("question", ""), p.get("actor_response", ""))
+            for p in preference_pairs
+        }
+        logger.info(
+            f"  [{critic_skill}] source_bucket distribution: "
+            f"{dict(bucket_dist)}"
+        )
+        logger.info(
+            f"  [{critic_skill}] assigned_skill distribution: "
+            f"{dict(skill_dist)}"
+        )
+        logger.info(
+            f"  [{critic_skill}] selected unique_pairs: "
+            f"{len(selected_unique_pairs)} / {len(preference_pairs)}"
+        )
 
     return preference_pairs
+
+
+def _routed_item_to_json(item: Any) -> Dict[str, Any]:
+    return {
+        "sample": item.sample,
+        "response": item.response,
+        "skill": item.skill.value if item.skill else None,
+        "weight": item.weight,
+        "profile": item.profile,
+        "source_bucket": item.source_bucket,
+        "response_id": item.response_id,
+    }
+
+
+def _routed_item_from_json(data: Dict[str, Any]):
+    from src.society.agent_registry import CriticSkill
+    from src.society.diversity_split import RoutedTrainingItem
+
+    skill_value = data.get("skill")
+    return RoutedTrainingItem(
+        sample=data.get("sample", {}),
+        response=data.get("response", ""),
+        skill=CriticSkill(skill_value) if skill_value else None,
+        weight=float(data.get("weight", 1.0)),
+        profile=data.get("profile", {}),
+        source_bucket=data.get("source_bucket", "unknown"),
+        response_id=data.get("response_id", ""),
+    )
+
+
+def _load_pool_cache(path: str, metadata: Dict[str, Any]) -> Dict[str, Any] | None:
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        payload = json.load(f)
+    if payload.get("metadata") != metadata:
+        logger.info(f"  Ignoring stale pool cache: {path}")
+        return None
+    logger.info(f"  Loaded pool cache: {path}")
+    return payload
+
+
+def _write_pool_cache(path: str, metadata: Dict[str, Any], key: str, value: Any) -> None:
+    with open(path, "w") as f:
+        json.dump({"metadata": metadata, key: value}, f)
+    logger.info(f"  Cached {key} to {path}")
 
 
 def _cleanup_gpu():
@@ -716,65 +791,65 @@ def main():
     inactive_critics = {}
     critic_metrics = {}
 
-    # Create a single vLLM engine shared across all critic skills
-    from src.inference.vllm_server import VLLMInference
+    # Create the vLLM engine lazily only when the shared raw pool is missing.
     shared_engine = None
-
-    all_lora_paths = {k: v for k, v in actor_lora_paths.items() if v}
-    try:
-        shared_engine = VLLMInference(
-            args.model_name,
-            cuda_device=args.device,
-            dtype=args.dtype,
-            gpu_memory_utilization=args.gpu_memory_utilization,
-            max_model_len=args.max_model_len,
-            enable_lora=bool(all_lora_paths) or None,
-            max_loras=max(1, len(all_lora_paths)),
-            max_lora_rank=args.max_lora_rank,
-        )
-    except Exception as e:
-        logger.warning(f"Failed to create shared vLLM engine: {e}")
-        logger.warning("Will attempt per-error-type engine creation")
 
     def _pairs_cache_path(critic_skill):
         return os.path.join(output_dir, f"pairs_{critic_skill}_adaptive.json")
 
     try:
-        # Phase 1: Generate preference pairs for ALL critic skills (with disk cache)
         all_pairs = {}
-        for critic_skill in args.critic_skills:
-            cache_file = _pairs_cache_path(critic_skill)
-            if os.path.exists(cache_file):
-                logger.info(f"\n--- Loading cached pairs for Critic: {critic_skill} ---")
-                with open(cache_file) as f:
-                    cached = json.load(f)
-                all_pairs[critic_skill] = cached
-                logger.info(f"  Loaded {len(cached)} cached pairs for '{critic_skill}'")
-                continue
+        sample_ids = incorrect_sample_ids
+        source_samples = [
+            id_to_sample[sid]
+            for sid in sample_ids
+            if sid in id_to_sample
+        ]
+        if not source_samples:
+            raise RuntimeError("No incorrect samples found for Critic diversification")
 
-            logger.info(f"\n--- Building pairs for Critic: {critic_skill} ---")
+        logger.info(f"  Shared source samples: {len(source_samples)}")
 
-            # Every critic sees the same incorrect-response source pool; the
-            # profile router builds skill-specific mixtures after generation.
-            sample_ids = incorrect_sample_ids
-            samples_for_type = [
-                id_to_sample[sid]
-                for sid in sample_ids
-                if sid in id_to_sample
-            ]
+        pool_metadata = {
+            "version": 2,
+            "model_name": args.model_name,
+            "dataset": args.dataset,
+            "actor_lora_fingerprints": fingerprint_lora_paths(actor_lora_paths),
+            "source_sample_ids": sample_ids,
+            "max_delib_samples": args.max_delib_samples,
+            "num_rounds": args.num_rounds,
+            "num_simulations": args.num_simulations,
+            "max_tokens": args.max_tokens,
+            "reward_threshold": args.reward_threshold,
+            "seed": args.seed,
+            "strict_classification": getattr(args, "strict_classification", True),
+            "api_base": api_base,
+            "api_model": api_model,
+        }
+        raw_pool_cache = os.path.join(output_dir, "raw_critic_pool.json")
+        routed_pool_cache = os.path.join(output_dir, "routed_critic_pool.json")
 
-            if not samples_for_type:
-                logger.warning(
-                    f"  No incorrect samples found. Skipping Critic '{critic_skill}'."
-                )
-                continue
+        raw_cache = _load_pool_cache(raw_pool_cache, pool_metadata)
+        if raw_cache is not None:
+            raw_pairs = raw_cache.get("raw_pairs", [])
+            logger.info(f"  Loaded {len(raw_pairs)} shared raw critic pairs")
+        else:
+            from src.inference.vllm_server import VLLMInference
 
-            logger.info(f"  {len(samples_for_type)} source samples for '{critic_skill}'")
-
-            preference_pairs = build_critic_preference_pairs(
-                samples=samples_for_type,
+            all_lora_paths = {k: v for k, v in actor_lora_paths.items() if v}
+            shared_engine = VLLMInference(
+                args.model_name,
+                cuda_device=args.device,
+                dtype=args.dtype,
+                gpu_memory_utilization=args.gpu_memory_utilization,
+                max_model_len=args.max_model_len,
+                enable_lora=bool(all_lora_paths) or None,
+                max_loras=max(1, len(all_lora_paths)),
+                max_lora_rank=args.max_lora_rank,
+            )
+            raw_pairs = build_critic_raw_pairs(
+                samples=source_samples,
                 actor_lora_paths=actor_lora_paths,
-                critic_skill=critic_skill,
                 model_name=args.model_name,
                 dataset_name=args.dataset,
                 num_rounds=args.num_rounds,
@@ -789,18 +864,52 @@ def main():
                 max_model_len=args.max_model_len,
                 max_lora_rank=args.max_lora_rank,
                 engine=shared_engine,
+            )
+            _write_pool_cache(raw_pool_cache, pool_metadata, "raw_pairs", raw_pairs)
+
+        routed_cache = _load_pool_cache(routed_pool_cache, pool_metadata)
+        if routed_cache is not None:
+            routed_items = [
+                _routed_item_from_json(item)
+                for item in routed_cache.get("routed_items", [])
+            ]
+            logger.info(f"  Loaded {len(routed_items)} shared routed items")
+        else:
+            routed_items = route_critic_raw_pairs(
+                raw_pairs=raw_pairs,
+                dataset_name=args.dataset,
                 input_dir=input_dir,
                 api_key=api_key,
                 api_base=api_base,
                 api_model=api_model,
+                seed=args.seed,
+                strict_classification=getattr(args, "strict_classification", True),
+                max_classification_failure_rate=getattr(args, "max_classification_failure_rate", 0.0),
+                max_classification_workers=getattr(args, "max_classification_workers", 4),
+            )
+            _write_pool_cache(
+                routed_pool_cache,
+                pool_metadata,
+                "routed_items",
+                [_routed_item_to_json(item) for item in routed_items],
+            )
+
+        # Once the shared raw/routed pool exists, per-skill work is cheap:
+        # sample a different training mix from the same routed items.
+        for critic_skill in args.critic_skills:
+            cache_file = _pairs_cache_path(critic_skill)
+            logger.info(f"\n--- Selecting pairs for Critic: {critic_skill} ---")
+            preference_pairs = select_critic_preference_pairs(
+                raw_pairs=raw_pairs,
+                routed_items=routed_items,
+                critic_skill=critic_skill,
+                max_samples=args.max_delib_samples,
+                seed=args.seed,
                 min_specialty_items=args.min_specialty_items,
                 min_specialty_ratio=args.min_specialty_ratio,
                 specialty_ratio=args.specialty_ratio,
                 general_ratio=args.general_ratio,
                 calibration_ratio=args.calibration_ratio,
-                strict_classification=getattr(args, "strict_classification", True),
-                max_classification_failure_rate=getattr(args, "max_classification_failure_rate", 0.0),
-                max_classification_workers=getattr(args, "max_classification_workers", 4),
             )
 
             if preference_pairs:
