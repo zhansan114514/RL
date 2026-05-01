@@ -1,6 +1,7 @@
 """Tests for configuration management."""
 
 import pytest
+from pathlib import Path
 
 from src.utils.config import ConfigManager, StepConfig, ConfigKeyError
 
@@ -26,7 +27,8 @@ class TestConfigManagerInitialize:
     def test_initialize_with_experiment_config(self):
         """Loading with experiment config should merge common section."""
         cfg = ConfigManager.initialize(
-            config_path="configs/society/experiment_h100.yaml",
+            config_path="configs/society/experiment_mmlu.yaml",
+            load_local=False,
         )
         # common section overrides defaults
         assert cfg.get("seed") == 42
@@ -98,7 +100,8 @@ class TestConfigManagerStep:
     def test_step_merge_priority(self):
         """Step section should override common, common should override defaults."""
         cfg = ConfigManager.initialize(
-            config_path="configs/society/experiment_h100.yaml",
+            config_path="configs/society/experiment_mmlu.yaml",
+            load_local=False,
         )
         step = cfg.step("step01_bootstrap", defaults={
             "num_agents": 3,        # Will be overridden by common or step
@@ -118,7 +121,8 @@ class TestConfigManagerStep:
     def test_step_missing_key_returns_defaults(self):
         """Missing step section should still return common + defaults."""
         cfg = ConfigManager.initialize(
-            config_path="configs/society/experiment_h100.yaml",
+            config_path="configs/society/experiment_mmlu.yaml",
+            load_local=False,
         )
         step = cfg.step("step99_nonexistent", defaults={"foo": "bar"})
         assert step.get("foo") == "bar"
@@ -129,6 +133,50 @@ class TestConfigManagerStep:
         cfg = ConfigManager.initialize()
         step = cfg.step("step01", defaults={"key": "default_val"})
         assert step.get("key") == "default_val"
+
+    def test_step_inherits_api_from_local_config(self, tmp_path):
+        """Local config should provide API secrets without tracked experiment YAML."""
+        experiment = tmp_path / "experiment.yaml"
+        local = tmp_path / "local.yaml"
+        experiment.write_text("""
+common:
+  model_name: test-model
+step02_classify:
+  api_base: https://api.example.test
+""")
+        local.write_text("""
+api:
+  api_key: local-secret
+  api_model: local-model
+""")
+
+        cfg = ConfigManager.initialize(
+            config_path=str(experiment),
+            local_config_path=str(local),
+        )
+        step = cfg.step("step02_classify")
+
+        assert step.get("api_key") == "local-secret"
+        assert step.get("api_base") == "https://api.example.test"
+        assert step.get("api_model") == "local-model"
+        assert Path(str(local)).resolve().as_posix() in cfg.loaded_paths
+
+    def test_step_config_overrides_top_level_api(self, tmp_path):
+        """Step API values should take precedence over top-level API defaults."""
+        experiment = tmp_path / "experiment.yaml"
+        experiment.write_text("""
+api:
+  api_base: https://api.default.test
+  api_model: default-model
+step02_classify:
+  api_base: https://api.step.test
+""")
+
+        cfg = ConfigManager.initialize(config_path=str(experiment), load_local=False)
+        step = cfg.step("step02_classify")
+
+        assert step.get("api_base") == "https://api.step.test"
+        assert step.get("api_model") == "default-model"
 
 
 class TestStepConfig:
@@ -193,7 +241,7 @@ class TestModelManagerIntegration:
     def test_get_config_with_initialized_manager(self):
         from src.training.model_manager import _get_config
 
-        ConfigManager.initialize(config_path="configs/society/experiment_h100.yaml")
+        ConfigManager.initialize(config_path="configs/society/experiment_mmlu.yaml", load_local=False)
         assert _get_config("inference.gpu_memory_utilization", 0.45) == 0.45
         assert _get_config("inference.max_model_len", 4096) == 4096
 

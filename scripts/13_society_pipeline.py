@@ -26,6 +26,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from _utils import setup_logging
+from src.utils.config import ConfigManager
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -53,9 +54,8 @@ def parse_args():
 
 
 def _load_config(config_path: str) -> dict[str, Any]:
-    import yaml
-    with open(config_path) as f:
-        return yaml.safe_load(f) or {}
+    cfg = ConfigManager.initialize(config_path=config_path)
+    return cfg.to_dict()
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -223,14 +223,9 @@ def mark_phase_done(
 
 
 def _get_api_key_from_config(config_path: str) -> str | None:
-    """Extract api_key from step02_classify section of the YAML config."""
-    try:
-        import yaml
-        with open(config_path) as f:
-            cfg = yaml.safe_load(f)
-        return cfg.get("step02_classify", {}).get("api_key")
-    except Exception:
-        return None
+    """Extract api_key from the effective ConfigManager config."""
+    cfg = ConfigManager.initialize(config_path=config_path)
+    return cfg.step("step02_classify").get("api_key") or cfg.get("api.api_key")
 
 
 def _build_subprocess_env(phase_num: int, config_path: str) -> dict[str, str]:
@@ -241,7 +236,7 @@ def _build_subprocess_env(phase_num: int, config_path: str) -> dict[str, str]:
         api_key = _get_api_key_from_config(config_path)
         if api_key:
             sub_env["GLM_API_KEY"] = api_key
-            logger.info("  Injected GLM_API_KEY from config step02_classify.api_key")
+            logger.info("  Injected GLM_API_KEY from effective config")
     return sub_env
 
 

@@ -15,7 +15,7 @@ the bootstrap diversification phase and later alternating training.
 
 Usage:
     python scripts/10_diversify_critics.py \
-        --config configs/society/experiment_h100.yaml
+        --config configs/society/experiment_mmlu.yaml
 """
 
 from __future__ import annotations
@@ -71,8 +71,8 @@ STEP_DEFAULTS = {
     "max_model_len": 4096,
     "max_lora_rank": 256,
     "api_key": "",
-    "api_base": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-    "api_model": "glm-4-flash",
+    "api_base": "https://api.labforge.top",
+    "api_model": "gpt5.5",
     "strict_classification": True,
     "max_classification_failure_rate": 0.0,
     "max_classification_workers": 4,
@@ -84,7 +84,7 @@ def parse_args():
         description="Diversify Critics",
     )
     parser.add_argument(
-        "--config", type=str, default="configs/society/experiment_h100.yaml",
+        "--config", type=str, default="configs/society/experiment_mmlu.yaml",
         help="YAML config path.",
     )
     cli_args = parser.parse_args()
@@ -603,8 +603,8 @@ def main():
             "GLM_API_KEY not set (neither config nor env var). "
             "Unseen raw pairs from Algorithm 1 will be routed to general pool."
         )
-    api_base = getattr(args, "api_base", "https://open.bigmodel.cn/api/paas/v4/chat/completions")
-    api_model = getattr(args, "api_model", "glm-4-flash")
+    api_base = getattr(args, "api_base", "https://api.labforge.top")
+    api_model = getattr(args, "api_model", "gpt5.5")
 
     # Setup directories
     input_dir = args.input_dir

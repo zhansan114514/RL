@@ -39,6 +39,7 @@ from src.society.data_classifier import (
     classify_reasoning_style,
     classify_error_profile,
     check_api_available,
+    normalize_chat_api_url,
     _parse_style_response,
     _parse_error_profile_response,
     _compute_sample_hash,
@@ -855,6 +856,21 @@ class TestClassificationError:
             available, reason = check_api_available()
             assert available is False
             assert "GLM_API_KEY" in reason
+
+
+class TestAPIConfig:
+    """Test OpenAI-compatible API configuration helpers."""
+
+    def test_normalize_chat_api_url(self):
+        assert normalize_chat_api_url("https://api.labforge.top") == (
+            "https://api.labforge.top/v1/chat/completions"
+        )
+        assert normalize_chat_api_url("https://api.labforge.top/v1") == (
+            "https://api.labforge.top/v1/chat/completions"
+        )
+        assert normalize_chat_api_url("https://api.labforge.top/v1/chat/completions") == (
+            "https://api.labforge.top/v1/chat/completions"
+        )
 
 
 class TestParseStyleResponse:

@@ -1,10 +1,9 @@
-"""
-Configuration management with global ConfigManager singleton.
+"""Configuration management with global ConfigManager singleton.
 
 Usage:
     # At program entry point (once):
     from src.utils.config import ConfigManager
-    cfg = ConfigManager.initialize(config_path="configs/society/experiment_h100.yaml")
+    cfg = ConfigManager.initialize(config_path="configs/society/experiment_mmlu.yaml")
 
     # Get global config values:
     max_len = cfg.get("inference.max_model_len", 4096)
@@ -17,8 +16,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import os
 import logging
+import os
 from typing import Any, Optional
 
 from omegaconf import OmegaConf, DictConfig
@@ -28,6 +27,8 @@ logger = logging.getLogger(__name__)
 # Project root directory (three levels up from this file: utils/ -> src/ -> project/)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CONFIGS_DIR = os.path.join(PROJECT_ROOT, "configs")
+DEFAULT_CONFIG_PATH = os.path.join(CONFIGS_DIR, "default.yaml")
+DEFAULT_LOCAL_CONFIG_PATH = os.path.join(CONFIGS_DIR, "local.yaml")
 
 # Step-specific section key prefixes in experiment YAMLs
 _STEP_PREFIXES = ("step", "phase")
@@ -72,7 +73,7 @@ class ConfigManager:
 
     _instance: Optional[ConfigManager] = None
     _config: DictConfig
-    _experiment_raw: DictConfig
+    _loaded_paths: list[str]
 
     def __init__(self):
         raise RuntimeError(
@@ -85,51 +86,77 @@ class ConfigManager:
         """Internal: create instance bypassing __init__ guard."""
         obj = object.__new__(cls)
         obj._config = OmegaConf.create()
-        obj._experiment_raw = OmegaConf.create()
+        obj._loaded_paths = []
         return obj
+
+    @staticmethod
+    def _resolve_path(path: str) -> str:
+        """Resolve config paths from cwd first, then project root."""
+        if os.path.isabs(path):
+            return path
+        if os.path.exists(path):
+            return os.path.abspath(path)
+        return os.path.join(PROJECT_ROOT, path)
 
     @classmethod
     def initialize(
         cls,
         config_path: Optional[str] = None,
+        local_config_path: Optional[str] = None,
         overrides: Optional[list[str]] = None,
+        load_local: bool = True,
     ) -> ConfigManager:
         """
         Load configuration and create the singleton.
 
         Merge priority (later overrides earlier):
         1. configs/default.yaml (global defaults)
-        2. config_path experiment YAML ``common:`` section
-        3. overrides list (CLI-style dotlist, highest priority)
+        2. config_path experiment YAML
+        3. configs/local.yaml (gitignored machine-local secrets/overrides)
+        4. overrides list (CLI-style dotlist, highest priority)
 
         Args:
             config_path: Path to an experiment config YAML.
+            local_config_path: Optional local secret/override YAML path.
             overrides: List of OmegaConf override strings (e.g. ["training.lr=1e-4"]).
+            load_local: Whether to auto-load configs/local.yaml when present.
 
         Returns:
             The initialized ConfigManager singleton.
         """
         configs = []
+        loaded_paths: list[str] = []
 
         # 1. Global defaults
-        default_path = os.path.join(CONFIGS_DIR, "default.yaml")
-        if os.path.exists(default_path):
-            configs.append(OmegaConf.load(default_path))
+        if os.path.exists(DEFAULT_CONFIG_PATH):
+            configs.append(OmegaConf.load(DEFAULT_CONFIG_PATH))
+            loaded_paths.append(DEFAULT_CONFIG_PATH)
         else:
-            logger.warning(f"Default config not found: {default_path}")
+            logger.warning(f"Default config not found: {DEFAULT_CONFIG_PATH}")
             configs.append(OmegaConf.create())
 
         # 2. Experiment config file
-        if config_path and os.path.exists(config_path):
-            exp_cfg = OmegaConf.load(config_path)
+        resolved_config_path = cls._resolve_path(config_path) if config_path else None
+        if resolved_config_path and os.path.exists(resolved_config_path):
+            exp_cfg = OmegaConf.load(resolved_config_path)
             configs.append(exp_cfg)
-        elif config_path:
-            logger.warning(f"Config file not found: {config_path}")
+            loaded_paths.append(resolved_config_path)
+        elif resolved_config_path:
+            logger.warning(f"Config file not found: {resolved_config_path}")
+
+        # 3. Local config file for secrets and machine-local overrides
+        env_local_path = os.environ.get("ACC_CONFIG_LOCAL", "")
+        candidate_local_path = local_config_path or env_local_path or DEFAULT_LOCAL_CONFIG_PATH
+        resolved_local_path = cls._resolve_path(candidate_local_path)
+        if load_local and os.path.exists(resolved_local_path):
+            local_cfg = OmegaConf.load(resolved_local_path)
+            configs.append(local_cfg)
+            loaded_paths.append(resolved_local_path)
 
         # Merge base layers
         merged = OmegaConf.merge(*configs)
 
-        # 3. CLI-style overrides (highest priority)
+        # 4. CLI-style overrides (highest priority)
         if overrides:
             override_cfg = OmegaConf.from_dotlist(overrides)
             merged = OmegaConf.merge(merged, override_cfg)
@@ -137,12 +164,10 @@ class ConfigManager:
         # Store
         instance = cls._create()
         instance._config = merged
-        # Keep raw experiment for step extraction
-        if config_path and os.path.exists(config_path):
-            instance._experiment_raw = OmegaConf.load(config_path)
+        instance._loaded_paths = loaded_paths
         cls._instance = instance
 
-        logger.debug(f"ConfigManager initialized with config_path={config_path}")
+        logger.debug(f"ConfigManager initialized with loaded_paths={loaded_paths}")
         return instance
 
     @classmethod
@@ -200,7 +225,8 @@ class ConfigManager:
         """
         Get merged config for a specific pipeline step.
 
-        Merge priority: ``defaults`` < ``common:`` section < step-specific section.
+        Merge priority: ``defaults`` < ``common:`` section < top-level ``api:``
+        section for API fields < step-specific section.
 
         Args:
             step_key: e.g. ``"step01_bootstrap"`` or ``"step01"``.
@@ -211,23 +237,41 @@ class ConfigManager:
         """
         merged = dict(defaults) if defaults else {}
 
-        # Extract common section from experiment raw
-        exp_dict = OmegaConf.to_container(self._experiment_raw, resolve=True)
-        if isinstance(exp_dict, dict):
-            common_cfg = exp_dict.get("common", {})
+        cfg_dict = OmegaConf.to_container(self._config, resolve=True)
+        if isinstance(cfg_dict, dict):
+            common_cfg = cfg_dict.get("common", {})
             if isinstance(common_cfg, dict):
                 for key, value in common_cfg.items():
                     if value is not None:
                         merged[key] = value
 
-            # Step-specific section overrides common
-            step_cfg = exp_dict.get(step_key, {})
+            api_cfg = cfg_dict.get("api", {})
+            if isinstance(api_cfg, dict):
+                api_aliases = {
+                    "api_key": ("api_key", "key"),
+                    "api_base": ("api_base", "base_url", "base"),
+                    "api_model": ("api_model", "model"),
+                }
+                for target, aliases in api_aliases.items():
+                    for alias in aliases:
+                        value = api_cfg.get(alias)
+                        if value:
+                            merged[target] = value
+                            break
+
+            # Step-specific section overrides common and top-level API defaults.
+            step_cfg = cfg_dict.get(step_key, {})
             if isinstance(step_cfg, dict):
                 for key, value in step_cfg.items():
                     if value is not None:
                         merged[key] = value
 
         return StepConfig(merged)
+
+    @property
+    def loaded_paths(self) -> list[str]:
+        """Config files loaded into the current effective config."""
+        return list(self._loaded_paths)
 
     @property
     def raw(self) -> DictConfig:

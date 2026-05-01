@@ -9,7 +9,7 @@ Supports checkpointing for crash recovery.
 
 Usage:
     python scripts/08_classify_data.py \
-        --config configs/society/experiment_h100.yaml \
+        --config configs/society/experiment_mmlu.yaml \
         --api_key YOUR_API_KEY
 """
 
@@ -39,6 +39,7 @@ from src.society.data_classifier import (
     _save_cache,
     classify_error_profile as shared_classify_error_profile,
     classify_reasoning_style as shared_classify_reasoning_style,
+    normalize_chat_api_url,
 )
 from src.utils.config import ConfigManager
 
@@ -47,8 +48,8 @@ logger = logging.getLogger(__name__)
 
 STEP_DEFAULTS = {
     "api_key": "",
-    "api_base": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-    "api_model": "glm-4-flash",
+    "api_base": "https://api.labforge.top",
+    "api_model": "gpt5.5",
     "batch_size": 10,
     "request_timeout": 30,
     "retry_delay": 5,
@@ -105,7 +106,7 @@ class GLMClassifier:
         temperature: float = 0.1,
     ):
         self.api_key = api_key
-        self.api_base = api_base
+        self.api_base = normalize_chat_api_url(api_base)
         self.model = model
         self.timeout = timeout
         self.max_retries = max_retries
@@ -537,7 +538,7 @@ def parse_args():
         description="Classify bootstrap data",
     )
     parser.add_argument(
-        "--config", type=str, default="configs/society/experiment_h100.yaml",
+        "--config", type=str, default="configs/society/experiment_mmlu.yaml",
         help="YAML config path.",
     )
     parser.add_argument(

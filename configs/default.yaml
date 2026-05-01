@@ -1,0 +1,16 @@
+seed: 42
+
+inference:
+  max_model_len: 4096
+  gpu_memory_utilization: 0.45
+  dtype: auto
+
+training:
+  lora_r: 256
+  learning_rate: 5.0e-5
+  batch_size: 4
+  num_epochs: 1
+
+api:
+  api_base: "https://api.labforge.top"
+  api_model: "gpt5.5"

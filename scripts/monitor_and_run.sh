@@ -17,11 +17,11 @@ export PYTHONPATH="$PROJECT_ROOT"
 export LD_LIBRARY_PATH="/home/shichen/miniconda3/lib:${LD_LIBRARY_PATH:-}"
 
 # Read cache_dir from config (default: cache)
-CONFIG="configs/experiment_qwen3_arc.yaml"
+CONFIG="configs/society/experiment_mmlu.yaml"
 CACHE_DIR=$(python -c "
-import yaml, os
-cfg = yaml.safe_load(open('$CONFIG'))
-print(cfg.get('common', {}).get('cache_dir', 'cache'))
+from src.utils.config import ConfigManager
+cfg = ConfigManager.initialize(config_path='$CONFIG')
+print(cfg.get('common.cache_dir', 'cache'))
 " 2>/dev/null || echo "cache")
 
 LOG_DIR="$CACHE_DIR/logs"

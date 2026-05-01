@@ -13,19 +13,19 @@ Phase 6: Evaluate          — A1-A5 消融实验
 
 Usage:
     # 最简启动（使用默认配置）
-    python scripts/run_society.py --config configs/society/experiment_v100.yaml
+    python scripts/run_society.py --config configs/society/experiment_mmlu.yaml
 
     # 指定 GPU
-    CUDA_VISIBLE_DEVICES=4 python scripts/run_society.py --config configs/society/experiment_v100.yaml
+    CUDA_VISIBLE_DEVICES=4 python scripts/run_society.py --config configs/society/experiment_mmlu.yaml
 
     # 从某个 Phase 恢复（跳过已完成的阶段）
-    python scripts/run_society.py --config configs/society/experiment_v100.yaml --start_phase 3
+    python scripts/run_society.py --config configs/society/experiment_mmlu.yaml --start_phase 3
 
     # 只运行到某个 Phase
-    python scripts/run_society.py --config configs/society/experiment_v100.yaml --end_phase 4
+    python scripts/run_society.py --config configs/society/experiment_mmlu.yaml --end_phase 4
 
     # 跳过评估
-    python scripts/run_society.py --config configs/society/experiment_v100.yaml --no_eval
+    python scripts/run_society.py --config configs/society/experiment_mmlu.yaml --no_eval
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from _utils import load_yaml_config
+from src.utils.config import ConfigManager
 
 # ============================================================
 # 日志配置
@@ -136,9 +136,9 @@ def get_python_path() -> str:
 
 
 def resolve_base_dir(config_path: str) -> str:
-    """从配置文件中读取 base output 目录。"""
-    cfg = load_yaml_config(config_path)
-    return cfg.get("common", {}).get("cache_dir", "output/society")
+    """从有效配置中读取 base output 目录。"""
+    cfg = ConfigManager.initialize(config_path=config_path)
+    return cfg.get("common.cache_dir", "output/society")
 
 
 def run_phase(
@@ -250,7 +250,7 @@ def main():
     )
     parser.add_argument(
         "--config", type=str, required=True,
-        help="YAML 配置文件路径 (如 configs/society/experiment_v100.yaml)",
+        help="YAML 配置文件路径 (如 configs/society/experiment_mmlu.yaml)",
     )
     parser.add_argument(
         "--start_phase", type=int, default=1, choices=range(1, 7),

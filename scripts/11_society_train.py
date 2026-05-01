@@ -6,7 +6,7 @@ Uses society_alternating_train() to execute alternating training:
 
 Usage:
     python scripts/11_society_train.py \
-        --config configs/society/experiment_h100.yaml \
+        --config configs/society/experiment_mmlu.yaml \
         --num_iterations 2 \
         --num_rounds 5
 """
@@ -65,8 +65,8 @@ STEP_DEFAULTS = {
     "actor_max_tokens": 1024,
     "critic_max_tokens": 1024,
     "api_key": "",
-    "api_base": "https://open.bigmodel.cn/api/paas/v4/chat/completions",
-    "api_model": "glm-4-flash",
+    "api_base": "https://api.labforge.top",
+    "api_model": "gpt5.5",
     "strict_classification": True,
     "max_classification_failure_rate": 0.0,
     "max_classification_workers": 4,
@@ -78,7 +78,7 @@ def parse_args():
         description="Society alternating training",
     )
     parser.add_argument(
-        "--config", type=str, default="configs/society/experiment_h100.yaml",
+        "--config", type=str, default="configs/society/experiment_mmlu.yaml",
         help="YAML config path.",
     )
     parser.add_argument(
@@ -306,8 +306,8 @@ def main():
         logger.warning(
             "GLM_API_KEY not set. Unseen raw pairs will be routed to general pool."
         )
-    api_base = getattr(args, "api_base", "https://open.bigmodel.cn/api/paas/v4/chat/completions")
-    api_model = getattr(args, "api_model", "glm-4-flash")
+    api_base = getattr(args, "api_base", "https://api.labforge.top")
+    api_model = getattr(args, "api_model", "gpt5.5")
 
     result = society_alternating_train(
         registry=registry,

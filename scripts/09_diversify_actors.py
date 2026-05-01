@@ -10,7 +10,7 @@ For each Actor:
 
 Usage:
     python scripts/09_diversify_actors.py \
-        --config configs/society/experiment_h100.yaml \
+        --config configs/society/experiment_mmlu.yaml \
         --thinking_styles algebraic direct backtracking
 """
 
@@ -56,7 +56,7 @@ def parse_args():
         description="Diversify Actors",
     )
     parser.add_argument(
-        "--config", type=str, default="configs/society/experiment_h100.yaml",
+        "--config", type=str, default="configs/society/experiment_mmlu.yaml",
         help="YAML config path.",
     )
     cli_args = parser.parse_args()

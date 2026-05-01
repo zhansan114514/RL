@@ -6,7 +6,7 @@ simulates M=2 rounds of debate, and computes consensus via majority vote.
 
 Usage:
     python scripts/07_bootstrap_actors.py \
-        --config configs/society/experiment_h100.yaml
+        --config configs/society/experiment_mmlu.yaml
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ def parse_args():
         description="Bootstrap diverse Actors",
     )
     parser.add_argument(
-        "--config", type=str, default="configs/society/experiment_h100.yaml",
+        "--config", type=str, default="configs/society/experiment_mmlu.yaml",
         help="YAML config path.",
     )
     cli_args = parser.parse_args()

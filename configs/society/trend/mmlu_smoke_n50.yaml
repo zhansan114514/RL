@@ -26,9 +26,8 @@ step01_bootstrap:
 step02_classify:
   input_dir: "output/society_mmlu_smoke_n50/bootstrap"
   output_dir: "output/society_mmlu_smoke_n50/classified"
-  api_key: "69b94b7210714cb7a7e3b989e4559114.8cDGdODef5b4cLH1"
-  api_base: "https://open.bigmodel.cn/api/paas/v4/chat/completions"
-  api_model: "glm-4-flash"
+  api_base: "https://api.labforge.top"
+  api_model: "gpt-5.5"
   use_batch_api: true
   batch_api_max_responses: 20
   max_workers: 4
@@ -51,6 +50,8 @@ step04_diversify_critics:
   input_dir: "output/society_mmlu_smoke_n50/classified"
   actor_base_dir: "output/society_mmlu_smoke_n50/actors"
   output_dir: "output/society_mmlu_smoke_n50/critics"
+  api_base: "https://api.labforge.top"
+  api_model: "gpt-5.5"
   critic_skills: ["reasoning", "knowledge", "computation", "verification"]
   max_delib_samples: 30
   num_rounds: 2
@@ -76,6 +77,8 @@ step05_train_society:
   actor_base_dir: "output/society_mmlu_smoke_n50/actors"
   critic_base_dir: "output/society_mmlu_smoke_n50/critics"
   output_dir: "output/society_mmlu_smoke_n50/society"
+  api_base: "https://api.labforge.top"
+  api_model: "gpt-5.5"
   num_iterations: 1
   num_rounds: 1
   num_simulations: 1

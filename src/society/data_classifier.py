@@ -60,9 +60,19 @@ class ErrorProfileResult:
 # API configuration (from experiment plan)
 # ============================================================
 
-DEFAULT_API_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+DEFAULT_API_URL = "https://api.labforge.top/v1/chat/completions"
 DEFAULT_API_KEY = os.environ.get("GLM_API_KEY", "")
-DEFAULT_API_MODEL = "glm-4-flash"
+DEFAULT_API_MODEL = "gpt5.5"
+
+
+def normalize_chat_api_url(api_url: str) -> str:
+    """Return a concrete OpenAI-compatible chat completions endpoint."""
+    url = (api_url or DEFAULT_API_URL).strip().rstrip("/")
+    if url.endswith("/chat/completions"):
+        return url
+    if url.endswith("/v1"):
+        return f"{url}/chat/completions"
+    return f"{url}/v1/chat/completions"
 
 # Classification prompts (from experiment plan)
 REASONING_STYLE_PROMPT = """Given a math problem and a correct solution, classify the reasoning style:
@@ -152,6 +162,8 @@ def check_api_available(
     except ImportError:
         return False, "requests package is not installed"
 
+    api_url = normalize_chat_api_url(api_url)
+
     try:
         resp = requests.post(
             api_url,
@@ -205,6 +217,8 @@ def _call_api(
         raise ClassificationError(
             "requests package not installed. Install via: pip install requests"
         )
+
+    api_url = normalize_chat_api_url(api_url)
 
     try:
         response = requests.post(

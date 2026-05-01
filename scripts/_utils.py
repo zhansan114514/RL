@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import logging
 import os
 import sys
@@ -20,20 +19,3 @@ def setup_logging(level: int = logging.INFO, seed: int | None = None) -> None:
         from src.utils.seeding import fix_seed
         fix_seed(seed)
         logging.getLogger(__name__).info(f"Random seed fixed to {seed}")
-
-
-def load_yaml_config(config_path: str) -> dict:
-    """Load a YAML config file and return a plain dict."""
-    omegaconf_module = importlib.import_module("omegaconf")
-    OmegaConf = omegaconf_module.OmegaConf
-
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-
-    loaded = OmegaConf.load(config_path)
-    cfg = OmegaConf.to_container(loaded, resolve=True)
-    if cfg is None:
-        return {}
-    if not isinstance(cfg, dict):
-        raise ValueError("Config file must contain a top-level key-value mapping.")
-    return cfg

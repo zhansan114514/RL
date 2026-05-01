@@ -53,3 +53,7 @@ cache/
 
 exp.md
 output/
+
+# 本地配置与密钥
+configs/local.yaml
+configs/local.*.yaml

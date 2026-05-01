@@ -72,6 +72,7 @@ step02_classify:
   api_key: test-key
 """)
     monkeypatch.delenv("GLM_API_KEY", raising=False)
+    monkeypatch.delenv("ACC_CONFIG_LOCAL", raising=False)
 
     phase4_env = pipeline._build_subprocess_env(4, str(config))
     phase5_env = pipeline._build_subprocess_env(5, str(config))
@@ -80,3 +81,25 @@ step02_classify:
     assert phase4_env["GLM_API_KEY"] == "test-key"
     assert phase5_env["GLM_API_KEY"] == "test-key"
     assert "GLM_API_KEY" not in phase3_env
+
+
+def test_strict_classification_phases_inherit_local_api_key(tmp_path, monkeypatch):
+    pipeline = _load_pipeline_module()
+    config = tmp_path / "config.yaml"
+    local = tmp_path / "local.yaml"
+    config.write_text("""
+step02_classify:
+  output_dir: output/classified
+""")
+    local.write_text("""
+api:
+  api_key: local-test-key
+""")
+    monkeypatch.delenv("GLM_API_KEY", raising=False)
+    monkeypatch.setenv("ACC_CONFIG_LOCAL", str(local))
+
+    phase4_env = pipeline._build_subprocess_env(4, str(config))
+    phase5_env = pipeline._build_subprocess_env(5, str(config))
+
+    assert phase4_env["GLM_API_KEY"] == "local-test-key"
+    assert phase5_env["GLM_API_KEY"] == "local-test-key"

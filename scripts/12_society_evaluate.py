@@ -13,7 +13,7 @@ the same vLLM engine and switch LoRA adapters dynamically.
 
 Usage:
     python scripts/12_society_evaluate.py \
-        --config configs/society/experiment_h100.yaml \
+        --config configs/society/experiment_mmlu.yaml \
         --run_ablations
 """
 
@@ -79,7 +79,7 @@ def parse_args():
         description="Society evaluation",
     )
     parser.add_argument(
-        "--config", type=str, default="configs/society/experiment_h100.yaml",
+        "--config", type=str, default="configs/society/experiment_mmlu.yaml",
         help="YAML config path.",
     )
     parser.add_argument(
