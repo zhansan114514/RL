@@ -313,7 +313,23 @@ def _parse_error_profile_response(response: str) -> Optional[ErrorProfileResult]
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        return None
+        # GLM API returns LaTeX-style backslashes (e.g. \( \sqrt \))
+        # which are invalid JSON escape sequences. Fix and retry.
+        try:
+            fixed = re.sub(
+                r'\\([^"\\/bfnrtu])',
+                lambda m: '\\\\' + m.group(1),
+                text,
+            )
+            data = json.loads(fixed)
+        except json.JSONDecodeError:
+            # Last resort: strip evidence field entirely and retry
+            try:
+                stripped = re.sub(r'"evidence"\s*:\s*"[^"]*"', '"evidence": ""', text)
+                stripped = re.sub(r'"evidence"\s*:\s*\{[^}]*\}', '"evidence": ""', stripped)
+                data = json.loads(stripped)
+            except json.JSONDecodeError:
+                return None
 
     raw_scores = data.get("scores", {})
     if not isinstance(raw_scores, dict):

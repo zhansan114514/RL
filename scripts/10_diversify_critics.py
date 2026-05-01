@@ -48,7 +48,7 @@ STEP_DEFAULTS = {
     "max_delib_samples": 300,
     "num_rounds": 5,
     "num_simulations": 5,
-    "max_tokens": 256,
+    "max_tokens": 1024,
     "reward_threshold": 0.0,
     "lora_r": 256,
     "lora_alpha": 512,

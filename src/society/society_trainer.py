@@ -241,18 +241,10 @@ def society_alternating_train(
             f"(Actors frozen, error-profile mixture routing)"
         )
 
-        # Create a shared engine for all critics in this phase.
-        # Each critic's Algorithm 1 uses at most 1 actor LoRA + 1 critic LoRA
-        # concurrently, so max_loras=2 is sufficient (saves ~200MB per unused slot).
-        phase_a_engine = _create_phase_engine(
-            model_name=model_name,
-            agents=actors + critics,
-            device=device,
-            dtype=dtype,
-            gpu_memory_utilization=gpu_memory_utilization,
-            max_model_len=max_model_len,
-            max_concurrent_loras=2,
-        )
+        # Per-critic engine: create a fresh engine for each critic to avoid
+        # GPU memory accumulation across agents.  Each engine is destroyed
+        # before DPO training (which loads its own model).
+        phase_a_engine = None
 
         phase_a_done = set(phase_done.get("phase_A", []))
 
@@ -289,7 +281,7 @@ def society_alternating_train(
                 dtype=dtype,
                 gpu_memory_utilization=gpu_memory_utilization,
                 max_model_len=max_model_len,
-                engine=phase_a_engine,
+                engine=None,
                 classifications_cache_dir=classifications_cache_dir,
                 api_key=api_key,
                 api_base=api_base,
@@ -317,6 +309,15 @@ def society_alternating_train(
                     "critic_training_metrics": summarize_critic_training_pairs(preference_pairs),
                 }
                 continue
+
+            # Destroy vLLM engine before DPO to free GPU memory.
+            # The engine will be recreated on the next iteration if needed
+            # (when engine=None is passed, the generation function creates
+            # and manages its own engine).
+            if phase_a_engine is not None:
+                del phase_a_engine
+                phase_a_engine = None
+            _cleanup_gpu()
 
             # Run DPO training
             logger.info(f"  Training with {len(preference_pairs)} preference pairs")
@@ -374,7 +375,7 @@ def society_alternating_train(
                 },
             })
 
-        # Cleanup shared Phase A engine
+        # Cleanup Phase A engine (may already be None if DPO was run)
         if phase_a_engine is not None:
             del phase_a_engine
         _cleanup_gpu()
@@ -384,18 +385,9 @@ def society_alternating_train(
         # ---- Phase B: Train all Actors (fix Critics) ----
         logger.info(f"Phase B: Training {len(actors)} Actors (Critics frozen)")
 
-        # Create a shared engine for all actors in this phase.
-        # Each actor's Algorithm 1 uses at most 1 actor LoRA + 1 critic LoRA
-        # concurrently, so max_loras=2 is sufficient.
-        phase_b_engine = _create_phase_engine(
-            model_name=model_name,
-            agents=actors + critics,
-            device=device,
-            dtype=dtype,
-            gpu_memory_utilization=gpu_memory_utilization,
-            max_model_len=max_model_len,
-            max_concurrent_loras=2,
-        )
+        # Per-actor engine: create fresh engine for each actor to avoid
+        # GPU memory accumulation across agents.
+        phase_b_engine = None
 
         phase_b_done = set(phase_done.get("phase_B", []))
 
@@ -432,7 +424,7 @@ def society_alternating_train(
                 dtype=dtype,
                 gpu_memory_utilization=gpu_memory_utilization,
                 max_model_len=max_model_len,
-                engine=phase_b_engine,
+                engine=None,
                 classifications_cache_dir=classifications_cache_dir,
                 api_key=api_key,
                 api_base=api_base,
@@ -445,6 +437,12 @@ def society_alternating_train(
                 logger.warning(f"  No preference pairs for {actor.name}, skipping")
                 metrics[f"actor_{actor.name}_iter{iteration}"] = {"status": "skipped", "pairs": 0}
                 continue
+
+            # Destroy vLLM engine before DPO to free GPU memory.
+            if phase_b_engine is not None:
+                del phase_b_engine
+                phase_b_engine = None
+            _cleanup_gpu()
 
             # Run DPO training
             logger.info(f"  Training with {len(preference_pairs)} preference pairs")
@@ -500,7 +498,7 @@ def society_alternating_train(
                 },
             })
 
-        # Cleanup shared Phase B engine
+        # Cleanup Phase B engine (may already be None if DPO was run)
         if phase_b_engine is not None:
             del phase_b_engine
         _cleanup_gpu()

@@ -38,40 +38,44 @@ ACTOR_PROMPT_TYPES = {
 
 
 def answer_contract(sample: dict | None = None, task_type: str | None = None) -> str:
-    """Return the strict final-answer contract for Actor generations."""
+    """Return the strict final-answer contract for Actor generations.
+
+    Instructs the model to output the answer FIRST (line 1) so that
+    truncation never loses the answer, then explain reasoning below.
+    """
     resolved_task_type = task_type or (sample or {}).get("task_type", "multiple_choice")
     if resolved_task_type == "yes_no":
         return (
             "\n\nOutput format requirements:\n"
-            "1. You may briefly explain your reasoning.\n"
-            "2. You MUST end your response with exactly one final line:\n"
+            "1. You MUST start your response with exactly one line:\n"
             "FINAL_ANSWER: Yes or No\n"
-            "3. Do not write anything after the FINAL_ANSWER line."
+            "2. Then briefly explain your reasoning below.\n"
+            "3. Do not change your answer after the first line."
         )
     if resolved_task_type == "math":
         return (
             "\n\nOutput format requirements:\n"
-            "1. Solve the problem step by step.\n"
-            "2. You MUST end your response with exactly one final line:\n"
+            "1. You MUST start your response with exactly one line:\n"
             "FINAL_ANSWER: <numeric_or_expression_answer>\n"
-            "3. Do not write anything after the FINAL_ANSWER line."
+            "2. Then solve the problem step by step below.\n"
+            "3. Do not change your answer after the first line."
         )
     if resolved_task_type == "mixed":
         return (
             "\n\nOutput format requirements:\n"
-            "1. You may briefly explain your reasoning.\n"
-            "2. You MUST end your response with exactly one final line:\n"
+            "1. You MUST start your response with exactly one line:\n"
             "FINAL_ANSWER: <your_answer>\n"
             "   For yes/no questions: FINAL_ANSWER: Yes or FINAL_ANSWER: No\n"
             "   For multiple-choice questions: FINAL_ANSWER: A, B, C, or D\n"
-            "3. Do not write anything after the FINAL_ANSWER line."
+            "2. Then briefly explain your reasoning below.\n"
+            "3. Do not change your answer after the first line."
         )
     return (
         "\n\nOutput format requirements:\n"
-        "1. You may briefly explain your reasoning.\n"
-        "2. You MUST end your response with exactly one final line:\n"
+        "1. You MUST start your response with exactly one line:\n"
         "FINAL_ANSWER: A or B or C or D\n"
-        "3. Do not write anything after the FINAL_ANSWER line."
+        "2. Then briefly explain your reasoning below.\n"
+        "3. Do not change your answer after the first line."
     )
 
 
@@ -88,15 +92,24 @@ def append_answer_contract(
 
 
 def _has_answer_contract_suffix(prompt: str) -> bool:
-    """Return True only when the final prompt section is already the contract."""
+    """Return True only when the final prompt section is already the contract.
+
+    Accepts both the current (answer-first) and legacy (answer-last) contract
+    formats so that prompts built from cached trajectories are not double-appended.
+    """
     final_section = prompt.rstrip().rsplit("\n\nOutput format requirements:\n", 1)[-1]
-    return (
-        final_section != prompt.rstrip()
-        and "FINAL_ANSWER:" in final_section
-        and final_section.rstrip().endswith(
-            "Do not write anything after the FINAL_ANSWER line."
-        )
-    )
+    if final_section == prompt.rstrip():
+        return False
+    if "FINAL_ANSWER:" not in final_section:
+        return False
+    stripped = final_section.rstrip()
+    # Current format
+    if stripped.endswith("Do not change your answer after the first line."):
+        return True
+    # Legacy format
+    if stripped.endswith("Do not write anything after the FINAL_ANSWER line."):
+        return True
+    return False
 
 
 def _infer_task_type_from_prompt(prompt: str) -> str | None:

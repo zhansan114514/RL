@@ -45,7 +45,7 @@ STEP_DEFAULTS = {
     "society_dir": "output/society/society",
     "output_dir": "output/society/eval",
     "num_rounds": 2,
-    "max_tokens": 512,
+    "max_tokens": 1024,
     "temperature": 0.0,
     "device": 0,
     "dtype": "bfloat16",

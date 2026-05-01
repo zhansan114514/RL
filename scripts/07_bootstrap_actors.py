@@ -36,7 +36,7 @@ STEP_DEFAULTS = {
     "num_agents": 5,
     "num_debate_rounds": 2,
     "temperature": 0.8,
-    "max_tokens": 512,
+    "max_tokens": 1024,
     "seed": 42,
     "max_samples": None,
     "batch_size": 8,

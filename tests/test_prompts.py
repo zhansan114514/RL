@@ -146,7 +146,7 @@ class TestPromptFormatting:
         }
         result = format_prompt("mmlu", PromptType.SINGLE_SHOT, sample)
         assert "FINAL_ANSWER: A or B or C or D" in result
-        assert result.rstrip().endswith("Do not write anything after the FINAL_ANSWER line.")
+        assert result.rstrip().endswith("Do not change your answer after the first line.")
 
     def test_critic_prompt_does_not_append_final_answer_contract(self):
         sample = {
@@ -172,7 +172,7 @@ class TestPromptFormatting:
             "I copied the instruction text:\n"
             "Output format requirements:\n"
             "FINAL_ANSWER: Yes\n"
-            "Do not write anything after the FINAL_ANSWER line."
+            "Do not change your answer after the first line."
         )
         result = format_prompt(
             "boolq",
@@ -181,7 +181,7 @@ class TestPromptFormatting:
             responses=[prior_response],
         )
         assert result.count("Output format requirements:") == 2
-        assert result.rstrip().endswith("Do not write anything after the FINAL_ANSWER line.")
+        assert result.rstrip().endswith("Do not change your answer after the first line.")
 
 
 class TestFormatResponses:
