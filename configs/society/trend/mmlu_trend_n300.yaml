@@ -1,0 +1,131 @@
+# Qwen2.5-7B-Instruct + MMLU trend validation, n=300
+# Derived from configs/society/trend/mmlu_smoke_n50.yaml.
+# Provider credentials/endpoints are loaded from configs/local.yaml.
+
+api:
+  provider: "gpt"  # "glm" or "gpt"
+
+common:
+  model_name: "Qwen/Qwen2.5-7B-Instruct"
+  base_model: "Qwen/Qwen2.5-7B-Instruct"
+  dataset: "mmlu"
+  cache_dir: "output/society_mmlu_trend_n300"
+  seed: 42
+  max_samples: 300
+  device: 4
+  dtype: "bfloat16"
+  gpu_memory_utilization: 0.80
+  max_model_len: 4096
+
+# Phase 1: Bootstrap data generation
+step01_bootstrap:
+  output_dir: "output/society_mmlu_trend_n300/bootstrap"
+  num_agents: 5
+  num_debate_rounds: 2
+  temperature: 0.8
+  max_tokens: 192
+  batch_size: 8
+
+# Phase 2: Data classification
+step02_classify:
+  input_dir: "output/society_mmlu_trend_n300/bootstrap"
+  output_dir: "output/society_mmlu_trend_n300/classified"
+  batch_size: 10
+  request_timeout: 90
+  retry_delay: 5
+  max_retries: 3
+  api_temperature: 0.1
+  strict_classification: true
+  max_classification_failure_rate: 0.0
+  use_batch_api: true
+  batch_api_max_responses: 20
+  max_workers: 8
+
+# Phase 3: Actor diversification
+step03_diversify_actors:
+  input_dir: "output/society_mmlu_trend_n300/classified"
+  output_dir: "output/society_mmlu_trend_n300/actors"
+  reasoning_styles: ["algebraic", "direct", "backtracking"]
+  lora_r: 256
+  lora_alpha: 512
+  learning_rate: 5.0e-5
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  num_epochs: 1
+  max_length: 2048
+  beta: 0.1
+
+# Phase 4: Critic diversification
+step04_diversify_critics:
+  input_dir: "output/society_mmlu_trend_n300/classified"
+  actor_base_dir: "output/society_mmlu_trend_n300/actors"
+  output_dir: "output/society_mmlu_trend_n300/critics"
+  critic_skills: ["reasoning", "knowledge", "computation", "verification"]
+  max_delib_samples: 120
+  num_rounds: 2
+  num_simulations: 2
+  max_tokens: 192
+  reward_threshold: 0.0
+  lora_r: 64
+  lora_alpha: 128
+  learning_rate: 5.0e-5
+  batch_size: 4
+  gradient_accumulation_steps: 4
+  num_epochs: 1
+  max_length: 2048
+  beta: 0.1
+  min_pairs_per_critic: 32
+  min_specialty_items: 8
+  min_specialty_ratio: 0.0
+  specialty_ratio: 0.5
+  general_ratio: 0.35
+  calibration_ratio: 0.15
+  max_lora_rank: 256
+  strict_classification: true
+  max_classification_failure_rate: 0.0
+  max_classification_workers: 4
+
+# Phase 5: Society alternating training
+step05_train_society:
+  actor_base_dir: "output/society_mmlu_trend_n300/actors"
+  critic_base_dir: "output/society_mmlu_trend_n300/critics"
+  output_dir: "output/society_mmlu_trend_n300/society"
+  num_iterations: 1
+  num_rounds: 2
+  num_simulations: 2
+  max_samples: 120
+  trajectory_max_tokens: 192
+  reward_threshold: 0.0
+  lora_r: 64
+  lora_alpha: 128
+  learning_rate: 5.0e-5
+  batch_size: 4
+  num_epochs: 1
+  max_length: 2048
+  beta: 0.1
+  min_pairs_per_critic: 32
+  min_specialty_items: 8
+  min_specialty_ratio: 0.0
+  specialty_ratio: 0.5
+  general_ratio: 0.35
+  calibration_ratio: 0.15
+  checkpoint_dir: "output/society_mmlu_trend_n300/checkpoints"
+  actor_temperature: 0.7
+  actor_max_tokens: 192
+  critic_max_tokens: 192
+  strict_classification: true
+  max_classification_failure_rate: 0.0
+  max_classification_workers: 4
+
+# Phase 6: Evaluation + ablation
+step06_evaluate:
+  society_dir: "output/society_mmlu_trend_n300/society"
+  output_dir: "output/society_mmlu_trend_n300/eval"
+  max_samples: 100
+  num_rounds: 2
+  max_tokens: 128
+  temperature: 0.0
+  run_ablations: true
+  num_samples_for_qualitative: 5
+  max_lora_rank: 256
+  router_top_k: 2

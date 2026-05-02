@@ -1,6 +1,9 @@
 # Qwen2.5-7B-Instruct + MMLU + 300 samples, GPU 4
 # Diverse Actor-Critic Society 全流程 (07-12)
 
+api:
+  provider: "glm"  # "glm" or "gpt"
+
 common:
   model_name: "Qwen/Qwen2.5-7B-Instruct"
   base_model: "Qwen/Qwen2.5-7B-Instruct"

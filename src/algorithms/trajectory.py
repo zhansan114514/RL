@@ -52,7 +52,9 @@ def _generate_guided_pairs_for_sample(
     task_type = sample.get("task_type", "yes_no")
     preference_pairs: list[dict] = []
 
-    for t in range(len(natural_trajectory)):
+    # Round 0 is the unguided natural response.  Preference pairs should measure
+    # the value of deliberation guidance, so guided rollouts start from t=1.
+    for t in range(1, len(natural_trajectory)):
         round_data = natural_trajectory[t]
         actor_response = round_data["actor_response"]
         critic_response = round_data["critic_response"]
@@ -253,7 +255,8 @@ def _generate_guided_pairs_for_batch(
     preference_pairs: list[dict] = []
     max_rounds = max((len(traj) for traj in natural_trajectories), default=0)
 
-    for t in range(max_rounds):
+    # Match the per-sample path: skip the unguided round-0 trajectory.
+    for t in range(1, max_rounds):
         active = [
             i for i, traj in enumerate(natural_trajectories)
             if t < len(traj)

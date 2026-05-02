@@ -6,7 +6,7 @@ Implements the single-GPU deliberation with batched inference:
   2. All Critics evaluate each Actor response (batched per actor)
   3. Router combines feedback (softmax confidence -> Top-K -> weighted concat)
   4. Feedback is injected into next-round Actor prompts
-  5. Majority vote for consensus answer
+  5. Critic-aware weighted consensus picks the final answer
 
 LoRA support:
   LoRA adapters are loaded dynamically into the vLLM engine via
@@ -20,14 +20,15 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from src.algorithms.reward import extract_answer
+from src.algorithms.reward import extract_answer_with_source
 from src.prompts.templates import answer_contract, append_answer_contract
-from src.society.agent_registry import AgentConfig
+from src.society.agent_registry import AgentConfig, CRITIC_CONFIDENCE_SUFFIX
 from src.society.router import CriticRouter, build_critic_feedback, RoutedFeedback
 
 logger = logging.getLogger(__name__)
@@ -46,6 +47,8 @@ class DeliberationRound:
     critic_feedbacks: dict[str, dict[str, str]]  # actor_name -> {critic_name: feedback}
     routed_feedbacks: dict[str, RoutedFeedback]  # actor_name -> routed
     consensus_answer: Optional[str] = None
+    consensus_confidence: float = 0.0
+    consensus_weights: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -134,6 +137,161 @@ def _get_stable_lora_id(lora_path: str) -> int:
 class LoRAError(RuntimeError):
     """Raised when a LoRA adapter cannot be loaded or used."""
     pass
+
+
+FINAL_ANSWER_LINE_PATTERN = re.compile(
+    r"(?m)^(?P<prefix>[ \t]*FINAL_ANSWER[ \t]*:[ \t]*)(?P<answer>.*?)(?P<suffix>[ \t]*)$"
+)
+
+MC_TAIL_ANSWER_PATTERNS = [
+    re.compile(
+        r"(?i)(?:correct\s+answer|answer|option|choice)\s+"
+        r"(?:should\s+be|is|would\s+be|must\s+be)\s*\(?\s*([A-D])\s*\)?"
+    ),
+    re.compile(r"(?i)(?:therefore|thus|so)\s*,?\s*(?:the\s+)?(?:answer|option|choice)\s+is\s*\(?\s*([A-D])\s*\)?"),
+    re.compile(r"(?i)(?:final\s+answer|answer)\s*:\s*\(?\s*([A-D])\s*\)?"),
+]
+
+YES_NO_TAIL_ANSWER_PATTERNS = [
+    re.compile(
+        r"(?i)(?:correct\s+answer|answer)\s+"
+        r"(?:should\s+be|is|would\s+be|must\s+be)\s*(yes|no)\b"
+    ),
+    re.compile(r"(?i)(?:final\s+answer|answer)\s*:\s*(yes|no)\b"),
+]
+
+
+def _normalize_vote_answer(answer: Optional[str], task_type: str) -> Optional[str]:
+    """Normalize an extracted answer for voting without changing math strings."""
+    if answer is None:
+        return None
+    text = str(answer).strip()
+    if not text:
+        return None
+    if task_type == "yes_no":
+        upper = text.strip("().").upper()
+        if upper in {"YES", "Y"}:
+            return "YES"
+        if upper in {"NO", "N"}:
+            return "NO"
+        return None
+    if task_type in {"multiple_choice", "mixed"}:
+        upper = text.strip("().").upper()
+        if upper in {"A", "B", "C", "D"}:
+            return upper
+        if task_type == "mixed" and upper in {"YES", "NO"}:
+            return upper
+        return None
+    return text
+
+
+def _find_tail_answer_claim(response: str, task_type: str) -> Optional[str]:
+    """Find an explicit answer claim in the tail of an Actor response."""
+    lines = [line.strip() for line in response.strip().splitlines() if line.strip()]
+    tail = "\n".join(lines[-8:])
+
+    patterns = YES_NO_TAIL_ANSWER_PATTERNS if task_type == "yes_no" else MC_TAIL_ANSWER_PATTERNS
+    if task_type not in {"yes_no", "multiple_choice", "mixed"}:
+        return None
+
+    for pattern in patterns:
+        matches = pattern.findall(tail)
+        if matches:
+            return _normalize_vote_answer(matches[-1], task_type)
+
+    return None
+
+
+def _replace_final_answer_line(response: str, repaired_answer: str) -> str:
+    """Replace the last FINAL_ANSWER line, or prepend one if missing."""
+    matches = list(FINAL_ANSWER_LINE_PATTERN.finditer(response))
+    if not matches:
+        return f"FINAL_ANSWER: {repaired_answer}\n{response.lstrip()}"
+
+    last = matches[-1]
+    return (
+        response[:last.start()]
+        + f"{last.group('prefix')}{repaired_answer}{last.group('suffix')}"
+        + response[last.end():]
+    )
+
+
+def _repair_actor_answer_consistency(
+    response: str,
+    task_type: str,
+) -> tuple[str, Optional[str], bool]:
+    """
+    Ensure the recorded Actor answer matches an explicit tail answer claim.
+
+    The prompt asks Actors to put FINAL_ANSWER first.  In practice some traces
+    contain a stale first-line answer and a later explicit correction.  For MC
+    and yes/no tasks, repair only strong tail patterns such as "the correct
+    answer is C"; weak standalone letters are intentionally ignored.
+    """
+    extraction = extract_answer_with_source(response, task_type)
+    current = _normalize_vote_answer(extraction.answer, task_type)
+    tail_claim = _find_tail_answer_claim(response, task_type)
+
+    repaired = False
+    if tail_claim and tail_claim != current:
+        response = _replace_final_answer_line(response, tail_claim)
+        current = tail_claim
+        repaired = True
+
+    return response, current, repaired
+
+
+def _critic_aware_consensus(
+    round_data: DeliberationRound,
+    task_type: str,
+) -> tuple[Optional[str], float, dict[str, float]]:
+    """
+    Combine Actor votes with schema-valid Critic signals.
+
+    Actor answers get a base vote of 1.0.  Valid Critics add confidence-weighted
+    support to the Actor answer when they mark it correct, or to their suggested
+    final answer when they mark it incorrect.  Invalid Critic outputs are ignored.
+    """
+    weights: dict[str, float] = {}
+
+    for answer in round_data.actor_answers.values():
+        normalized = _normalize_vote_answer(answer, task_type)
+        if normalized:
+            weights[normalized] = weights.get(normalized, 0.0) + 1.0
+
+    for actor_name, routed in round_data.routed_feedbacks.items():
+        actor_answer = _normalize_vote_answer(round_data.actor_answers.get(actor_name), task_type)
+        for feedback in routed.raw_feedbacks:
+            if not feedback.schema_valid or feedback.confidence <= 0:
+                continue
+
+            if feedback.answer_correct is True and actor_answer:
+                weights[actor_answer] = weights.get(actor_answer, 0.0) + feedback.confidence
+                continue
+
+            suggested = _normalize_vote_answer(feedback.suggested_answer, task_type)
+            if feedback.answer_correct is False and suggested:
+                weights[suggested] = weights.get(suggested, 0.0) + feedback.confidence
+
+    if not weights:
+        return None, 0.0, {}
+
+    actor_counts = Counter(
+        answer
+        for answer in (
+            _normalize_vote_answer(a, task_type)
+            for a in round_data.actor_answers.values()
+        )
+        if answer
+    )
+    best_answer, best_weight = max(
+        weights.items(),
+        key=lambda item: (item[1], actor_counts.get(item[0], 0), item[0]),
+    )
+    total = sum(weights.values())
+    confidence = best_weight / total if total > 0 else 0.0
+
+    return best_answer, confidence, weights
 
 
 def _resolve_adapter_path(path: str) -> str:
@@ -239,7 +397,7 @@ def multi_agent_deliberate_single_gpu(
     2. All Critics evaluate each Actor (batched: M critics x 1 actor = 1 call)
     3. Router combines Critic feedback
     4. Feedback is injected into next-round Actor prompts
-    5. Consensus via majority vote
+    5. Consensus via Actor votes plus schema-valid Critic signals
 
     LoRA adapters are loaded via LoRARequest objects passed to generate().
 
@@ -329,10 +487,18 @@ def multi_agent_deliberate_single_gpu(
             cached = _load_json(ckpt_path) if ckpt_path else None
             if cached and "actor_response" in cached:
                 actor_response = cached["actor_response"]
-                actor_answer = extract_answer(actor_response, task_type)
+                actor_response, actor_answer, repaired = _repair_actor_answer_consistency(
+                    actor_response,
+                    task_type,
+                )
                 round_data.actor_responses[actor.name] = actor_response
                 round_data.actor_answers[actor.name] = actor_answer
                 actor_histories[actor.name].append(actor_response)
+                if repaired and ckpt_path:
+                    _atomic_write_json(
+                        ckpt_path,
+                        {"actor_response": actor_response, "answer_repaired": True},
+                    )
                 logger.info(f"[Recovery] Loaded cached response for {actor.name} round {round_num}")
             else:
                 uncached_actors.append(actor)
@@ -360,14 +526,20 @@ def multi_agent_deliberate_single_gpu(
             # Store results
             for actor, response in zip(uncached_actors, actor_responses_batch):
                 response = response if isinstance(response, str) else str(response)
-                actor_answer = extract_answer(response, task_type)
+                response, actor_answer, repaired = _repair_actor_answer_consistency(
+                    response,
+                    task_type,
+                )
                 round_data.actor_responses[actor.name] = response
                 round_data.actor_answers[actor.name] = actor_answer
                 actor_histories[actor.name].append(response)
 
                 if ckpt_dir:
                     ckpt_path = ckpt_dir / f"round_{round_num}" / f"actor_{actor.name}.json"
-                    _atomic_write_json(ckpt_path, {"actor_response": response})
+                    _atomic_write_json(
+                        ckpt_path,
+                        {"actor_response": response, "answer_repaired": repaired},
+                    )
 
         # ---- Step 2: Batch all Critic evaluations ----
         for actor in actors:
@@ -415,7 +587,11 @@ def multi_agent_deliberate_single_gpu(
             critic_feedbacks = []
             for critic in critics:
                 resp = round_data.critic_feedbacks[actor.name].get(critic.name, "")
-                fb = build_critic_feedback(critic, resp)
+                fb = build_critic_feedback(
+                    critic,
+                    resp,
+                    actor_answer=round_data.actor_answers.get(actor.name),
+                )
                 critic_feedbacks.append(fb)
             routed = router.route(critic_feedbacks)
             round_data.routed_feedbacks[actor.name] = routed
@@ -429,12 +605,14 @@ def multi_agent_deliberate_single_gpu(
                     f"[Critic Feedback]\n{routed.feedback_text}"
                 )
 
-        # ---- Step 5: Majority vote for consensus ----
-        answers = [a for a in round_data.actor_answers.values() if a is not None]
-        if answers:
-            counter = Counter(answers)
-            most_common = counter.most_common(1)[0]
-            round_data.consensus_answer = most_common[0]
+        # ---- Step 5: Critic-aware consensus ----
+        consensus_answer, consensus_confidence, consensus_weights = _critic_aware_consensus(
+            round_data,
+            task_type,
+        )
+        round_data.consensus_answer = consensus_answer
+        round_data.consensus_confidence = consensus_confidence
+        round_data.consensus_weights = consensus_weights
 
         rounds.append(round_data)
 
@@ -442,13 +620,7 @@ def multi_agent_deliberate_single_gpu(
     final_round = rounds[-1]
     final_answers = dict(final_round.actor_answers)
     consensus_answer = final_round.consensus_answer
-
-    # Consensus confidence
-    if consensus_answer and final_answers:
-        agree_count = sum(1 for a in final_answers.values() if a == consensus_answer)
-        consensus_confidence = agree_count / len(final_answers)
-    else:
-        consensus_confidence = 0.0
+    consensus_confidence = final_round.consensus_confidence
 
     return MultiDeliberationResult(
         rounds=rounds,
@@ -623,6 +795,9 @@ def _build_critic_prompt(
 
     if critic.system_prompt:
         prompt = f"{critic.system_prompt}\n\n{prompt}"
+
+    if CRITIC_CONFIDENCE_SUFFIX not in prompt:
+        prompt = f"{CRITIC_CONFIDENCE_SUFFIX}\n\n{prompt}"
 
     return prompt
 

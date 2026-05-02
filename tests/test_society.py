@@ -419,7 +419,7 @@ class TestBuildCriticFeedback:
     """Test building CriticFeedback from raw response."""
 
     def test_build_with_confidence(self):
-        """Should build with parsed confidence."""
+        """Should zero confidence when the verdict schema is incomplete."""
         config = AgentConfig(
             name="critic_1",
             role=AgentRole.CRITIC,
@@ -431,13 +431,16 @@ class TestBuildCriticFeedback:
 
         assert feedback.critic_name == "critic_1"
         assert feedback.error_specialty == CriticSkill.COMPUTATION
-        assert feedback.confidence == 0.8
+        assert feedback.confidence == 0.0
         assert feedback.feedback_text == "Check your math"
         assert feedback.answer_correct is None
+        assert feedback.schema_valid is False
+        assert "missing_verdict_block" in feedback.schema_errors
+        assert "missing_answer_correct" in feedback.schema_errors
         assert feedback.raw_response == response
 
     def test_build_without_confidence(self):
-        """Should use default 0.5 confidence when not found."""
+        """Should not invent useful confidence when confidence is missing."""
         config = AgentConfig(
             name="critic_1",
             role=AgentRole.CRITIC,
@@ -447,25 +450,56 @@ class TestBuildCriticFeedback:
         response = "Check your reasoning"
         feedback = build_critic_feedback(config, response)
 
-        assert feedback.confidence == 0.5
+        assert feedback.confidence == 0.0
         assert feedback.feedback_text == "Check your reasoning"
         assert feedback.answer_correct is None
+        assert feedback.schema_valid is False
 
     def test_build_with_answer_correct(self):
-        """Should parse answer_correct tag."""
+        """Should parse a verdict-first complete Critic response."""
         config = AgentConfig(
             name="critic_1",
             role=AgentRole.CRITIC,
             model_path="/models/base",
             error_specialty=CriticSkill.COMPUTATION,
         )
-        response = "The answer is wrong.\n[Answer_Correct: no]\n[Confidence: 0.9]"
-        feedback = build_critic_feedback(config, response)
+        response = (
+            "[Answer_Correct: no]\n"
+            "[Suggested_Final_Answer: B]\n"
+            "[Error_Type: arithmetic]\n"
+            "[Confidence: 0.9]\n"
+            "The answer is wrong."
+        )
+        feedback = build_critic_feedback(config, response, actor_answer="A")
 
         assert feedback.confidence == 0.9
         assert feedback.answer_correct is False
+        assert feedback.suggested_answer == "B"
+        assert feedback.error_type == "arithmetic"
+        assert feedback.schema_valid is True
         assert "[Answer_Correct:" not in feedback.feedback_text
         assert "[Confidence:" not in feedback.feedback_text
+
+    def test_build_marks_contradictory_verdict_invalid(self):
+        """Should reject high-confidence labels that contradict themselves."""
+        config = AgentConfig(
+            name="critic_1",
+            role=AgentRole.CRITIC,
+            model_path="/models/base",
+            error_specialty=CriticSkill.VERIFICATION,
+        )
+        response = (
+            "[Answer_Correct: yes]\n"
+            "[Suggested_Final_Answer: D]\n"
+            "[Error_Type: verification]\n"
+            "[Confidence: 0.95]\n"
+            "The actor is right."
+        )
+        feedback = build_critic_feedback(config, response, actor_answer="B")
+
+        assert feedback.confidence == 0.0
+        assert feedback.schema_valid is False
+        assert "contradiction_correct_with_different_suggestion" in feedback.schema_errors
 
 
 class TestCriticRouter:
@@ -523,7 +557,7 @@ class TestCriticRouter:
         assert "c2" in result.selected_critics
 
     def test_route_fallback_to_uniform(self):
-        """Should fallback to uniform when all below min_confidence."""
+        """Should fallback only among schema-valid feedbacks below threshold."""
         router = CriticRouter(min_confidence=0.8, fallback_to_uniform=True)
         feedbacks = [
             CriticFeedback("c1", CriticSkill.COMPUTATION, "f1", 0.3),
@@ -533,6 +567,18 @@ class TestCriticRouter:
 
         # With fallback, should still route
         assert len(result.selected_critics) <= 2
+
+    def test_route_ignores_invalid_schema_feedback(self):
+        """Malformed feedback should not be selected even with high raw score."""
+        router = CriticRouter(top_k=2, min_confidence=0.0)
+        feedbacks = [
+            CriticFeedback("bad", CriticSkill.COMPUTATION, "bad", 0.99, schema_valid=False),
+            CriticFeedback("good", CriticSkill.REASONING, "good", 0.4, schema_valid=True),
+        ]
+        result = router.route(feedbacks)
+
+        assert result.selected_critics == ["good"]
+        assert result.weights == pytest.approx([1.0])
 
     def test_route_no_fallback_returns_empty(self):
         """Should return empty when all below min_confidence and no fallback."""
@@ -593,9 +639,11 @@ class TestMultiAgentCriticRouting:
                 confidences = [0.2, 0.95, 0.8, 0.3]
                 return [
                     (
-                        f"feedback_{i}\n"
                         "[Answer_Correct: yes]\n"
-                        f"[Confidence: {confidences[i]}]"
+                        "[Suggested_Final_Answer: YES]\n"
+                        "[Error_Type: none]\n"
+                        f"[Confidence: {confidences[i]}]\n"
+                        f"feedback_{i}"
                     )
                     for i, _ in enumerate(prompts)
                 ]
@@ -649,6 +697,127 @@ class TestMultiAgentCriticRouting:
         assert len(routed.raw_feedbacks) == 4
         assert routed.selected_critics == ["critic_reasoning", "critic_knowledge"]
 
+    def test_critic_prompt_requires_verdict_first_schema(self):
+        """Critic prompt should require structured verdict fields even with an empty system prompt."""
+        from src.society.multi_deliberation import _build_critic_prompt
+
+        critic = AgentConfig(
+            name="critic_plain",
+            role=AgentRole.CRITIC,
+            model_path="/models/base",
+            error_specialty=CriticSkill.VERIFICATION,
+            system_prompt="",
+        )
+        critic.system_prompt = ""
+        sample = {
+            "question": "Pick one.",
+            "choices": ["a", "b", "c", "d"],
+            "task_type": "multiple_choice",
+        }
+
+        prompt = _build_critic_prompt(
+            critic,
+            sample,
+            "mmlu",
+            "FINAL_ANSWER: A\nReasoning.",
+        )
+
+        assert "[Answer_Correct: yes or no]" in prompt
+        assert "[Suggested_Final_Answer: A or B or C or D or Yes or No or unknown]" in prompt
+        assert prompt.index("[Answer_Correct: yes or no]") < prompt.index("I am answering")
+
+    def test_actor_answer_consistency_repair(self):
+        """A later explicit answer correction should update FINAL_ANSWER."""
+        from src.society.multi_deliberation import _repair_actor_answer_consistency
+
+        response = (
+            "FINAL_ANSWER: B\n"
+            "I first thought B. After checking the options, the correct answer is C."
+        )
+
+        repaired, answer, changed = _repair_actor_answer_consistency(
+            response,
+            "multiple_choice",
+        )
+
+        assert changed is True
+        assert answer == "C"
+        assert repaired.startswith("FINAL_ANSWER: C")
+
+    def test_critic_aware_consensus_breaks_actor_tie(self):
+        """Valid Critic suggestions should break a two-actor tie."""
+        from src.society.multi_deliberation import multi_agent_deliberate_single_gpu
+
+        class TieInferenceStub:
+            def __init__(self):
+                self.calls = []
+
+            def generate(self, prompts, **kwargs):
+                self.calls.append(list(prompts))
+                if len(self.calls) == 1:
+                    return [
+                        "FINAL_ANSWER: A\nReasoning for A.",
+                        "FINAL_ANSWER: B\nReasoning for B.",
+                    ]
+
+                if "FINAL_ANSWER: A" in prompts[0]:
+                    return [
+                        "[Answer_Correct: no]\n"
+                        "[Suggested_Final_Answer: B]\n"
+                        "[Error_Type: verification]\n"
+                        "[Confidence: 0.9]\n"
+                        "The option mapping favors B."
+                    ]
+                return [
+                    "[Answer_Correct: yes]\n"
+                    "[Suggested_Final_Answer: B]\n"
+                    "[Error_Type: none]\n"
+                    "[Confidence: 0.9]\n"
+                    "The answer is consistent."
+                ]
+
+        actors = [
+            AgentConfig(
+                name="actor_a",
+                role=AgentRole.ACTOR,
+                model_path="/models/base",
+                reasoning_style=ReasoningStyle.DIRECT,
+            ),
+            AgentConfig(
+                name="actor_b",
+                role=AgentRole.ACTOR,
+                model_path="/models/base",
+                reasoning_style=ReasoningStyle.ALGEBRAIC,
+            ),
+        ]
+        critics = [
+            AgentConfig(
+                name="critic_verification",
+                role=AgentRole.CRITIC,
+                model_path="/models/base",
+                error_specialty=CriticSkill.VERIFICATION,
+            )
+        ]
+        sample = {
+            "question": "Which option is correct?",
+            "choices": ["a", "b", "c", "d"],
+            "task_type": "multiple_choice",
+        }
+
+        result = multi_agent_deliberate_single_gpu(
+            inference_engine=TieInferenceStub(),
+            actors=actors,
+            critics=critics,
+            sample=sample,
+            dataset_name="mmlu",
+            num_rounds=1,
+            router=CriticRouter(top_k=1, min_confidence=0.0),
+        )
+
+        assert result.final_answers == {"actor_a": "A", "actor_b": "B"}
+        assert result.consensus_answer == "B"
+        assert result.rounds[0].consensus_weights["B"] > result.rounds[0].consensus_weights["A"]
+
 
 class TestSocietyAlternatingTrain:
     """Test alternating trainer state handoff between phases."""
@@ -701,15 +870,7 @@ class TestSocietyAlternatingTrain:
             error_specialty=CriticSkill.COMPUTATION,
         ))
 
-        phase_engine_calls = []
         pair_generation_calls = []
-
-        def fake_create_phase_engine(**kwargs):
-            phase_engine_calls.append({
-                agent.name: agent.lora_path
-                for agent in kwargs["agents"]
-            })
-            return object()
 
         def fake_generate_critic_pairs_algorithm1(**kwargs):
             pair_generation_calls.append({
@@ -742,9 +903,6 @@ class TestSocietyAlternatingTrain:
         def fake_run_dpo_training(**kwargs):
             return f"{kwargs['output_dir']}/adapter"
 
-        monkeypatch.setattr(
-            society_trainer, "_create_phase_engine", fake_create_phase_engine
-        )
         monkeypatch.setattr(
             society_trainer, "_generate_critic_pairs_algorithm1",
             fake_generate_critic_pairs_algorithm1,
@@ -783,8 +941,6 @@ class TestSocietyAlternatingTrain:
 
         assert actor_phase_calls[0]["critic_paths"] == [critic_iter0]
         assert critic_phase_calls[1]["actor_paths"] == [actor_iter0]
-        assert phase_engine_calls[1]["critic_computation"] == critic_iter0
-        assert phase_engine_calls[2]["actor_direct"] == actor_iter0
         assert result.critic_paths["critic_computation"] == critic_iter1
         assert result.actor_paths["actor_direct"] == actor_iter1
         assert registry.get("critic_computation").lora_path == critic_iter1

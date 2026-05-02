@@ -1,13 +1,12 @@
 """
 MoE-style Critic Router for selecting and weighting Critic feedback.
 
-No trainable parameters — routes based on Critic confidence scores
+No trainable parameters - routes based on validated Critic confidence scores
 using softmax weighting and Top-K selection.
 
-From experiment plan:
-  Input:  All Critic (confidence, feedback_text)
-  Process: softmax(confidence, temperature=1.0) → Top-K (default K=2) → weighted concat
-  Output: Weighted feedback text + routing weights
+Only schema-valid Critic verdicts are eligible for routing.  Missing or
+contradictory structured fields receive zero effective confidence so malformed
+feedback cannot silently become a useful 0.5-weight signal.
 """
 
 from __future__ import annotations
@@ -39,6 +38,12 @@ class CriticFeedback:
     suggested_answer: Optional[str] = None  # Critic's suggested final answer
     error_type: Optional[str] = None  # Critic's identified error type
     raw_response: str = ""
+    schema_valid: bool = True
+    schema_errors: list[str] = None
+
+    def __post_init__(self) -> None:
+        if self.schema_errors is None:
+            self.schema_errors = []
 
 
 @dataclass
@@ -74,6 +79,13 @@ ERROR_TYPE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+CRITIC_VERDICT_PATTERNS = [
+    ("answer_correct", ANSWER_CORRECT_PATTERN),
+    ("suggested_answer", SUGGESTED_ANSWER_PATTERN),
+    ("error_type", ERROR_TYPE_PATTERN),
+    ("confidence", CONFIDENCE_PATTERN),
+]
+
 
 def parse_confidence(response: str) -> Optional[float]:
     """Parse [Confidence: 0.X] from Critic response."""
@@ -104,7 +116,9 @@ def parse_suggested_answer(response: str) -> Optional[str]:
         return None
     if ans.upper() in {"A", "B", "C", "D"}:
         return ans.upper()
-    return ans.capitalize()
+    if ans.lower() in {"yes", "no"}:
+        return ans.upper()
+    return ans
 
 
 def parse_error_type(response: str) -> Optional[str]:
@@ -113,6 +127,57 @@ def parse_error_type(response: str) -> Optional[str]:
     if match:
         return match.group(1).lower()
     return None
+
+
+def _normalize_answer(answer: Optional[str]) -> Optional[str]:
+    if answer is None:
+        return None
+    normalized = str(answer).strip()
+    if not normalized:
+        return None
+    upper = normalized.upper()
+    if upper in {"A", "B", "C", "D", "YES", "NO"}:
+        return upper
+    return normalized
+
+
+def _validate_critic_schema(
+    response: str,
+    actor_answer: Optional[str] = None,
+) -> tuple[bool, list[str]]:
+    """Validate that the Critic response starts with a consistent verdict block."""
+    errors: list[str] = []
+    lines = [line.strip() for line in response.splitlines() if line.strip()]
+
+    if len(lines) < len(CRITIC_VERDICT_PATTERNS):
+        errors.append("missing_verdict_block")
+    else:
+        for idx, (field_name, pattern) in enumerate(CRITIC_VERDICT_PATTERNS):
+            if not pattern.fullmatch(lines[idx]):
+                errors.append(f"{field_name}_not_in_verdict_position")
+
+    if parse_answer_correct(response) is None:
+        errors.append("missing_answer_correct")
+    if SUGGESTED_ANSWER_PATTERN.search(response) is None:
+        errors.append("missing_suggested_answer")
+    if parse_error_type(response) is None:
+        errors.append("missing_error_type")
+    if parse_confidence(response) is None:
+        errors.append("missing_confidence")
+
+    answer_correct = parse_answer_correct(response)
+    suggested_answer = _normalize_answer(parse_suggested_answer(response))
+    actor_answer = _normalize_answer(actor_answer)
+
+    if actor_answer and suggested_answer:
+        if answer_correct is True and suggested_answer != actor_answer:
+            errors.append("contradiction_correct_with_different_suggestion")
+        elif answer_correct is False and suggested_answer == actor_answer:
+            errors.append("contradiction_incorrect_with_same_suggestion")
+
+    # Deduplicate while preserving order for readable traces.
+    unique_errors = list(dict.fromkeys(errors))
+    return not unique_errors, unique_errors
 
 
 # ============================================================
@@ -154,11 +219,18 @@ class CriticRouter:
         if not feedbacks:
             return RoutedFeedback("", [], [], [])
 
+        # Only schema-valid Critics are eligible for routing.  Invalid verdicts
+        # remain visible in raw_feedbacks for diagnostics, but never affect the
+        # Actor prompt or consensus weighting.
+        schema_valid = [f for f in feedbacks if f.schema_valid]
+        if not schema_valid:
+            return RoutedFeedback("", [], [], feedbacks)
+
         # Filter by minimum confidence
-        valid = [f for f in feedbacks if f.confidence >= self.min_confidence]
+        valid = [f for f in schema_valid if f.confidence >= self.min_confidence]
         if not valid:
             if self.fallback_to_uniform:
-                valid = feedbacks
+                valid = schema_valid
             else:
                 return RoutedFeedback("", [], [], feedbacks)
 
@@ -223,16 +295,24 @@ class CriticRouter:
 def build_critic_feedback(
     critic_config: AgentConfig,
     response: str,
+    actor_answer: Optional[str] = None,
 ) -> CriticFeedback:
     """Build CriticFeedback from raw response, parsing confidence and answer correctness."""
-    confidence = parse_confidence(response)
-    if confidence is None:
-        confidence = 0.5
-        logger.debug(f"No confidence parsed for {critic_config.name}, default=0.5")
-
+    parsed_confidence = parse_confidence(response)
     answer_correct = parse_answer_correct(response)
     suggested_answer = parse_suggested_answer(response)
     error_type = parse_error_type(response)
+    schema_valid, schema_errors = _validate_critic_schema(response, actor_answer=actor_answer)
+
+    if parsed_confidence is None:
+        logger.debug(f"No confidence parsed for {critic_config.name}; routing confidence=0.0")
+    if not schema_valid:
+        logger.debug(
+            "Invalid critic verdict for %s; routing confidence=0.0; errors=%s",
+            critic_config.name,
+            schema_errors,
+        )
+    confidence = parsed_confidence if schema_valid and parsed_confidence is not None else 0.0
 
     # Strip all structured tags from the displayed feedback text
     clean_response = CONFIDENCE_PATTERN.sub("", response)
@@ -253,4 +333,6 @@ def build_critic_feedback(
         suggested_answer=suggested_answer,
         error_type=error_type,
         raw_response=response,
+        schema_valid=schema_valid,
+        schema_errors=schema_errors,
     )

@@ -97,42 +97,81 @@ class TestConfigManagerGet:
 class TestConfigManagerStep:
     """Test step() method for step-specific config merging."""
 
-    def test_step_merge_priority(self):
-        """Step section should override common, common should override defaults."""
+    def test_step_merge_priority(self, tmp_path):
+        """Step section should override common, and defaults act as required keys."""
+        experiment = tmp_path / "experiment.yaml"
+        experiment.write_text("""
+common:
+  model_name: Qwen/Qwen2.5-7B-Instruct
+  num_agents: 3
+step01_bootstrap:
+  num_agents: 5
+  temperature: 0.8
+""")
+
         cfg = ConfigManager.initialize(
-            config_path="configs/society/experiment_mmlu.yaml",
+            config_path=str(experiment),
             load_local=False,
         )
         step = cfg.step("step01_bootstrap", defaults={
-            "num_agents": 3,        # Will be overridden by common or step
-            "temperature": 0.5,     # Will be overridden by step section
+            "num_agents": True,
+            "temperature": True,
         })
         assert step.get("num_agents") == 5       # from step section
         assert step.get("temperature") == 0.8     # from step section
         assert step.get("model_name") == "Qwen/Qwen2.5-7B-Instruct"  # from common
 
-    def test_step_defaults_only_when_no_experiment(self):
-        """Without experiment config, step should return defaults."""
+    def test_step_defaults_are_required_schema(self):
+        """defaults declares required keys; it does not fill missing values."""
         cfg = ConfigManager.initialize()
-        step = cfg.step("step01", defaults={"foo": "bar", "count": 10})
-        assert step.get("foo") == "bar"
-        assert step.get("count") == 10
+        with pytest.raises(ConfigKeyError, match="count, foo"):
+            cfg.step("step01", defaults={"foo": "bar", "count": 10})
 
-    def test_step_missing_key_returns_defaults(self):
-        """Missing step section should still return common + defaults."""
+    def test_step_missing_section_returns_common_when_no_required_keys(self, tmp_path):
+        """Missing step section should still return common config."""
+        experiment = tmp_path / "experiment.yaml"
+        experiment.write_text("""
+common:
+  model_name: Qwen/Qwen2.5-7B-Instruct
+""")
         cfg = ConfigManager.initialize(
-            config_path="configs/society/experiment_mmlu.yaml",
+            config_path=str(experiment),
             load_local=False,
         )
-        step = cfg.step("step99_nonexistent", defaults={"foo": "bar"})
-        assert step.get("foo") == "bar"
+        step = cfg.step("step99_nonexistent")
         assert step.get("model_name") == "Qwen/Qwen2.5-7B-Instruct"  # from common
 
-    def test_step_none_values_override(self):
-        """None values in common/step sections should not override defaults."""
-        cfg = ConfigManager.initialize()
-        step = cfg.step("step01", defaults={"key": "default_val"})
-        assert step.get("key") == "default_val"
+    def test_step_none_values_do_not_override_common(self, tmp_path):
+        """None values in step sections should not erase existing common values."""
+        experiment = tmp_path / "experiment.yaml"
+        experiment.write_text("""
+common:
+  key: common_val
+step01:
+  key:
+""")
+        cfg = ConfigManager.initialize(config_path=str(experiment), load_local=False)
+        step = cfg.step("step01", defaults={"key": True})
+        assert step.get("key") == "common_val"
+
+    def test_step_unknown_api_provider_raises(self, tmp_path):
+        """A selected provider must exist in api.providers."""
+        experiment = tmp_path / "experiment.yaml"
+        experiment.write_text("""
+api:
+  provider: glm
+  providers:
+    gpt:
+      api_key: secret
+      api_base: https://api.example.test
+      api_model: gpt-test
+step02_classify:
+  output_dir: out
+""")
+        cfg = ConfigManager.initialize(config_path=str(experiment), load_local=False)
+
+        with pytest.raises(ConfigKeyError, match="API provider 'glm' is not defined"):
+            cfg.step("step02_classify")
 
     def test_step_inherits_api_from_local_config(self, tmp_path):
         """Local config should provide API secrets without tracked experiment YAML."""

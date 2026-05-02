@@ -186,14 +186,17 @@ CRITIC_SPECIALTY_PROMPTS = {
     ),
 }
 
-# Confidence prompt suffix for Critic (used by MoE Router + weighted voting)
+# Verdict prompt suffix for Critic (used by MoE Router + weighted voting)
 CRITIC_CONFIDENCE_SUFFIX = (
-    "\n\nAfter your analysis you MUST end your response with the following fields "
-    "(one per line):\n"
+    "\n\nYou MUST start your response with exactly these four verdict fields "
+    "(one per line, before any analysis):\n"
     "[Answer_Correct: yes or no]\n"
-    "[Suggested_Final_Answer: A or B or C or D or unknown]\n"
+    "[Suggested_Final_Answer: A or B or C or D or Yes or No or unknown]\n"
     "[Error_Type: arithmetic or logic or hallucination or verification or none]\n"
-    "[Confidence: 0.0-1.0]"
+    "[Confidence: 0.0-1.0]\n"
+    "Then provide at most three concise sentences of evidence. "
+    "If Answer_Correct is yes, Suggested_Final_Answer must match the Actor's "
+    "FINAL_ANSWER when it is available; otherwise use unknown."
 )
 
 
