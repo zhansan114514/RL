@@ -48,9 +48,20 @@ STEP_DEFAULTS = {
     "num_rounds": 2,
     "max_tokens": 1024,
     "temperature": 0.0,
-    "device": 0,
+    "evaluation_mode": "single_gpu",
+    "evaluation_modes": {
+        "single_gpu": {
+            "devices": [0],
+            "tensor_parallel_size": 1,
+            "gpu_memory_utilization": 0.65,
+        },
+        "dual_gpu": {
+            "devices": [0, 1],
+            "tensor_parallel_size": 2,
+            "gpu_memory_utilization": 0.80,
+        },
+    },
     "dtype": "bfloat16",
-    "gpu_memory_utilization": 0.65,
     "run_ablations": True,
     "num_samples_for_qualitative": 5,
     "max_model_len": 4096,
@@ -73,6 +84,60 @@ class EvalResult:
     num_samples: int
     eval_time_seconds: float
     sample_details: List[Dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class EvaluationRuntime:
+    """Resolved GPU runtime settings for evaluation."""
+    mode: str
+    devices: List[int]
+    tensor_parallel_size: int
+    gpu_memory_utilization: float
+
+
+def resolve_evaluation_runtime(args) -> EvaluationRuntime:
+    """Resolve the selected evaluation GPU mode from step06_evaluate config."""
+    mode = args.evaluation_mode
+    modes = args.evaluation_modes
+
+    if not isinstance(modes, dict) or mode not in modes:
+        available = sorted(modes) if isinstance(modes, dict) else []
+        raise ValueError(
+            f"Unknown evaluation_mode '{mode}'. "
+            f"Available modes: {available}"
+        )
+
+    mode_cfg = modes[mode] or {}
+    devices = mode_cfg.get("devices")
+    if not isinstance(devices, list) or not devices:
+        raise ValueError(
+            f"evaluation_modes.{mode}.devices must be a non-empty list of GPU ids"
+        )
+    devices = [int(device) for device in devices]
+
+    tensor_parallel_size = int(
+        mode_cfg.get("tensor_parallel_size") or len(devices)
+    )
+    if tensor_parallel_size != len(devices):
+        raise ValueError(
+            f"evaluation_modes.{mode}.tensor_parallel_size must match number of "
+            f"devices for this evaluation mode: tensor_parallel_size="
+            f"{tensor_parallel_size}, devices={devices}"
+        )
+
+    gpu_memory_utilization = float(mode_cfg.get("gpu_memory_utilization"))
+    if not 0 < gpu_memory_utilization <= 1:
+        raise ValueError(
+            f"evaluation_modes.{mode}.gpu_memory_utilization must be in (0, 1], "
+            f"got {gpu_memory_utilization}"
+        )
+
+    return EvaluationRuntime(
+        mode=mode,
+        devices=devices,
+        tensor_parallel_size=tensor_parallel_size,
+        gpu_memory_utilization=gpu_memory_utilization,
+    )
 
 
 def parse_args():
@@ -512,7 +577,8 @@ def run_all_evaluations(
     num_rounds: int,
     max_tokens: int,
     temperature: float,
-    device: int,
+    devices: List[int],
+    tensor_parallel_size: int,
     dtype: str,
     gpu_memory_utilization: float,
     run_ablations: bool,
@@ -557,7 +623,8 @@ def run_all_evaluations(
     logger.info(f"  LoRA agents: {total_agents_with_lora} ({len(all_actor_names)} actors + {len(all_critic_names)} critics)")
     engine = VLLMInference(
         base_model,
-        cuda_device=device,
+        cuda_device=devices,
+        tensor_parallel_size=tensor_parallel_size,
         dtype=dtype,
         gpu_memory_utilization=gpu_memory_utilization,
         max_model_len=max_model_len,
@@ -779,6 +846,15 @@ def main():
     logger.info(f"  Run ablations: {args.run_ablations}")
     logger.info("=" * 60)
 
+    runtime = resolve_evaluation_runtime(args)
+    logger.info(
+        "  Evaluation mode: "
+        f"{runtime.mode} "
+        f"(devices={runtime.devices}, "
+        f"tensor_parallel_size={runtime.tensor_parallel_size}, "
+        f"gpu_memory_utilization={runtime.gpu_memory_utilization})"
+    )
+
     # Load society registry
     logger.info("[Step 1] Loading society registry...")
     registry = load_society_registry(args.society_dir)
@@ -805,9 +881,10 @@ def main():
         num_rounds=args.num_rounds,
         max_tokens=args.max_tokens,
         temperature=args.temperature,
-        device=args.device,
+        devices=runtime.devices,
+        tensor_parallel_size=runtime.tensor_parallel_size,
         dtype=args.dtype,
-        gpu_memory_utilization=args.gpu_memory_utilization,
+        gpu_memory_utilization=runtime.gpu_memory_utilization,
         run_ablations=args.run_ablations,
         max_model_len=args.max_model_len,
         max_lora_rank=args.max_lora_rank,

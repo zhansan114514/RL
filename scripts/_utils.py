@@ -9,7 +9,14 @@ import sys
 # Ensure project root is importable
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from src.utils.runtime_env import configure_runtime_libraries
+
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+
+# Configure before phase scripts import libraries that may dlopen conda
+# extensions.  This prevents spawned vLLM/DPO workers from resolving the
+# system libstdc++ when the conda one is required.
+configure_runtime_libraries()
 
 
 def setup_logging(level: int = logging.INFO, seed: int | None = None) -> None:

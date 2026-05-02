@@ -52,6 +52,25 @@ def _cleanup_gpu():
         pass
 
 
+def _release_vllm_engine(engine: Any, adapters: Optional[dict[str, Any]] = None) -> None:
+    """Explicitly release a vLLM engine and adapter references."""
+    if engine is not None:
+        try:
+            cleanup = getattr(engine, "cleanup", None)
+            if callable(cleanup):
+                cleanup()
+        except Exception as e:
+            logger.warning(f"vLLM engine cleanup failed: {e}")
+
+    if adapters:
+        for adapter in adapters.values():
+            if hasattr(adapter, "_engine"):
+                adapter._engine = None
+        adapters.clear()
+
+    _cleanup_gpu()
+
+
 def _create_phase_engine(
     model_name: str,
     agents: list[AgentConfig],
@@ -450,6 +469,7 @@ def society_alternating_train(
                 api_model=api_model,
                 strict_classification=strict_classification,
                 max_classification_failure_rate=max_classification_failure_rate,
+                max_classification_workers=max_classification_workers,
                 request_timeout=request_timeout,
                 max_retries=max_retries,
                 retry_delay=retry_delay,
@@ -466,7 +486,7 @@ def society_alternating_train(
                     "metrics": metrics,
                     "phase_done": {
                         **phase_done,
-                        "phase_A": phase_done.get("phase_A", []),
+                        "phase_A": sorted(phase_a_done),
                         "phase_B": sorted(phase_b_done),
                     },
                 })
@@ -524,7 +544,7 @@ def society_alternating_train(
                 "metrics": metrics,
                 "phase_done": {
                     **phase_done,
-                    "phase_A": phase_done.get("phase_A", []),
+                    "phase_A": sorted(phase_a_done),
                     "phase_B": [
                         n for n, p in actor_paths.items()
                         if metrics.get(f"actor_{n}_iter{iteration}", {}).get("status") == "completed"
@@ -718,6 +738,7 @@ def _generate_critic_pairs_algorithm1(
     n_samples = min(len(dataset), max_samples)
     preference_pairs: list[dict] = []
     _owns_engine = engine is None
+    adapters: dict[str, Any] = {}
 
     try:
         if _owns_engine:
@@ -822,6 +843,12 @@ def _generate_critic_pairs_algorithm1(
         logger.info(
             f"  [{critic.name}] Algorithm 1 produced {len(raw_pairs)} raw critic pairs"
         )
+
+        # Routing below is API-bound and can take several minutes. Release the
+        # local vLLM engine first so the process is not holding an idle GPU.
+        if _owns_engine and engine is not None:
+            _release_vllm_engine(engine, adapters)
+            engine = None
 
         # Step 2: Route by error profile, then build an adaptive specialist mix.
         if raw_pairs:
@@ -940,14 +967,15 @@ def _generate_critic_pairs_algorithm1(
                 f"{len(selected_unique_pairs)} / {len(preference_pairs)}"
             )
 
-        if _owns_engine:
-            del engine
-            _cleanup_gpu()
+        if _owns_engine and engine is not None:
+            _release_vllm_engine(engine, adapters)
+            engine = None
 
     except Exception as e:
         logger.error(f"Failed to generate critic pairs for {critic.name}: {e}")
-        if _owns_engine:
-            _cleanup_gpu()
+        if _owns_engine and engine is not None:
+            _release_vllm_engine(engine, adapters)
+            engine = None
         if strict_classification:
             raise
 
@@ -981,6 +1009,7 @@ def _generate_actor_pairs_algorithm1(
     api_model: str = "",
     strict_classification: bool = True,
     max_classification_failure_rate: float = 0.0,
+    max_classification_workers: int = 4,
     request_timeout: int | float = 30,
     max_retries: int = 5,
     retry_delay: int | float = 5,
@@ -1009,6 +1038,7 @@ def _generate_actor_pairs_algorithm1(
     n_samples = min(len(dataset), max_samples)
     preference_pairs: list[dict] = []
     _owns_engine = engine is None
+    adapters: dict[str, Any] = {}
 
     try:
         if _owns_engine:
@@ -1094,6 +1124,12 @@ def _generate_actor_pairs_algorithm1(
             f"  [{actor.name}] Algorithm 1 produced {len(raw_pairs)} raw actor pairs"
         )
 
+        # Style filtering is API-bound; release vLLM before classification to
+        # avoid holding an idle GPU during potentially slow external calls.
+        if _owns_engine and engine is not None:
+            _release_vllm_engine(engine, adapters)
+            engine = None
+
         # Step 2: Batch classify reasoning styles, then filter
         if raw_pairs:
             # Deduplicate classification calls by (question, response) key.
@@ -1119,7 +1155,8 @@ def _generate_actor_pairs_algorithm1(
             # identical (question, response) pairs.
             n_ok = 0
             n_failed = 0
-            for question, response, correct_answer, key in classify_keys:
+            def classify_one(payload: tuple[str, str, str, tuple[str, str]]):
+                question, response, correct_answer, key = payload
                 try:
                     result = classify_reasoning_style(
                         response=response,
@@ -1134,9 +1171,22 @@ def _generate_actor_pairs_algorithm1(
                         max_retries=max_retries,
                         retry_delay=retry_delay,
                     )
-                    style_cache[key] = result.style
-                    n_ok += 1
+                    return key, result.style, None
                 except ClassificationError:
+                    return key, None, "classification_error"
+
+            if max_classification_workers == 1:
+                classify_results = [classify_one(payload) for payload in classify_keys]
+            else:
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=max(1, max_classification_workers)) as executor:
+                    classify_results = list(executor.map(classify_one, classify_keys))
+
+            for key, style, error in classify_results:
+                if error is None:
+                    style_cache[key] = style
+                    n_ok += 1
+                else:
                     n_failed += 1
 
             logger.info(
@@ -1179,14 +1229,17 @@ def _generate_actor_pairs_algorithm1(
             f"matched style '{actor.reasoning_style.value}'"
         )
 
-        if _owns_engine:
-            del engine
-            _cleanup_gpu()
+        if _owns_engine and engine is not None:
+            _release_vllm_engine(engine, adapters)
+            engine = None
 
     except Exception as e:
         logger.error(f"Failed to generate actor pairs for {actor.name}: {e}")
-        if _owns_engine:
-            _cleanup_gpu()
+        if _owns_engine and engine is not None:
+            _release_vllm_engine(engine, adapters)
+            engine = None
+        if strict_classification:
+            raise
 
     return preference_pairs
 

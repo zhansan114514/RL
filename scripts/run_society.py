@@ -42,6 +42,7 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.utils.config import ConfigManager
+from src.utils.runtime_env import configure_runtime_libraries
 
 # ============================================================
 # 日志配置
@@ -165,12 +166,15 @@ def run_phase(
     logger.info("=" * 70)
 
     cmd = [python, phase["script"], "--config", config_path]
+    env = dict(os.environ)
+    configure_runtime_libraries(env, preload=False)
 
     start = time.time()
     try:
         result = subprocess.run(
             cmd,
             cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            env=env,
             capture_output=False,  # 直接输出到终端
             text=True,
         )

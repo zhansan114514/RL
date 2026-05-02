@@ -22,9 +22,20 @@ STEP_DEFAULTS = {
     "model_name": "Qwen/Qwen2.5-7B-Instruct",
     "dataset": "mmlu",
     "seed": 42,
-    "device": 5,
+    "evaluation_mode": "single_gpu",
+    "evaluation_modes": {
+        "single_gpu": {
+            "devices": [5],
+            "tensor_parallel_size": 1,
+            "gpu_memory_utilization": 0.60,
+        },
+        "dual_gpu": {
+            "devices": [5, 6],
+            "tensor_parallel_size": 2,
+            "gpu_memory_utilization": 0.80,
+        },
+    },
     "dtype": "bfloat16",
-    "gpu_memory_utilization": 0.60,
     "max_model_len": 4096,
     "society_dir": "output/society_mmlu/society",
     "output_dir": "output/society_mmlu/eval",
@@ -45,12 +56,22 @@ def main():
     cfg = ConfigManager.initialize(config_path=cli_args.config)
     args = cfg.step("step06_evaluate", defaults=STEP_DEFAULTS).to_namespace()
 
+    from importlib import import_module
+    eval_module = import_module("scripts.12_society_evaluate")
+    _build_agent_configs = eval_module._build_agent_configs
+    _run_deliberation_on_samples = eval_module._run_deliberation_on_samples
+    runtime = eval_module.resolve_evaluation_runtime(args)
+
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
     logger.info("=" * 60)
     logger.info("A5 Evaluation: 3 Actors + 4 Critics + Router")
-    logger.info(f"  Device: {args.device}")
+    logger.info(
+        f"  Evaluation mode: {runtime.mode} "
+        f"(devices={runtime.devices}, "
+        f"tensor_parallel_size={runtime.tensor_parallel_size})"
+    )
     logger.info(f"  Output: {output_dir}")
     logger.info("=" * 60)
 
@@ -74,12 +95,6 @@ def main():
         samples = samples[:args.max_samples]
     logger.info(f"  Eval samples: {len(samples)}")
 
-    # Import helpers from 12_society_evaluate
-    from importlib import import_module
-    eval_module = import_module("scripts.12_society_evaluate")
-    _build_agent_configs = eval_module._build_agent_configs
-    _run_deliberation_on_samples = eval_module._run_deliberation_on_samples
-
     # Build engine
     from src.inference.vllm_server import VLLMInference
     total_lora = len(all_actor_names) + len(all_critic_names)
@@ -87,9 +102,10 @@ def main():
     logger.info("Loading engine...")
     engine = VLLMInference(
         base_model,
-        cuda_device=args.device,
+        cuda_device=runtime.devices,
+        tensor_parallel_size=runtime.tensor_parallel_size,
         dtype=args.dtype,
-        gpu_memory_utilization=args.gpu_memory_utilization,
+        gpu_memory_utilization=runtime.gpu_memory_utilization,
         max_model_len=args.max_model_len,
         enable_lora=True,
         max_loras=total_lora,

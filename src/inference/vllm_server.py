@@ -6,7 +6,10 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Sequence
 from typing import Any, Optional
+
+from src.utils.runtime_env import configure_runtime_libraries
 
 logger = logging.getLogger(__name__)
 
@@ -14,9 +17,11 @@ logger = logging.getLogger(__name__)
 class VLLMInference:
     """Inference engine using vLLM for efficient LLM serving.
 
-    Supports multi-GPU placement via the ``cuda_device`` parameter.
-    When set, vLLM's engine child process will be restricted to that
-    physical GPU by temporarily overriding ``CUDA_VISIBLE_DEVICES``.
+    Supports GPU placement via the ``cuda_device`` parameter.  Pass one
+    physical GPU id for single-GPU inference, or a sequence of physical GPU ids
+    for tensor-parallel inference across multiple GPUs.  vLLM's engine child
+    process is restricted to those devices by temporarily overriding
+    ``CUDA_VISIBLE_DEVICES``.
 
     LoRA support:
       Set ``enable_lora=True`` to allow dynamic LoRA adapter loading
@@ -27,12 +32,12 @@ class VLLMInference:
     def __init__(
         self,
         model_name: str,
-        tensor_parallel_size: int = 1,
+        tensor_parallel_size: int | None = None,
         gpu_memory_utilization: float = 0.5,
         max_model_len: int = 1024,
         dtype: str = "auto",
         trust_remote_code: bool = True,
-        cuda_device: Optional[int] = None,
+        cuda_device: Optional[int | Sequence[int] | str] = None,
         enable_lora: bool = False,
         max_loras: int = 1,
         max_lora_rank: int = 256,
@@ -40,8 +45,20 @@ class VLLMInference:
         self.model_name = model_name
         self._llm = None
         self._tokenizer = None
-        self._cuda_device = cuda_device
+        self._cuda_devices = self._normalize_cuda_devices(cuda_device)
         self._enable_lora = enable_lora
+        if tensor_parallel_size is None:
+            tensor_parallel_size = len(self._cuda_devices) if self._cuda_devices else 1
+        if tensor_parallel_size < 1:
+            raise ValueError(
+                f"tensor_parallel_size must be >= 1, got {tensor_parallel_size}"
+            )
+        if self._cuda_devices and tensor_parallel_size > len(self._cuda_devices):
+            raise ValueError(
+                "tensor_parallel_size cannot exceed number of selected CUDA devices: "
+                f"tensor_parallel_size={tensor_parallel_size}, "
+                f"devices={list(self._cuda_devices)}"
+            )
 
         self._init_kwargs: dict = {
             "tensor_parallel_size": tensor_parallel_size,
@@ -60,10 +77,50 @@ class VLLMInference:
                 f"LoRA enabled: max_loras={max_loras}, max_lora_rank={max_lora_rank}"
             )
 
+    @staticmethod
+    def _normalize_cuda_devices(
+        cuda_device: Optional[int | Sequence[int] | str],
+    ) -> Optional[tuple[int, ...]]:
+        """Normalize a CUDA device spec into physical GPU ids."""
+        if cuda_device is None:
+            return None
+        if isinstance(cuda_device, int):
+            return (cuda_device,)
+        if isinstance(cuda_device, str):
+            parts = [part.strip() for part in cuda_device.split(",") if part.strip()]
+            if not parts:
+                return None
+            return tuple(int(part) for part in parts)
+        devices = tuple(int(device) for device in cuda_device)
+        return devices or None
+
     def _ensure_loaded(self) -> None:
         """Lazy-load the vLLM engine on first use."""
         if self._llm is not None:
             return
+        # Set CUDA_VISIBLE_DEVICES before any CUDA inspection or vLLM import.
+        # cuda_device is always treated as a physical GPU ID.
+        # Each vLLM instance spawns its own child process (EngineCore)
+        # which inherits CUDA_VISIBLE_DEVICES at spawn time, so we can
+        # safely change it between model loads without affecting already-
+        # running engines.
+        if self._cuda_devices is not None:
+            target_physical = ",".join(str(device) for device in self._cuda_devices)
+            os.environ["CUDA_VISIBLE_DEVICES"] = target_physical
+            logger.info(
+                f"Loading model on physical GPU(s) {target_physical}: "
+                f"{self.model_name} "
+                f"(tensor_parallel_size={self._init_kwargs['tensor_parallel_size']})"
+            )
+        else:
+            logger.info(f"Loading model: {self.model_name}")
+
+        # vLLM may spawn worker processes after this Python process has already
+        # touched CUDA.  Forking in that state can fail with
+        # "Cannot re-initialize CUDA in forked subprocess"; use spawn for the
+        # engine workers.
+        os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        configure_runtime_libraries()
         try:
             from vllm import LLM
         except ImportError:
@@ -86,21 +143,6 @@ class VLLMInference:
                         )
             except Exception:
                 pass  # Silently skip if CUDA detection fails
-
-        # Set CUDA_VISIBLE_DEVICES to target the desired physical GPU.
-        # cuda_device is always treated as a physical GPU ID.
-        # Each vLLM instance spawns its own child process (EngineCore)
-        # which inherits CUDA_VISIBLE_DEVICES at spawn time, so we can
-        # safely change it between model loads without affecting already-
-        # running engines.
-        if self._cuda_device is not None:
-            target_physical = str(self._cuda_device)
-            os.environ["CUDA_VISIBLE_DEVICES"] = target_physical
-            logger.info(
-                f"Loading model on physical GPU {target_physical}: {self.model_name}"
-            )
-        else:
-            logger.info(f"Loading model: {self.model_name}")
 
         self._llm = LLM(self.model_name, **self._init_kwargs)
         self._tokenizer = self._llm.get_tokenizer()

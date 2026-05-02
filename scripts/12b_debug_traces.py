@@ -21,9 +21,20 @@ STEP_DEFAULTS = {
     "model_name": "Qwen/Qwen2.5-7B-Instruct",
     "dataset": "mmlu",
     "seed": 42,
-    "device": 6,
+    "evaluation_mode": "single_gpu",
+    "evaluation_modes": {
+        "single_gpu": {
+            "devices": [6],
+            "tensor_parallel_size": 1,
+            "gpu_memory_utilization": 0.60,
+        },
+        "dual_gpu": {
+            "devices": [6, 7],
+            "tensor_parallel_size": 2,
+            "gpu_memory_utilization": 0.80,
+        },
+    },
     "dtype": "bfloat16",
-    "gpu_memory_utilization": 0.60,
     "max_model_len": 4096,
     "society_dir": "output/society_mmlu/society",
     "output_dir": "output/society_mmlu/eval",
@@ -66,16 +77,22 @@ def main():
     from importlib import import_module
     eval_module = import_module("scripts.12_society_evaluate")
     _build_agent_configs = eval_module._build_agent_configs
+    runtime = eval_module.resolve_evaluation_runtime(args)
 
     from src.inference.vllm_server import VLLMInference
     total_lora = len(all_actor_names) + len(all_critic_names)
 
-    logger.info("Loading engine...")
+    logger.info(
+        f"Loading engine with evaluation mode {runtime.mode} "
+        f"(devices={runtime.devices}, "
+        f"tensor_parallel_size={runtime.tensor_parallel_size})..."
+    )
     engine = VLLMInference(
         base_model,
-        cuda_device=args.device,
+        cuda_device=runtime.devices,
+        tensor_parallel_size=runtime.tensor_parallel_size,
         dtype=args.dtype,
-        gpu_memory_utilization=args.gpu_memory_utilization,
+        gpu_memory_utilization=runtime.gpu_memory_utilization,
         max_model_len=args.max_model_len,
         enable_lora=True,
         max_loras=total_lora,

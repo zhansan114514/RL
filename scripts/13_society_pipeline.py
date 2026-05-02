@@ -27,6 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from _utils import setup_logging
 from src.utils.config import ConfigManager
+from src.utils.runtime_env import configure_runtime_libraries
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -232,6 +233,7 @@ def _build_subprocess_env(phase_num: int, config_path: str) -> dict[str, str]:
     """Build subprocess env and share the GLM key with strict classification phases."""
     scripts_dir = os.path.dirname(os.path.abspath(__file__))
     sub_env = {**os.environ, "PYTHONPATH": os.path.dirname(scripts_dir)}
+    configure_runtime_libraries(sub_env, preload=False)
     if phase_num in {4, 5} and not sub_env.get("GLM_API_KEY"):
         api_key = _get_api_key_from_config(config_path)
         if api_key:
