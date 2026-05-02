@@ -152,6 +152,9 @@ def society_alternating_train(
     strict_classification: bool = True,
     max_classification_failure_rate: float = 0.0,
     max_classification_workers: int = 4,
+    request_timeout: int | float = 30,
+    max_retries: int = 5,
+    retry_delay: int | float = 5,
 ) -> SocietyTrainingResult:
     """
     Train N Actors + M Critics in alternating fashion.
@@ -290,6 +293,9 @@ def society_alternating_train(
                 strict_classification=strict_classification,
                 max_classification_failure_rate=max_classification_failure_rate,
                 max_classification_workers=max_classification_workers,
+                request_timeout=request_timeout,
+                max_retries=max_retries,
+                retry_delay=retry_delay,
                 min_specialty_items=min_specialty_items,
                 min_specialty_ratio=min_specialty_ratio,
                 specialty_ratio=specialty_ratio,
@@ -444,6 +450,9 @@ def society_alternating_train(
                 api_model=api_model,
                 strict_classification=strict_classification,
                 max_classification_failure_rate=max_classification_failure_rate,
+                request_timeout=request_timeout,
+                max_retries=max_retries,
+                retry_delay=retry_delay,
             )
 
             if not preference_pairs:
@@ -672,6 +681,9 @@ def _generate_critic_pairs_algorithm1(
     strict_classification: bool = True,
     max_classification_failure_rate: float = 0.0,
     max_classification_workers: int = 4,
+    request_timeout: int | float = 30,
+    max_retries: int = 5,
+    retry_delay: int | float = 5,
     min_specialty_items: int = 32,
     min_specialty_ratio: float = 0.08,
     specialty_ratio: float = 0.7,
@@ -828,6 +840,9 @@ def _generate_critic_pairs_algorithm1(
                 strict_classification=strict_classification,
                 max_classification_failure_rate=max_classification_failure_rate,
                 max_classification_workers=max_classification_workers,
+                request_timeout=request_timeout,
+                max_retries=max_retries,
+                retry_delay=retry_delay,
             )
             routed_items = splitter.split_by_error_profile(
                 samples=[p["sample"] for p in raw_pairs],
@@ -966,6 +981,9 @@ def _generate_actor_pairs_algorithm1(
     api_model: str = "",
     strict_classification: bool = True,
     max_classification_failure_rate: float = 0.0,
+    request_timeout: int | float = 30,
+    max_retries: int = 5,
+    retry_delay: int | float = 5,
 ) -> list[dict]:
     """Generate Actor DPO preference pairs using Algorithm 1 from trajectory.py.
 
@@ -1112,6 +1130,9 @@ def _generate_actor_pairs_algorithm1(
                         api_key=api_key,
                         api_base=api_base,
                         api_model=api_model,
+                        request_timeout=request_timeout,
+                        max_retries=max_retries,
+                        retry_delay=retry_delay,
                     )
                     style_cache[key] = result.style
                     n_ok += 1

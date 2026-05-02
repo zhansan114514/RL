@@ -254,11 +254,15 @@ class ConfigManager:
                     "api_key": ("api_key", "key"),
                     "api_base": ("api_base", "base_url", "base"),
                     "api_model": ("api_model", "model"),
+                    "request_timeout": ("request_timeout", "timeout"),
+                    "retry_delay": ("retry_delay",),
+                    "max_retries": ("max_retries",),
+                    "api_temperature": ("api_temperature", "temperature"),
                 }
                 for target, aliases in api_aliases.items():
                     for alias in aliases:
                         value = api_cfg.get(alias)
-                        if value:
+                        if value is not None and value != "":
                             merged[target] = value
                             break
                 provider = api_cfg.get("provider")
@@ -287,11 +291,15 @@ class ConfigManager:
                         "api_key": ("api_key", "key"),
                         "api_base": ("api_base", "base_url", "base"),
                         "api_model": ("api_model", "model"),
+                        "request_timeout": ("request_timeout", "timeout"),
+                        "retry_delay": ("retry_delay",),
+                        "max_retries": ("max_retries",),
+                        "api_temperature": ("api_temperature", "temperature"),
                     }
                     for target, aliases in provider_aliases.items():
                         for alias in aliases:
                             value = provider_cfg.get(alias)
-                            if value:
+                            if value is not None and value != "":
                                 merged[target] = value
                                 break
 

@@ -3,6 +3,12 @@
 
 api:
   provider: "glm"  # "glm" or "gpt"
+  api_base: "https://api.labforge.top"
+  api_model: "gpt5.5"
+  request_timeout: 60
+  retry_delay: 5
+  max_retries: 5
+  api_temperature: 0.1
 # 通用参数：可被多个步骤复用
 common:
   # 基座模型名称或本地路径

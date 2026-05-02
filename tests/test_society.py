@@ -1006,6 +1006,54 @@ class TestClassificationError:
                             cache_dir=tmpdir,
                         )
 
+    def test_call_api_retries_timeout_then_succeeds(self):
+        """Transient timeouts should be retried before failing classification."""
+        import requests
+        from src.society import data_classifier
+
+        first = requests.exceptions.Timeout("slow")
+        response = MagicMock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "choices": [{"message": {"content": "ALGEBRAIC"}}],
+        }
+
+        with patch("requests.post", side_effect=[first, response]) as mock_post:
+            with patch("src.society.data_classifier.time.sleep") as mock_sleep:
+                result = data_classifier._call_api(
+                    "prompt",
+                    api_key="key",
+                    request_timeout=1,
+                    max_retries=2,
+                    retry_delay=0,
+                )
+
+        assert result == "ALGEBRAIC"
+        assert mock_post.call_count == 2
+        mock_sleep.assert_not_called()
+
+    def test_call_api_does_not_retry_unauthorized(self):
+        """Permanent HTTP errors should fail immediately."""
+        import requests
+        from src.society import data_classifier
+
+        response = MagicMock(status_code=401)
+        error = requests.exceptions.HTTPError("401 Client Error")
+        error.response = response
+        response.raise_for_status.side_effect = error
+
+        with patch("requests.post", return_value=response) as mock_post:
+            with pytest.raises(ClassificationError, match="API HTTP error"):
+                data_classifier._call_api(
+                    "prompt",
+                    api_key="key",
+                    request_timeout=1,
+                    max_retries=5,
+                    retry_delay=0,
+                )
+
+        assert mock_post.call_count == 1
+
     def test_check_api_available_no_key(self):
         """check_api_available should return False when no key is set."""
         with patch("src.society.data_classifier.DEFAULT_API_KEY", ""):

@@ -217,6 +217,60 @@ step02_classify:
         assert step.get("api_base") == "https://api.step.test"
         assert step.get("api_model") == "default-model"
 
+    def test_step_inherits_api_retry_settings(self, tmp_path):
+        """API retry settings should be available to classification steps."""
+        experiment = tmp_path / "experiment.yaml"
+        experiment.write_text("""
+api:
+  api_base: https://api.default.test
+  api_model: default-model
+  request_timeout: 90
+  retry_delay: 7
+  max_retries: 5
+  api_temperature: 0.2
+step02_classify:
+  output_dir: out
+""")
+
+        cfg = ConfigManager.initialize(config_path=str(experiment), load_local=False)
+        step = cfg.step("step02_classify")
+
+        assert step.get("request_timeout") == 90
+        assert step.get("retry_delay") == 7
+        assert step.get("max_retries") == 5
+        assert step.get("api_temperature") == 0.2
+
+    def test_step_provider_overrides_api_retry_settings(self, tmp_path):
+        """Provider-specific retry settings should override step/API defaults."""
+        experiment = tmp_path / "experiment.yaml"
+        experiment.write_text("""
+api:
+  provider: gpt
+  request_timeout: 60
+  max_retries: 3
+  providers:
+    gpt:
+      api_key: secret
+      api_base: https://api.provider.test
+      api_model: provider-model
+      request_timeout: 120
+      retry_delay: 9
+      max_retries: 6
+      api_temperature: 0.0
+step02_classify:
+  output_dir: out
+  request_timeout: 30
+""")
+
+        cfg = ConfigManager.initialize(config_path=str(experiment), load_local=False)
+        step = cfg.step("step02_classify")
+
+        assert step.get("api_base") == "https://api.provider.test"
+        assert step.get("request_timeout") == 120
+        assert step.get("retry_delay") == 9
+        assert step.get("max_retries") == 6
+        assert step.get("api_temperature") == 0.0
+
 
 class TestStepConfig:
     """Test StepConfig class."""

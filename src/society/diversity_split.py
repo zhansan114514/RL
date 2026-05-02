@@ -80,6 +80,9 @@ class DiversitySplit:
         strict_classification: bool = False,
         max_classification_failure_rate: float = 0.0,
         max_classification_workers: int = 4,
+        request_timeout: int | float = 30,
+        max_retries: int = 5,
+        retry_delay: int | float = 5,
     ):
         self.balance = balance
         self.rng = np.random.default_rng(seed)
@@ -93,6 +96,9 @@ class DiversitySplit:
         self.strict_classification = strict_classification
         self.max_classification_failure_rate = max(0.0, max_classification_failure_rate)
         self.max_classification_workers = max(1, int(max_classification_workers))
+        self.request_timeout = request_timeout
+        self.max_retries = max_retries
+        self.retry_delay = retry_delay
         self.last_classification_metrics: dict[str, dict] = {}
 
         if pre_classified_file:
@@ -277,6 +283,9 @@ class DiversitySplit:
                         api_key=self._api_key,
                         api_base=self._api_base,
                         api_model=self._api_model,
+                        request_timeout=self.request_timeout,
+                        max_retries=self.max_retries,
+                        retry_delay=self.retry_delay,
                     )
                     style = result.style
                 except ClassificationError as e:
@@ -403,6 +412,9 @@ class DiversitySplit:
                     api_key=self._api_key,
                     api_base=self._api_base,
                     api_model=self._api_model,
+                    request_timeout=self.request_timeout,
+                    max_retries=self.max_retries,
+                    retry_delay=self.retry_delay,
                 )
                 return payload["indices"], {
                     "scores": result.scores,

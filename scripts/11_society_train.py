@@ -71,6 +71,9 @@ STEP_DEFAULTS = {
     "strict_classification": True,
     "max_classification_failure_rate": 0.0,
     "max_classification_workers": 4,
+    "request_timeout": 60,
+    "retry_delay": 5,
+    "max_retries": 5,
 }
 
 
@@ -347,6 +350,9 @@ def main():
         strict_classification=getattr(args, "strict_classification", True),
         max_classification_failure_rate=getattr(args, "max_classification_failure_rate", 0.0),
         max_classification_workers=getattr(args, "max_classification_workers", 4),
+        request_timeout=getattr(args, "request_timeout", 60),
+        max_retries=getattr(args, "max_retries", 5),
+        retry_delay=getattr(args, "retry_delay", 5),
     )
 
     # Save final registry

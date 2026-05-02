@@ -31,6 +31,13 @@ step02_classify:
   output_dir: "output/society_mmlu/classified"
   api_base: "https://api.labforge.top"
   api_model: "gpt5.5"
+  request_timeout: 60
+  retry_delay: 5
+  max_retries: 5
+  api_temperature: 0.1
+  batch_size: 10
+  strict_classification: true
+  max_classification_failure_rate: 0.0
   use_batch_api: true
   batch_api_max_responses: 20
   max_workers: 4
@@ -55,12 +62,55 @@ step04_diversify_critics:
   output_dir: "output/society_mmlu/critics"
   api_base: "https://api.labforge.top"
   api_model: "gpt5.5"
+  request_timeout: 60
+  retry_delay: 5
+  max_retries: 5
+  api_temperature: 0.1
   critic_skills: ["reasoning", "knowledge", "computation", "verification"]
   max_delib_samples: 100
   num_rounds: 3
   num_simulations: 2
   max_classification_workers: 4
   max_tokens: 192
+  reward_threshold: 0.0
+  min_pairs_per_critic: 64
+  min_specialty_items: 32
+  min_specialty_ratio: 0.08
+  specialty_ratio: 0.7
+  general_ratio: 0.2
+  calibration_ratio: 0.1
+  gradient_accumulation_steps: 4
+  lora_r: 64
+  lora_alpha: 128
+  learning_rate: 5.0e-5
+  beta: 0.1
+  batch_size: 4
+  num_epochs: 1
+  max_length: 2048
+  max_lora_rank: 256
+  strict_classification: true
+  max_classification_failure_rate: 0.0
+
+# Phase 5: Society alternating training
+step05_train_society:
+  actor_base_dir: "output/society_mmlu/actors"
+  critic_base_dir: "output/society_mmlu/critics"
+  output_dir: "output/society_mmlu/society"
+  api_base: "https://api.labforge.top"
+  api_model: "gpt5.5"
+  request_timeout: 60
+  retry_delay: 5
+  max_retries: 5
+  api_temperature: 0.1
+  num_iterations: 1
+  num_rounds: 2
+  num_simulations: 2
+  max_classification_workers: 4
+  trajectory_max_tokens: 192
+  reward_threshold: 0.0
+  actor_temperature: 0.7
+  actor_max_tokens: 192
+  critic_max_tokens: 192
   min_pairs_per_critic: 64
   min_specialty_items: 32
   min_specialty_ratio: 0.08
@@ -74,28 +124,9 @@ step04_diversify_critics:
   batch_size: 4
   num_epochs: 1
   max_length: 2048
-
-# Phase 5: Society alternating training
-step05_train_society:
-  actor_base_dir: "output/society_mmlu/actors"
-  critic_base_dir: "output/society_mmlu/critics"
-  output_dir: "output/society_mmlu/society"
-  api_base: "https://api.labforge.top"
-  api_model: "gpt5.5"
-  num_iterations: 1
-  num_rounds: 2
-  num_simulations: 2
-  max_classification_workers: 4
-  trajectory_max_tokens: 192
-  reward_threshold: 0.0
-  lora_r: 64
-  lora_alpha: 128
-  learning_rate: 5.0e-5
-  beta: 0.1
-  batch_size: 4
-  num_epochs: 1
-  max_length: 2048
   checkpoint_dir: "output/society_mmlu/checkpoints"
+  strict_classification: true
+  max_classification_failure_rate: 0.0
 
 # Phase 6: Evaluation + ablation
 step06_evaluate:

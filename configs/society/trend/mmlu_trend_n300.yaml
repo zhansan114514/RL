@@ -33,7 +33,7 @@ step02_classify:
   batch_size: 10
   request_timeout: 90
   retry_delay: 5
-  max_retries: 3
+  max_retries: 5
   api_temperature: 0.1
   strict_classification: true
   max_classification_failure_rate: 0.0
@@ -84,6 +84,10 @@ step04_diversify_critics:
   strict_classification: true
   max_classification_failure_rate: 0.0
   max_classification_workers: 4
+  request_timeout: 90
+  retry_delay: 5
+  max_retries: 5
+  api_temperature: 0.1
 
 # Phase 5: Society alternating training
 step05_train_society:
@@ -116,6 +120,10 @@ step05_train_society:
   strict_classification: true
   max_classification_failure_rate: 0.0
   max_classification_workers: 4
+  request_timeout: 90
+  retry_delay: 5
+  max_retries: 5
+  api_temperature: 0.1
 
 # Phase 6: Evaluation + ablation
 step06_evaluate:

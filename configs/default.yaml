@@ -14,3 +14,7 @@ training:
 api:
   api_base: "https://api.labforge.top"
   api_model: "gpt5.5"
+  request_timeout: 60
+  retry_delay: 5
+  max_retries: 5
+  api_temperature: 0.1

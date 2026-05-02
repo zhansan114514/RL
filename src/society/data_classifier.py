@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -63,6 +64,9 @@ class ErrorProfileResult:
 DEFAULT_API_URL = "https://api.labforge.top/v1/chat/completions"
 DEFAULT_API_KEY = os.environ.get("GLM_API_KEY", "")
 DEFAULT_API_MODEL = "gpt5.5"
+DEFAULT_REQUEST_TIMEOUT = 30
+DEFAULT_MAX_RETRIES = 5
+DEFAULT_RETRY_DELAY = 5.0
 
 
 def normalize_chat_api_url(api_url: str) -> str:
@@ -201,8 +205,11 @@ def _call_api(
     api_key: str = DEFAULT_API_KEY,
     model: str = DEFAULT_API_MODEL,
     max_tokens: int = 64,
+    request_timeout: int | float = DEFAULT_REQUEST_TIMEOUT,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    retry_delay: int | float = DEFAULT_RETRY_DELAY,
 ) -> str:
-    """Call GLM API for classification (OpenAI-compatible endpoint).
+    """Call GLM API for classification with retries.
 
     Raises ClassificationError on any failure instead of silently
     returning None.
@@ -219,38 +226,70 @@ def _call_api(
         )
 
     api_url = normalize_chat_api_url(api_url)
+    attempts = max(1, int(max_retries))
+    base_delay = max(0.0, float(retry_delay))
+    timeout = max(1.0, float(request_timeout))
+    last_error = ""
 
-    try:
-        response = requests.post(
-            api_url,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.1,
-                "max_tokens": max_tokens,
-            },
-            timeout=30,
+    def _retryable_http_error(exc: Exception) -> bool:
+        response = getattr(exc, "response", None)
+        status_code = getattr(response, "status_code", None)
+        return status_code == 429 or (status_code is not None and 500 <= status_code < 600)
+
+    for attempt in range(attempts):
+        try:
+            response = requests.post(
+                api_url,
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "max_tokens": max_tokens,
+                },
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+            if content is None:
+                raise ClassificationError("API returned null content (possible content filter)")
+            result = content.strip()
+            return result
+        except requests.exceptions.Timeout as e:
+            last_error = f"API request timed out: {e}"
+            retryable = True
+        except requests.exceptions.ConnectionError as e:
+            last_error = f"Cannot connect to API: {e}"
+            retryable = True
+        except requests.exceptions.HTTPError as e:
+            last_error = f"API HTTP error: {e}"
+            retryable = _retryable_http_error(e)
+            if not retryable:
+                raise ClassificationError(last_error) from e
+        except ClassificationError:
+            raise
+        except (KeyError, IndexError, AttributeError) as e:
+            raise ClassificationError(f"Unexpected API response format: {e}") from e
+        except Exception as e:
+            raise ClassificationError(f"API call failed: {e}") from e
+
+        if not retryable or attempt == attempts - 1:
+            break
+
+        delay = base_delay * (2 ** attempt)
+        logger.warning(
+            "API classification call failed "
+            f"(attempt {attempt + 1}/{attempts}); retrying in {delay:.1f}s: {last_error}"
         )
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-        if content is None:
-            raise ClassificationError("API returned null content (possible content filter)")
-        result = content.strip()
-        return result
-    except requests.exceptions.ConnectionError as e:
-        raise ClassificationError(f"Cannot connect to API: {e}") from e
-    except requests.exceptions.Timeout:
-        raise ClassificationError("API request timed out")
-    except requests.exceptions.HTTPError as e:
-        raise ClassificationError(f"API HTTP error: {e}") from e
-    except (KeyError, IndexError, AttributeError) as e:
-        raise ClassificationError(f"Unexpected API response format: {e}") from e
-    except Exception as e:
-        raise ClassificationError(f"API call failed: {e}") from e
+        if delay > 0:
+            time.sleep(delay)
+
+    raise ClassificationError(
+        f"API classification failed after {attempts} attempts: {last_error}"
+    )
 
 
 # ============================================================
@@ -458,6 +497,9 @@ def classify_reasoning_style(
     api_key: str = "",
     api_base: str = "",
     api_model: str = "",
+    request_timeout: int | float = DEFAULT_REQUEST_TIMEOUT,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    retry_delay: int | float = DEFAULT_RETRY_DELAY,
 ) -> ReasoningStyleResult:
     """
     Classify the reasoning style of a correct response.
@@ -490,6 +532,9 @@ def classify_reasoning_style(
             api_url=api_base or DEFAULT_API_URL,
             api_key=api_key or DEFAULT_API_KEY,
             model=api_model or DEFAULT_API_MODEL,
+            request_timeout=request_timeout,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
         )
         style = _parse_style_response(api_response)
 
@@ -530,6 +575,9 @@ def classify_error_profile(
     api_key: str = "",
     api_base: str = "",
     api_model: str = "",
+    request_timeout: int | float = DEFAULT_REQUEST_TIMEOUT,
+    max_retries: int = DEFAULT_MAX_RETRIES,
+    retry_delay: int | float = DEFAULT_RETRY_DELAY,
 ) -> ErrorProfileResult:
     """
     Classify the multi-dimensional error profile of an incorrect response.
@@ -588,6 +636,9 @@ def classify_error_profile(
             api_key=api_key or DEFAULT_API_KEY,
             model=api_model or DEFAULT_API_MODEL,
             max_tokens=512,
+            request_timeout=request_timeout,
+            max_retries=max_retries,
+            retry_delay=retry_delay,
         )
         profile = _parse_error_profile_response(api_response)
 
@@ -621,10 +672,16 @@ class DataClassifier:
         api_key: str = "",
         api_base: str = "",
         api_model: str = "",
+        request_timeout: int | float = DEFAULT_REQUEST_TIMEOUT,
+        max_retries: int = DEFAULT_MAX_RETRIES,
+        retry_delay: int | float = DEFAULT_RETRY_DELAY,
     ):
         self._api_key = api_key
         self._api_base = api_base
         self._api_model = api_model
+        self._request_timeout = request_timeout
+        self._max_retries = max_retries
+        self._retry_delay = retry_delay
 
     def classify_reasoning_style(
         self, response: str, question: str, correct_answer: str = "",
@@ -635,6 +692,9 @@ class DataClassifier:
             api_key=self._api_key,
             api_base=self._api_base,
             api_model=self._api_model,
+            request_timeout=self._request_timeout,
+            max_retries=self._max_retries,
+            retry_delay=self._retry_delay,
         )
 
     def classify_error_profile(
@@ -658,4 +718,7 @@ class DataClassifier:
             api_key=self._api_key,
             api_base=self._api_base,
             api_model=self._api_model,
+            request_timeout=self._request_timeout,
+            max_retries=self._max_retries,
+            retry_delay=self._retry_delay,
         )

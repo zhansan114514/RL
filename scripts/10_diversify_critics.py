@@ -76,6 +76,9 @@ STEP_DEFAULTS = {
     "strict_classification": True,
     "max_classification_failure_rate": 0.0,
     "max_classification_workers": 4,
+    "request_timeout": 60,
+    "retry_delay": 5,
+    "max_retries": 5,
 }
 
 
@@ -369,6 +372,9 @@ def route_critic_raw_pairs(
     strict_classification: bool,
     max_classification_failure_rate: float,
     max_classification_workers: int,
+    request_timeout: int | float,
+    max_retries: int,
+    retry_delay: int | float,
 ):
     """Route the shared raw-pair pool by error profile once."""
     from src.society.diversity_split import DiversitySplit
@@ -387,6 +393,9 @@ def route_critic_raw_pairs(
         strict_classification=strict_classification,
         max_classification_failure_rate=max_classification_failure_rate,
         max_classification_workers=max_classification_workers,
+        request_timeout=request_timeout,
+        max_retries=max_retries,
+        retry_delay=retry_delay,
     )
     routed_items = splitter.split_by_error_profile(
         samples=[p["sample"] for p in raw_pairs],
@@ -886,6 +895,9 @@ def main():
                 strict_classification=getattr(args, "strict_classification", True),
                 max_classification_failure_rate=getattr(args, "max_classification_failure_rate", 0.0),
                 max_classification_workers=getattr(args, "max_classification_workers", 4),
+                request_timeout=getattr(args, "request_timeout", 60),
+                max_retries=getattr(args, "max_retries", 5),
+                retry_delay=getattr(args, "retry_delay", 5),
             )
             _write_pool_cache(
                 routed_pool_cache,

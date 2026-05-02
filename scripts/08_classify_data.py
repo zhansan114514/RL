@@ -53,7 +53,7 @@ STEP_DEFAULTS = {
     "batch_size": 10,
     "request_timeout": 30,
     "retry_delay": 5,
-    "max_retries": 3,
+    "max_retries": 5,
     "api_temperature": 0.1,
     "input_dir": "output/society/bootstrap",
     "output_dir": "output/society/classified",
@@ -101,7 +101,7 @@ class GLMClassifier:
         api_base: str,
         model: str,
         timeout: int = 30,
-        max_retries: int = 3,
+        max_retries: int = 5,
         retry_delay: int = 5,
         temperature: float = 0.1,
     ):
@@ -841,6 +841,9 @@ def classify_label_single(
                 api_key=classifier.api_key,
                 api_base=classifier.api_base,
                 api_model=classifier.model,
+                request_timeout=classifier.timeout,
+                max_retries=classifier.max_retries,
+                retry_delay=classifier.retry_delay,
             )
             label["reasoning_style"] = result.style.value
             label["reasoning_style_confidence"] = result.confidence
@@ -859,6 +862,9 @@ def classify_label_single(
                 api_key=classifier.api_key,
                 api_base=classifier.api_base,
                 api_model=classifier.model,
+                request_timeout=classifier.timeout,
+                max_retries=classifier.max_retries,
+                retry_delay=classifier.retry_delay,
             )
             label["error_profile"] = {
                 "scores": result.scores,
