@@ -38,12 +38,13 @@ STEP_DEFAULTS = {
     "temperature": 0.8,
     "max_tokens": 1024,
     "seed": 42,
-    "max_samples": None,
     "batch_size": 8,
     "dtype": "bfloat16",
     "gpu_memory_utilization": 0.85,
     "max_model_len": 4096,
     "device": 0,
+    "sampling": None,
+    "mmlu_load_mode": "by_subject",
 }
 
 
@@ -428,15 +429,20 @@ def main():
     logger.info("[Step 1] Loading dataset...")
     from src.data.loader import load_dataset
 
-    data = load_dataset(args.dataset, seed=args.seed)
+    data = load_dataset(
+        args.dataset,
+        seed=args.seed,
+        sampling=getattr(args, "sampling", None),
+        mmlu_load_mode=getattr(args, "mmlu_load_mode", "by_subject"),
+    )
     train_data = data.get("train", [])
     test_data = data.get("test", [])
 
     # Use TRAIN data for bootstrap to avoid data leakage.
     samples = train_data if train_data else test_data
 
-    if args.max_samples:
-        samples = samples[:args.max_samples]
+    if not samples:
+        raise ValueError(f"No data loaded for dataset={args.dataset}")
 
     logger.info(f"  Loaded {len(samples)} samples")
 

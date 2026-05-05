@@ -41,8 +41,9 @@ STEP_DEFAULTS = {
     "num_rounds": 2,
     "max_tokens": 512,
     "temperature": 0.7,
-    "max_samples": None,
     "router_top_k": 2,
+    "sampling": None,
+    "mmlu_load_mode": "by_subject",
 }
 
 
@@ -68,10 +69,15 @@ def main():
 
     # Load dataset
     from src.data.loader import load_dataset as load_data
-    data = load_data(args.dataset, seed=args.seed)
-    samples = data.get("test", []) or data.get("validation", [])
-    if args.max_samples:
-        samples = samples[:args.max_samples]
+    data = load_data(
+        args.dataset, seed=args.seed,
+        sampling=getattr(args, "sampling", None),
+        mmlu_load_mode=getattr(args, "mmlu_load_mode", "by_subject"),
+    )
+    samples = data.get("test", [])
+
+    if not samples:
+        raise ValueError(f"Test split is empty for dataset={args.dataset}")
 
     # First, run all samples to find wrong ones
     from importlib import import_module

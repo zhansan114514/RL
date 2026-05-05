@@ -248,6 +248,25 @@ class ConfigManager:
                     if value is not None:
                         merged[key] = value
 
+            # Merge top-level data: section, flattening nested keys
+            # e.g., data.mmlu.load_mode -> merged["mmlu_load_mode"]
+            data_cfg = cfg_dict.get("data", {})
+            if isinstance(data_cfg, dict):
+                for section_key, section_val in data_cfg.items():
+                    if section_val is None:
+                        continue
+                    if isinstance(section_val, dict):
+                        for sub_key, sub_val in section_val.items():
+                            if sub_val is not None:
+                                merged[f"{section_key}_{sub_key}"] = sub_val
+                    else:
+                        merged[section_key] = section_val
+
+            # Merge top-level sampling: section as a dict
+            sampling_cfg = cfg_dict.get("sampling", {})
+            if isinstance(sampling_cfg, dict) and sampling_cfg:
+                merged["sampling"] = sampling_cfg
+
             api_cfg = cfg_dict.get("api", {})
             if isinstance(api_cfg, dict):
                 api_aliases = {

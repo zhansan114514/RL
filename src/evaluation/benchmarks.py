@@ -132,6 +132,11 @@ def evaluate_benchmark_batch(
 
             sample_details.append({
                 "index": i,
+                "dataset": sample.get("dataset", dataset_name),
+                "source_split": sample.get("source_split", ""),
+                "source_index": sample.get("source_index", None),
+                "subject": sample.get("subject", "unknown"),
+                "category": sample.get("category", "unknown"),
                 "initial_answer": initial_pred,
                 "final_answer": final_pred,
                 "initial_extract_source": (
@@ -211,12 +216,54 @@ def evaluate_benchmark_batch(
         "eval_time_seconds": round(eval_elapsed, 1),
         "avg_time_per_sample": round(eval_elapsed / max(len(test_samples), 1), 2),
         "sample_details": sample_details,
+        "per_subject_metrics": compute_group_metrics(sample_details, "subject"),
     }
 
     # Print comprehensive results table
     _print_results_table(results)
 
     return results
+
+
+def compute_group_metrics(
+    sample_details: list[dict],
+    group_key: str = "subject",
+) -> dict[str, dict]:
+    """Compute per-group accuracy metrics from sample details.
+
+    Args:
+        sample_details: List of per-sample evaluation dicts.
+        group_key: Key to group by (e.g. "subject", "category").
+
+    Returns:
+        Dict mapping group name to metrics dict.
+    """
+    groups: dict[str, list[dict]] = {}
+    for item in sample_details:
+        group = item.get(group_key) or "unknown"
+        groups.setdefault(group, []).append(item)
+
+    result: dict[str, dict] = {}
+    for group, items in sorted(groups.items()):
+        n = len(items)
+        initial_correct = sum(1 for x in items if x["initially_correct"])
+        final_correct = sum(1 for x in items if x["finally_correct"])
+        flipped_to_correct = sum(1 for x in items if x["flipped_to_correct"])
+        flipped_to_wrong = sum(1 for x in items if x["flipped_to_wrong"])
+
+        result[group] = {
+            "num_samples": n,
+            "initial_accuracy": initial_correct / n if n else 0.0,
+            "final_accuracy": final_correct / n if n else 0.0,
+            "absolute_improvement": (
+                final_correct / n - initial_correct / n
+                if n else 0.0
+            ),
+            "flipped_to_correct": flipped_to_correct,
+            "flipped_to_wrong": flipped_to_wrong,
+        }
+
+    return result
 
 
 def _print_results_table(results: dict) -> None:

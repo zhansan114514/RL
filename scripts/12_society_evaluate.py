@@ -44,7 +44,6 @@ STEP_DEFAULTS = {
     "cache_dir": "output/society",
     "society_dir": "output/society/society",
     "output_dir": "output/society/eval",
-    "max_samples": 200,
     "num_rounds": 2,
     "max_tokens": 1024,
     "temperature": 0.0,
@@ -69,6 +68,8 @@ STEP_DEFAULTS = {
     "router_top_k": 2,
     "router_min_confidence": 0.1,
     "router_fallback_to_uniform": False,
+    "sampling": None,
+    "mmlu_load_mode": "by_subject",
 }
 
 
@@ -184,15 +185,23 @@ def load_society_registry(society_dir: str) -> Dict[str, Any]:
         return json.load(f)
 
 
-def load_dataset(dataset_name: str, seed: int, max_samples: Optional[int]) -> List[Dict]:
-    """Load test dataset."""
+def load_eval_dataset(dataset_name: str, seed: int, sampling: Optional[dict] = None, mmlu_load_mode: str = "by_subject") -> List[Dict]:
+    """Load evaluation dataset (test split)."""
     from src.data.loader import load_dataset
 
-    data = load_dataset(dataset_name, seed=seed)
-    test_data = data.get("test", []) or data.get("validation", [])
+    data = load_dataset(
+        dataset_name,
+        seed=seed,
+        sampling=sampling,
+        mmlu_load_mode=mmlu_load_mode,
+    )
+    test_data = data.get("test", [])
 
-    if max_samples:
-        test_data = test_data[:max_samples]
+    if not test_data:
+        raise ValueError(
+            f"Test split is empty for dataset={dataset_name}. "
+            f"Check data loading configuration."
+        )
 
     return test_data
 
@@ -892,7 +901,11 @@ def main():
 
     # Load dataset
     logger.info("[Step 2] Loading dataset...")
-    samples = load_dataset(args.dataset, args.seed, args.max_samples)
+    samples = load_eval_dataset(
+        args.dataset, args.seed,
+        sampling=getattr(args, "sampling", None),
+        mmlu_load_mode=getattr(args, "mmlu_load_mode", "by_subject"),
+    )
     logger.info(f"  Test samples: {len(samples)}")
 
     # Run all evaluations with shared engine

@@ -12,11 +12,28 @@ common:
   dataset: "mmlu"
   cache_dir: "output/society_mmlu_large_n1000"
   seed: 42
-  max_samples: 1000
   device: 4
   dtype: "bfloat16"
   gpu_memory_utilization: 0.80
   max_model_len: 4096
+
+data:
+  mmlu:
+    load_mode: "by_subject"
+
+sampling:
+  train:
+    strategy: "random"
+    max_samples: 1000
+    seed_offset: 0
+  validation:
+    strategy: "stratified_by_subject"
+    max_samples: 1000
+    seed_offset: 1
+  test:
+    strategy: "full"
+    max_samples: null
+    seed_offset: 2
 
 # Phase 1: Bootstrap data generation
 step01_bootstrap:

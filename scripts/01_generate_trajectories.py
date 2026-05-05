@@ -31,12 +31,13 @@ STEP_DEFAULTS = {
     "reward_threshold": 0.0,
     "max_tokens": 256,
     "temperature": 0.7,
-    "max_samples": None,
     "seed": 42,
     "actor_device": 0,
     "critic_device": 0,
     "dtype": "float32",
     "gpu_memory_utilization": 0.45,
+    "sampling": None,
+    "mmlu_load_mode": "by_subject",
 }
 
 
@@ -60,10 +61,17 @@ def main():
     logger.info(f"Loading dataset: {args.dataset}")
     from src.data.loader import load_dataset
 
-    data = load_dataset(args.dataset, seed=args.seed)
-    train_data = data.get("train", [])
-    if args.max_samples:
-        train_data = train_data[:args.max_samples]
+    data = load_dataset(
+        args.dataset,
+        seed=args.seed,
+        sampling=getattr(args, "sampling", None),
+        mmlu_load_mode=getattr(args, "mmlu_load_mode", "by_subject"),
+    )
+    train_data = data["train"]
+
+    if not train_data:
+        raise ValueError(f"No training data loaded for dataset={args.dataset}")
+
     logger.info(f"  Samples: {len(train_data)}")
 
     logger.info(f"Loading model: {args.model_name}")

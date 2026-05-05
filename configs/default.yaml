@@ -18,3 +18,21 @@ api:
   retry_delay: 5
   max_retries: 5
   api_temperature: 0.1
+
+data:
+  mmlu:
+    load_mode: "by_subject"
+
+sampling:
+  train:
+    strategy: "full"
+    max_samples: null
+    seed_offset: 0
+  validation:
+    strategy: "full"
+    max_samples: null
+    seed_offset: 1
+  test:
+    strategy: "full"
+    max_samples: null
+    seed_offset: 2

@@ -29,13 +29,15 @@ STEP_DEFAULTS = {
     "num_rounds": 5,
     "max_tokens": 256,
     "temperature": 0.7,
-    "max_samples": None,
     "seed": 42,
     "actor_device": 0,
     "critic_device": 0,
     "dtype": "float32",
     "gpu_memory_utilization": 0.45,
     "max_model_len": 4096,
+    "eval_split": "test",
+    "sampling": None,
+    "mmlu_load_mode": "by_subject",
 }
 
 
@@ -68,18 +70,25 @@ def main():
         logger.error("Please run scripts/train.py --agent critic first")
         raise FileNotFoundError(f"Critic model not found: {critic_path}")
 
+    eval_split = getattr(args, "eval_split", "test")
+
     logger.info(f"Loading dataset: {args.dataset}")
     from src.data.loader import load_dataset
 
-    data = load_dataset(args.dataset, seed=args.seed)
-    test_data = data.get("test", [])
-    if not test_data:
-        test_data = data.get("validation", [])
-        if test_data:
-            logger.info("  No test split found, using validation split for evaluation")
-    if args.max_samples:
-        test_data = test_data[:args.max_samples]
-    logger.info(f"  Test samples: {len(test_data)}")
+    data = load_dataset(
+        args.dataset,
+        seed=args.seed,
+        sampling=getattr(args, "sampling", None),
+        mmlu_load_mode=getattr(args, "mmlu_load_mode", "by_subject"),
+    )
+
+    eval_data = data.get(eval_split, [])
+    if not eval_data:
+        raise ValueError(
+            f"Evaluation split '{eval_split}' is empty for dataset={args.dataset}"
+        )
+
+    logger.info(f"  Eval split: {eval_split}, samples: {len(eval_data)}")
 
     logger.info(f"Loading actor: {args.actor_path}")
     logger.info(f"  Actor/Critic share same GPU {args.actor_device}")
@@ -116,7 +125,7 @@ def main():
     from src.evaluation.benchmarks import evaluate_benchmark
 
     results = evaluate_benchmark(
-        actor, critic, test_data, args.dataset,
+        actor, critic, eval_data, args.dataset,
         num_rounds=args.num_rounds,
         max_tokens=args.max_tokens,
         temperature=args.temperature,

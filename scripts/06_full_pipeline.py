@@ -33,7 +33,6 @@ STEP_DEFAULTS = {
     "num_simulations": 5,
     "reward_threshold": 0.0,
     "seed": 42,
-    "max_samples": None,
     "skip_training": False,
     "reuse_trajectories": False,
     "use_wandb": False,
@@ -42,6 +41,8 @@ STEP_DEFAULTS = {
     "dtype": "float32",
     "gpu_memory_utilization": 0.8,
     "max_model_len": 4096,
+    "sampling": None,
+    "mmlu_load_mode": "by_subject",
 }
 
 
@@ -56,6 +57,15 @@ def parse_args():
     cli_args = parser.parse_args()
     cfg = ConfigManager.initialize(config_path=cli_args.config)
     return cfg.step("step06", defaults=STEP_DEFAULTS).to_namespace()
+
+
+def _log_subject_coverage(split_name: str, samples: list[dict]) -> None:
+    """Log subject coverage for a data split."""
+    subjects = {s.get("subject", "unknown") for s in samples if s.get("subject")}
+    if subjects and "unknown" not in subjects:
+        logger.info(f"  {split_name} subjects: {len(subjects)} unique")
+    elif subjects:
+        logger.info(f"  {split_name} subjects: {len(subjects)} unique (including 'unknown')")
 
 
 def main():
@@ -92,22 +102,40 @@ def main():
     logger.info("[Step 1] Loading dataset...")
     from src.data.loader import load_dataset
 
-    data = load_dataset(args.dataset, seed=args.seed)
-    train_data = data.get("train", [])
+    data = load_dataset(
+        args.dataset,
+        seed=args.seed,
+        sampling=getattr(args, "sampling", None),
+        mmlu_load_mode=getattr(args, "mmlu_load_mode", "by_subject"),
+    )
+    train_data = data["train"]
     val_data = data.get("validation", [])
     test_data = data.get("test", [])
 
-    if args.max_samples:
-        train_data = train_data[:args.max_samples]
-        val_data = val_data[:args.max_samples]
-        test_data = test_data[:args.max_samples]
+    logger.info(
+        "  Data split sizes: train=%d, validation=%d, test=%d, dev=%d",
+        len(train_data),
+        len(val_data),
+        len(test_data),
+        len(data.get("dev", [])),
+    )
 
-    # Fallback: if no test split, use validation set
-    if not test_data and val_data:
-        logger.warning("No test split found, using validation set for evaluation.")
-        test_data = val_data
+    # Log subject coverage for MMLU
+    if args.dataset == "mmlu":
+        _log_subject_coverage("validation", val_data)
+        _log_subject_coverage("test", test_data)
 
-    logger.info(f"  Train: {len(train_data)}, Val: {len(val_data)}, Test: {len(test_data)}")
+    if not train_data and not args.skip_training:
+        raise ValueError(
+            f"Training split is empty for dataset={args.dataset}. "
+            f"Check data loading configuration."
+        )
+
+    if not test_data:
+        raise ValueError(
+            f"Test split is empty for dataset={args.dataset}. "
+            f"Check data loading configuration."
+        )
 
     if not args.skip_training:
         # --- Step 2: Alternating training ---
@@ -211,7 +239,6 @@ def _print_final_summary(args, results: dict, output_dir: str) -> None:
     logger.info(f"  Iterations:   {args.num_iterations}")
     logger.info(f"  Rounds:       {args.num_rounds}")
     logger.info(f"  Simulations:  {args.num_simulations}")
-    logger.info(f"  Train samples:{args.max_samples or 'all'}")
     logger.info(f"  Test samples: {results['num_samples']}")
     logger.info(f"  Output dir:   {output_dir}")
     logger.info(sep[:-1])

@@ -84,6 +84,8 @@ STEP_DEFAULTS = {
     "request_timeout": 60,
     "retry_delay": 5,
     "max_retries": 5,
+    "sampling": None,
+    "mmlu_load_mode": "by_subject",
 }
 
 
@@ -985,7 +987,12 @@ def main():
     # Load original dataset for Algorithm 1 input
     logger.info("[Step 2] Loading dataset for Algorithm 1...")
     from src.data.loader import load_dataset
-    dataset = load_dataset(args.dataset)
+    dataset = load_dataset(
+        args.dataset,
+        seed=args.seed,
+        sampling=getattr(args, "sampling", None),
+        mmlu_load_mode=getattr(args, "mmlu_load_mode", "by_subject"),
+    )
 
     # Flatten all splits into a single list
     all_samples = []

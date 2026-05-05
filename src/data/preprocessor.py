@@ -26,10 +26,17 @@ def standardize_sample(
     Returns:
         Standardized sample with keys: question, passage, answer, choices.
     """
+    # Preserve metadata fields if present, with defaults
     result = {
+        "dataset": sample.get("dataset", ""),
+        "source_split": sample.get("source_split", ""),
+        "source_index": sample.get("source_index", None),
+        "subject": sample.get("subject", ""),
+        "category": sample.get("category", ""),
         "question": "",
         "passage": "",
         "answer": "",
+        "raw_answer": str(sample.get("answer", sample.get("answerKey", ""))),
         "choices": [],
         "task_type": task_type,
     }

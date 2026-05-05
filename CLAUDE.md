@@ -30,7 +30,7 @@ ACC-Collab 复现项目 -- 实现 ICLR 2025 论文《ACC-Collab: An Actor-Critic
 
 | 模块 | 职责 | 关键文件 | 核心依赖 |
 |------|------|----------|----------|
-| `src.data` | 数据加载与预处理，统一 7 个基准的格式 | `loader.py`, `preprocessor.py` | datasets (HuggingFace) |
+| `src.data` | 数据加载与预处理，统一 7 个基准的格式；MMLU 专用 loader 正确映射 `auxiliary_train -> train` | `loader.py`, `preprocessor.py`, `mmlu.py`, `sampler.py` | datasets (HuggingFace) |
 | `src.prompts` | 6 类 Prompt 模板（single_shot / guided / deliberation_actor / deliberation_critic 及其 guided 变体），按数据集分派 | `templates.py`, `formatter.py` | 无外部依赖 |
 | `src.algorithms` | 审议引擎、奖励计算、Algorithm 1 轨迹生成 | `deliberation.py`, `reward.py`, `trajectory.py` | prompts, scipy, numpy |
 | `src.trajectory` | 偏好数据集构建 | `preference.py` | algorithms |
@@ -144,7 +144,7 @@ python scripts/train.py --config configs/verify.yaml --agent actor
 export PYTHONPATH=$(pwd)
 
 # === 小规模验证 ===
-# 在 YAML 配置中设置 common.max_samples: 5 来控制样本数
+# 在 YAML 配置的 sampling.train.max_samples 中设置样本数
 
 # Phase 1: Bootstrap 多样化数据
 python scripts/07_bootstrap_actors.py --config configs/society/experiment_h100.yaml
@@ -165,7 +165,7 @@ python scripts/11_society_train.py --config configs/society/experiment_h100.yaml
 python scripts/12_society_evaluate.py --config configs/society/experiment_h100.yaml
 
 # === 全量运行（200样本，5轮，预计17-22小时）===
-# 修改 YAML 中 common.max_samples: 200，step05_train_society.num_rounds: 5
+# 修改 YAML 中 sampling.train.max_samples: 200，step05_train_society.num_rounds: 5
 python scripts/07_bootstrap_actors.py --config configs/society/experiment_h100.yaml
 python scripts/08_classify_data.py --config configs/society/experiment_h100.yaml
 python scripts/09_diversify_actors.py --config configs/society/experiment_h100.yaml

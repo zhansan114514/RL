@@ -1,10 +1,10 @@
-"""Tests for data loading, preprocessing, and answer extraction."""
+"""Tests for data loading, preprocessing, answer extraction, and sampling."""
 
 import pytest
 from unittest.mock import patch, MagicMock
 
 from src.algorithms.reward import extract_answer, normalize_answer
-from src.data.loader import load_dataset
+from src.data.loader import load_dataset, validate_dataset_bundle
 
 
 class TestAnswerExtraction:
@@ -22,8 +22,6 @@ class TestAnswerExtraction:
             ("No, that is incorrect.", "NO"),
             ("YES", "YES"),
             ("NO", "NO"),
-            # "The sky is blue" has no Yes/No → None
-
         ],
     )
     def test_extract_yes_no(self, response, expected):
@@ -57,11 +55,9 @@ class TestAnswerExtraction:
         assert result is None or result == ""
 
     def test_extract_multiple_choice_no_option(self):
-        """Response without a clear option should return None or best guess."""
         result = extract_answer(
             "I don't know the answer.", task_type="multiple_choice"
         )
-        # Should not crash, may return None
         assert result is None or isinstance(result, str)
 
 
@@ -69,7 +65,6 @@ class TestNormalizeAnswer:
     """Test answer normalization for consistent comparison."""
 
     def test_normalize_yes(self):
-        # normalize_answer takes first char and upper: "Yes" -> "Y"
         assert normalize_answer("Yes") == "Y"
 
     def test_normalize_no(self):
@@ -86,32 +81,102 @@ class TestDatasetLoader:
     @patch("src.data.loader.hf_load_dataset")
     def test_load_boolq_shape(self, mock_load):
         """BoolQ should return train/val/test splits."""
-        # Mock a DatasetDict-like object
         mock_train = MagicMock()
-        mock_train.__iter__ = MagicMock(return_value=iter([]))
+        mock_train.__iter__ = MagicMock(return_value=iter([
+            {"question": "Q?", "passage": "P", "answer": True},
+        ]))
         mock_val = MagicMock()
         mock_val.__iter__ = MagicMock(return_value=iter([]))
         mock_ds = {"train": mock_train, "validation": mock_val}
         mock_load.return_value = mock_ds
         result = load_dataset("boolq")
         assert "train" in result
-
-    @patch("src.data.loader.hf_load_dataset")
-    def test_load_mmlu_shape(self, mock_load):
-        """MMLU should load with correct splits."""
-        mock_test = MagicMock()
-        mock_test.__iter__ = MagicMock(return_value=iter([]))
-        mock_val = MagicMock()
-        mock_val.__iter__ = MagicMock(return_value=iter([]))
-        mock_ds = {"test": mock_test, "validation": mock_val}
-        mock_load.return_value = mock_ds
-        result = load_dataset("mmlu")
-        assert isinstance(result, dict)
+        assert len(result["train"]) == 1
 
     def test_load_unknown_dataset_raises(self):
         """Loading an unknown dataset should raise ValueError."""
         with pytest.raises(ValueError, match="Unknown dataset"):
             load_dataset("nonexistent_dataset")
+
+    @patch("src.data.mmlu.hf_load_dataset")
+    @patch("src.data.mmlu.get_dataset_config_names")
+    def test_load_mmlu_auxiliary_train_maps_to_train(self, mock_configs, mock_load):
+        """MMLU auxiliary_train should be mapped to 'train' key."""
+        mock_load.return_value = {
+            "auxiliary_train": [
+                {"question": "Q train", "choices": ["A", "B", "C", "D"], "answer": 1},
+            ],
+            "validation": [
+                {"question": "Q val", "choices": ["A", "B", "C", "D"], "answer": 2},
+            ],
+            "test": [
+                {"question": "Q test", "choices": ["A", "B", "C", "D"], "answer": 3},
+            ],
+            "dev": [
+                {"question": "Q dev", "choices": ["A", "B", "C", "D"], "answer": 0},
+            ],
+        }
+        mock_configs.return_value = []  # no per-subject loading needed for "all" mode
+
+        from src.data.mmlu import load_mmlu
+        data = load_mmlu(load_mode="all")
+
+        assert "train" in data
+        assert len(data["train"]) == 1
+        assert data["train"][0]["answer"] == "B"
+        assert data["train"][0]["source_split"] == "auxiliary_train"
+        assert len(data["validation"]) == 1
+        assert len(data["test"]) == 1
+        assert len(data["dev"]) == 1
+
+    @patch("src.data.mmlu.hf_load_dataset")
+    @patch("src.data.mmlu.get_dataset_config_names")
+    def test_load_mmlu_by_subject_preserves_subject(self, mock_configs, mock_load):
+        """MMLU by_subject mode should preserve subject metadata."""
+        # First call: load "all" config for auxiliary_train
+        # Second+ calls: per-subject configs for val/test/dev
+        all_data = {
+            "auxiliary_train": [
+                {"question": "Q train", "choices": ["A", "B"], "answer": 0},
+            ],
+            "validation": [],
+            "test": [],
+            "dev": [],
+        }
+        subject_data = {
+            "validation": [{"question": "Q val", "choices": ["A", "B"], "answer": 1}],
+            "test": [{"question": "Q test", "choices": ["A", "B"], "answer": 0}],
+            "dev": [{"question": "Q dev", "choices": ["A", "B"], "answer": 1}],
+        }
+
+        mock_load.side_effect = [all_data, subject_data]
+        mock_configs.return_value = ["abstract_algebra"]
+
+        from src.data.mmlu import load_mmlu
+        data = load_mmlu(load_mode="by_subject")
+
+        assert data["test"][0]["subject"] == "abstract_algebra"
+        assert data["validation"][0]["subject"] == "abstract_algebra"
+
+    def test_validate_mmlu_empty_train_raises(self):
+        """MMLU with empty train should raise ValueError."""
+        data = {
+            "train": [],
+            "validation": [{"question": "v"}],
+            "test": [{"question": "t"}],
+        }
+        with pytest.raises(ValueError, match="train.*empty"):
+            validate_dataset_bundle("mmlu", data)
+
+    def test_validate_mmlu_empty_test_raises(self):
+        """MMLU with empty test should raise ValueError."""
+        data = {
+            "train": [{"question": "t"}],
+            "validation": [{"question": "v"}],
+            "test": [],
+        }
+        with pytest.raises(ValueError, match="test.*empty"):
+            validate_dataset_bundle("mmlu", data)
 
 
 class TestDataFormat:
@@ -141,6 +206,42 @@ class TestDataFormat:
         assert "question" in result
         assert "choices" in result
         assert "answer" in result
+
+    def test_standardized_preserves_metadata(self):
+        """Standardized samples should preserve dataset, source_split, subject."""
+        from src.data.preprocessor import standardize_sample
+
+        sample = {
+            "dataset": "mmlu",
+            "source_split": "test",
+            "source_index": 42,
+            "subject": "abstract_algebra",
+            "category": "stem",
+            "question": "What is 2+2?",
+            "choices": ["3", "4", "5", "6"],
+            "answer": 1,
+        }
+        result = standardize_sample(sample, task_type="multiple_choice")
+
+        assert result["dataset"] == "mmlu"
+        assert result["source_split"] == "test"
+        assert result["source_index"] == 42
+        assert result["subject"] == "abstract_algebra"
+        assert result["category"] == "stem"
+        assert result["raw_answer"] == "1"
+
+    def test_standardized_metadata_defaults(self):
+        """Missing metadata should get empty defaults."""
+        from src.data.preprocessor import standardize_sample
+
+        sample = {"question": "Q?", "answer": True}
+        result = standardize_sample(sample, task_type="yes_no")
+
+        assert result["dataset"] == ""
+        assert result["source_split"] == ""
+        assert result["source_index"] is None
+        assert result["subject"] == ""
+        assert result["category"] == ""
 
 
 class TestDataPreprocessorEdgeCases:
@@ -235,36 +336,30 @@ class TestDataPreprocessorEdgeCases:
     def test_normalize_answer_with_none(self):
         """normalize_answer should handle None input."""
         from src.algorithms.reward import normalize_answer
-
         result = normalize_answer(None)
         assert result == ""
 
     def test_normalize_answer_with_empty_string(self):
         """Empty string should return empty."""
         from src.algorithms.reward import normalize_answer
-
         result = normalize_answer("")
         assert result == ""
 
     def test_normalize_answer_with_whitespace(self):
         """Should strip whitespace."""
         from src.algorithms.reward import normalize_answer
-
         result = normalize_answer("  YES  ")
-        # Takes first char and upper: "YES" -> "Y"
         assert result == "Y"
 
     def test_extract_answer_with_whitespace_only(self):
         """Whitespace-only response should return None."""
         from src.algorithms.reward import extract_answer
-
         result = extract_answer("   \n\t  ", task_type="yes_no")
         assert result is None
 
     def test_extract_answer_with_very_long_text(self):
         """Should handle very long responses."""
         from src.algorithms.reward import extract_answer
-
         long_text = " ".join(["word"] * 10000) + " The answer is Yes."
         result = extract_answer(long_text, task_type="yes_no")
         assert result == "YES"
@@ -272,14 +367,12 @@ class TestDataPreprocessorEdgeCases:
     def test_extract_answer_mixed_type_fallback(self):
         """Mixed type should fallback to yes_no when MC fails."""
         from src.algorithms.reward import extract_answer
-
         result = extract_answer("The answer is Yes.", task_type="mixed")
         assert result == "YES"
 
     def test_extract_answer_invalid_task_type(self):
         """Invalid task type should return None."""
         from src.algorithms.reward import extract_answer
-
         result = extract_answer("The answer is Yes.", task_type="invalid")
         assert result is None
 
@@ -300,7 +393,6 @@ class TestGenerateWrongAnswer:
         """Should pick a different choice from the list."""
         from src.data.preprocessor import generate_wrong_answer
 
-        # Mock random to return first wrong option
         import random
         with patch.object(random, "choice", side_effect=lambda x: x[0]):
             result = generate_wrong_answer("C", ["A", "B", "C", "D"])
@@ -318,9 +410,7 @@ class TestGenerateWrongAnswer:
         """When all options are 'wrong' (same as correct), should still return something."""
         from src.data.preprocessor import generate_wrong_answer
 
-        # Edge case: choices list only contains the correct answer
         result = generate_wrong_answer("A", ["A"])
-        # Should fallback to default behavior
         assert result in ["B", "C", "D"]
 
     def test_case_insensitive_comparison(self):
@@ -329,6 +419,185 @@ class TestGenerateWrongAnswer:
 
         result = generate_wrong_answer("YES", ["yes", "no"])
         assert result == "no" or result == "NO"
+
+
+class TestSampling:
+    """Test the sampling module."""
+
+    def test_full_sampling_returns_all(self):
+        """Full strategy should return all samples."""
+        from src.data.sampler import sample_split, SplitSamplingConfig
+
+        samples = [{"id": i} for i in range(100)]
+        result = sample_split(samples, SplitSamplingConfig(strategy="full"))
+        assert len(result) == 100
+
+    def test_full_with_none_max_samples(self):
+        """None max_samples should return all."""
+        from src.data.sampler import sample_split, SplitSamplingConfig
+
+        samples = [{"id": i} for i in range(100)]
+        result = sample_split(samples, SplitSamplingConfig(max_samples=None))
+        assert len(result) == 100
+
+    def test_random_sampling_not_prefix(self):
+        """Random sampling should NOT return the first N items."""
+        from src.data.sampler import sample_split, SplitSamplingConfig
+
+        samples = [{"id": i} for i in range(100)]
+        result = sample_split(
+            samples,
+            SplitSamplingConfig(strategy="random", max_samples=10, seed=42),
+        )
+
+        assert len(result) == 10
+        # Very unlikely to be exactly [0,1,2,...,9] with random shuffle
+        assert [x["id"] for x in result] != list(range(10))
+
+    def test_random_sampling_reproducible(self):
+        """Same seed should produce same result."""
+        from src.data.sampler import sample_split, SplitSamplingConfig
+
+        samples = [{"id": i} for i in range(100)]
+        cfg = SplitSamplingConfig(strategy="random", max_samples=10, seed=42)
+
+        r1 = sample_split(samples, cfg)
+        r2 = sample_split(samples, cfg)
+        assert r1 == r2
+
+    def test_random_different_seeds_different_results(self):
+        """Different seeds should (likely) produce different results."""
+        from src.data.sampler import sample_split, SplitSamplingConfig
+
+        samples = [{"id": i} for i in range(100)]
+        r1 = sample_split(samples, SplitSamplingConfig(strategy="random", max_samples=20, seed=42))
+        r2 = sample_split(samples, SplitSamplingConfig(strategy="random", max_samples=20, seed=99))
+
+        # Very unlikely to be identical
+        ids1 = [x["id"] for x in r1]
+        ids2 = [x["id"] for x in r2]
+        assert ids1 != ids2
+
+    def test_stratified_sampling_covers_all_subjects(self):
+        """Stratified sampling should cover all subjects."""
+        from src.data.sampler import sample_split, SplitSamplingConfig
+
+        samples = []
+        for subject in ["math", "history", "law"]:
+            for i in range(10):
+                samples.append({"subject": subject, "id": f"{subject}-{i}"})
+
+        result = sample_split(
+            samples,
+            SplitSamplingConfig(
+                strategy="stratified_by_subject",
+                max_samples=6,
+                seed=42,
+                group_key="subject",
+            ),
+        )
+
+        assert len(result) == 6
+        subjects = {x["subject"] for x in result}
+        assert subjects == {"math", "history", "law"}
+
+    def test_stratified_with_many_groups(self):
+        """Stratified sampling with more groups than samples."""
+        from src.data.sampler import sample_split, SplitSamplingConfig
+
+        samples = []
+        for subject in [f"sub_{i}" for i in range(20)]:
+            samples.append({"subject": subject, "id": subject})
+
+        result = sample_split(
+            samples,
+            SplitSamplingConfig(
+                strategy="stratified_by_subject",
+                max_samples=10,
+                seed=42,
+                group_key="subject",
+            ),
+        )
+
+        assert len(result) == 10
+        # Should cover at least 10 different subjects
+        subjects = {x["subject"] for x in result}
+        assert len(subjects) >= 10
+
+    def test_sampling_small_dataset(self):
+        """If dataset is smaller than max_samples, return all."""
+        from src.data.sampler import sample_split, SplitSamplingConfig
+
+        samples = [{"id": i} for i in range(5)]
+        result = sample_split(
+            samples,
+            SplitSamplingConfig(strategy="random", max_samples=100, seed=42),
+        )
+        assert len(result) == 5
+
+    def test_sampling_empty_dataset(self):
+        """Empty dataset should return empty list."""
+        from src.data.sampler import sample_split, SplitSamplingConfig
+
+        result = sample_split(
+            [],
+            SplitSamplingConfig(strategy="random", max_samples=10, seed=42),
+        )
+        assert result == []
+
+    def test_invalid_max_samples_raises(self):
+        """Negative max_samples should raise ValueError."""
+        from src.data.sampler import sample_split, SplitSamplingConfig
+
+        with pytest.raises(ValueError, match="max_samples must be positive"):
+            sample_split(
+                [{"id": 1}],
+                SplitSamplingConfig(strategy="random", max_samples=-1, seed=42),
+            )
+
+    def test_unknown_strategy_raises(self):
+        """Unknown strategy should raise ValueError."""
+        from src.data.sampler import sample_split, SplitSamplingConfig
+
+        with pytest.raises(ValueError, match="Unknown sampling strategy"):
+            sample_split(
+                [{"id": 1}, {"id": 2}],
+                SplitSamplingConfig(strategy="nonexistent", max_samples=1, seed=42),
+            )
+
+    def test_apply_sampling(self):
+        """apply_sampling should apply per-split config."""
+        from src.data.sampler import apply_sampling
+
+        data = {
+            "train": [{"id": i} for i in range(100)],
+            "test": [{"id": i} for i in range(50)],
+        }
+
+        result = apply_sampling(
+            data,
+            {
+                "train": {"strategy": "random", "max_samples": 10, "seed_offset": 0},
+                "test": {"strategy": "full", "max_samples": None, "seed_offset": 2},
+            },
+            base_seed=42,
+        )
+
+        assert len(result["train"]) == 10
+        assert len(result["test"]) == 50
+
+    def test_apply_sampling_no_config_returns_all(self):
+        """apply_sampling with no config for a split should return all."""
+        from src.data.sampler import apply_sampling
+
+        data = {
+            "train": [{"id": i} for i in range(50)],
+            "test": [{"id": i} for i in range(25)],
+        }
+
+        result = apply_sampling(data, {}, base_seed=42)
+        assert len(result["train"]) == 50
+        assert len(result["test"]) == 25
 
 
 class TestBBHDatasetLoading:
@@ -340,7 +609,6 @@ class TestBBHDatasetLoading:
         from src.data.loader import load_dataset
         from datasets import DatasetDict, Dataset
 
-        # Create proper Dataset structure for BBH
         task1_data = Dataset.from_dict({
             "question": [f"Task1 Q{i}" for i in range(50)],
             "answer": ["A"] * 50,
@@ -362,7 +630,6 @@ class TestBBHDatasetLoading:
             seed=42,
         )
 
-        # Should have all three splits
         assert "train" in result
         assert "validation" in result
         assert "test" in result
@@ -385,8 +652,6 @@ class TestBBHDatasetLoading:
 
         result = load_dataset("bbh")
 
-        # Default ratios: test=0.25, validation=0.10
-        # So train should be 0.65
         assert "train" in result
         assert "validation" in result
         assert "test" in result
@@ -397,7 +662,6 @@ class TestBBHDatasetLoading:
         from src.data.loader import load_dataset
         from datasets import DatasetDict, Dataset
 
-        # Create mock data with different task names
         task1_data = Dataset.from_dict({
             "question": [f"task1 Q{i}" for i in range(50)],
             "answer": ["A"] * 50,
@@ -415,7 +679,6 @@ class TestBBHDatasetLoading:
 
         result = load_dataset("bbh", seed=42)
 
-        # All samples should be processed
         all_samples = (
             result.get("train", []) +
             result.get("validation", []) +
@@ -425,7 +688,7 @@ class TestBBHDatasetLoading:
 
     @patch("src.data.loader.hf_load_dataset")
     def test_bbh_empty_dataset(self, mock_hf_load):
-        """BBH should handle empty dataset gracefully."""
+        """BBH with empty dataset should raise ValueError (validation catches it)."""
         from src.data.loader import load_dataset
         from datasets import DatasetDict, Dataset
 
@@ -439,12 +702,9 @@ class TestBBHDatasetLoading:
         })
         mock_hf_load.return_value = mock_dataset_dict
 
-        result = load_dataset("bbh")
-
-        # Should return empty splits
-        assert len(result.get("train", [])) == 0
-        assert len(result.get("validation", [])) == 0
-        assert len(result.get("test", [])) == 0
+        # Empty dataset should now raise because train split is empty
+        with pytest.raises(ValueError, match="train.*empty"):
+            load_dataset("bbh")
 
     @patch("src.data.loader.hf_load_dataset")
     def test_bbh_single_task(self, mock_hf_load):
@@ -466,3 +726,54 @@ class TestBBHDatasetLoading:
 
         total = len(result.get("train", [])) + len(result.get("validation", [])) + len(result.get("test", []))
         assert total == 100
+
+
+class TestEvaluationMetrics:
+    """Test per-group evaluation metrics."""
+
+    def test_compute_group_metrics_basic(self):
+        """compute_group_metrics should produce per-subject stats."""
+        from src.evaluation.benchmarks import compute_group_metrics
+
+        details = [
+            {"subject": "math", "initially_correct": True, "finally_correct": True,
+             "flipped_to_correct": False, "flipped_to_wrong": False},
+            {"subject": "math", "initially_correct": False, "finally_correct": True,
+             "flipped_to_correct": True, "flipped_to_wrong": False},
+            {"subject": "history", "initially_correct": False, "finally_correct": False,
+             "flipped_to_correct": False, "flipped_to_wrong": False},
+            {"subject": "history", "initially_correct": True, "finally_correct": False,
+             "flipped_to_correct": False, "flipped_to_wrong": True},
+        ]
+
+        result = compute_group_metrics(details, "subject")
+
+        assert "math" in result
+        assert "history" in result
+        assert result["math"]["num_samples"] == 2
+        assert result["math"]["initial_accuracy"] == 0.5
+        assert result["math"]["final_accuracy"] == 1.0
+        assert result["math"]["absolute_improvement"] == 0.5
+        assert result["history"]["initial_accuracy"] == 0.5
+        assert result["history"]["final_accuracy"] == 0.0
+
+    def test_compute_group_metrics_empty(self):
+        """Empty details should return empty dict."""
+        from src.evaluation.benchmarks import compute_group_metrics
+        result = compute_group_metrics([], "subject")
+        assert result == {}
+
+    def test_compute_group_metrics_missing_key(self):
+        """Missing group key should use 'unknown'."""
+        from src.evaluation.benchmarks import compute_group_metrics
+
+        details = [
+            {"subject": "", "initially_correct": True, "finally_correct": True,
+             "flipped_to_correct": False, "flipped_to_wrong": False},
+            {"initially_correct": True, "finally_correct": True,
+             "flipped_to_correct": False, "flipped_to_wrong": False},
+        ]
+
+        result = compute_group_metrics(details, "subject")
+        assert "unknown" in result
+        assert result["unknown"]["num_samples"] == 2

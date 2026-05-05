@@ -9,6 +9,7 @@ api:
   retry_delay: 5
   max_retries: 5
   api_temperature: 0.1
+
 # 通用参数：可被多个步骤复用
 common:
   # 基座模型名称或本地路径
@@ -17,10 +18,26 @@ common:
   dataset: "boolq"
   # 随机种子
   seed: 42
-  # 调试时限制样本数，null 表示不限制
-  max_samples: null
   # 是否启用 WandB
   use_wandb: false
+
+data:
+  mmlu:
+    load_mode: "by_subject"
+
+sampling:
+  train:
+    strategy: "full"
+    max_samples: null
+    seed_offset: 0
+  validation:
+    strategy: "full"
+    max_samples: null
+    seed_offset: 1
+  test:
+    strategy: "full"
+    max_samples: null
+    seed_offset: 2
 
 # Step 1: 生成轨迹
 step01:
@@ -45,7 +62,6 @@ step02:
 step03:
   preference_dir: "experiments/gemma2_boolq/preferences"
   output_dir: "experiments/gemma2_boolq/critic"
-  # 可选：llama3 / mistral / gemma2；为 null 时自动识别
   model_type: null
   lora_r: 256
   learning_rate: 5.0e-5
@@ -57,7 +73,6 @@ step03:
 step04:
   preference_dir: "experiments/gemma2_boolq/preferences"
   output_dir: "experiments/gemma2_boolq/actor"
-  # 可选：llama3 / mistral / gemma2；为 null 时自动识别
   model_type: null
   lora_r: 256
   learning_rate: 5.0e-5
@@ -77,6 +92,7 @@ step05:
   critic_device: 0
   dtype: "float32"
   gpu_memory_utilization: 0.45
+  eval_split: "test"
 
 # Step 6: 一键全流程
 step06:

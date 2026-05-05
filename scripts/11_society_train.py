@@ -40,7 +40,6 @@ STEP_DEFAULTS = {
     "num_iterations": 2,
     "num_rounds": 5,
     "num_simulations": 5,
-    "max_samples": 200,
     "trajectory_max_tokens": 1024,
     "reward_threshold": 0.0,
     "lora_r": 256,
@@ -74,6 +73,8 @@ STEP_DEFAULTS = {
     "request_timeout": 60,
     "retry_delay": 5,
     "max_retries": 5,
+    "sampling": None,
+    "mmlu_load_mode": "by_subject",
 }
 
 
@@ -257,15 +258,19 @@ def main():
     logger.info("[Step 1] Loading dataset...")
     from src.data.loader import load_dataset
 
-    data = load_dataset(args.dataset, seed=args.seed)
+    data = load_dataset(
+        args.dataset,
+        seed=args.seed,
+        sampling=getattr(args, "sampling", None),
+        mmlu_load_mode=getattr(args, "mmlu_load_mode", "by_subject"),
+    )
     train_data = data.get("train", [])
-    # For datasets without a train split (e.g. MMLU), flatten all splits
-    if not train_data:
-        for split_data in data.values():
-            train_data.extend(split_data)
 
-    if args.max_samples:
-        train_data = train_data[:args.max_samples]
+    if not train_data:
+        raise ValueError(
+            f"Training split is empty for dataset={args.dataset}. "
+            f"Check data loading configuration."
+        )
 
     logger.info(f"  Training samples: {len(train_data)}")
 
