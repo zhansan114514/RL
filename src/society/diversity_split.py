@@ -2,7 +2,7 @@
 Diversity split: Data-level diversification for Multiagent FT.
 
 Partitions training data by:
-1. Reasoning style (ALGEBRAIC, DIRECT, BACKTRACKING) → for Actor diversification
+1. Reasoning style (DIRECT, EVIDENCE, COMPARATIVE, RULE_BASED) → for Actor diversification
 2. Error profile dimensions → weighted Critic-skill routing
 
 Each Actor trains only on its style subset.  Critics receive a mixture of
@@ -39,7 +39,7 @@ PROFILE_TO_SKILL = {
     "computation": CriticSkill.COMPUTATION,
     "reasoning": CriticSkill.REASONING,
     "knowledge": CriticSkill.KNOWLEDGE,
-    "grounding": CriticSkill.KNOWLEDGE,
+    "grounding": CriticSkill.GROUNDING,
     "verification": CriticSkill.VERIFICATION,
 }
 
@@ -61,7 +61,8 @@ class DiversitySplit:
     Split training data across reasoning styles and error types.
 
     Uses DataClassifier to label each sample, then groups by label.
-    Optionally balances splits by downsampling majority groups.
+    Does not hard-balance by default; minority handling belongs in pair
+    construction and augmentation, not in destructive split downsampling.
 
     Supports loading pre-classified results from phase 2 (08_classify_data.py)
     via `pre_classified_file` to avoid redundant re-classification.
@@ -69,7 +70,7 @@ class DiversitySplit:
 
     def __init__(
         self,
-        balance: bool = True,
+        balance: bool = False,
         seed: int = 42,
         use_api: bool = True,
         cache_dir: str = "output/society/classified",
@@ -293,18 +294,18 @@ class DiversitySplit:
                     if self.strict_classification:
                         logger.error(f"Reasoning style classification failed for sample {i}: {e}")
                         continue
-                    style = list(ReasoningStyle)[i % len(ReasoningStyle)]
                     logger.warning(
-                        f"Classification failed for sample {i}, "
-                        f"assigned style '{style.value}' via round-robin fallback: {e}"
+                        f"Classification failed for sample {i}; leaving unclassified: {e}"
                     )
+                    continue
             else:
                 if self.strict_classification:
                     attempted_live += 1
                     failures += 1
                     logger.error(f"Missing response for strict reasoning style classification at sample {i}")
                     continue
-                style = list(ReasoningStyle)[i % len(ReasoningStyle)]
+                logger.warning(f"Missing response for reasoning style classification at sample {i}")
+                continue
 
             splits[style].append(sample)
 
@@ -417,6 +418,7 @@ class DiversitySplit:
                     retry_delay=self.retry_delay,
                 )
                 return payload["indices"], {
+                    "format_status": result.format_status,
                     "scores": result.scores,
                     "primary": result.primary,
                     "secondary": result.secondary,
@@ -448,7 +450,7 @@ class DiversitySplit:
                             f"Error profile classification failed for {len(indices)} duplicated item(s): {error}"
                         )
                         continue
-                    profile = _unknown_profile(str(error))
+                    profile = _ambiguous_profile(str(error))
                     logger.warning(
                         f"Error profile classification failed for {len(indices)} duplicated item(s), "
                         f"routed to general pool: {error}"
@@ -464,7 +466,7 @@ class DiversitySplit:
 
             assignments = assign_error_profile(profile)
             for label, weight in assignments:
-                if label == "general":
+                if label in {"general", "format_failure"}:
                     profile_counts["general"] += 1
                     skill = None
                 else:
@@ -612,8 +614,15 @@ def assign_error_profile(
     profile: dict,
     min_score: float = 0.35,
     top_k: int = 2,
+    min_confidence: float = 0.5,
 ) -> list[tuple[str, float]]:
     """Assign a profile to one or more error dimensions with weights."""
+    primary = str(profile.get("primary", "")).strip().lower() if isinstance(profile, dict) else ""
+    if primary == "format_failure":
+        return [("format_failure", 1.0)]
+    if primary == "ambiguous":
+        return [("general", 1.0)]
+
     scores = profile.get("scores", {}) if isinstance(profile, dict) else {}
     clean_scores = {}
     for dim in ERROR_PROFILE_DIMENSIONS:
@@ -628,8 +637,14 @@ def assign_error_profile(
     except (TypeError, ValueError):
         confidence = 0.0
 
+    if confidence < min_confidence:
+        return [("general", 1.0)]
+
+    if primary in ERROR_PROFILE_DIMENSIONS:
+        return [(primary, 1.0)]
+
     ranked = sorted(clean_scores.items(), key=lambda x: x[1], reverse=True)
-    if not ranked or confidence < 0.5:
+    if not ranked:
         return [("general", 1.0)]
 
     top1, s1 = ranked[0]
@@ -646,10 +661,11 @@ def assign_error_profile(
     return [(label, score / total) for label, score in selected]
 
 
-def _unknown_profile(evidence: str = "") -> dict:
+def _ambiguous_profile(evidence: str = "") -> dict:
     return {
+        "format_status": "empty_or_invalid",
         "scores": {dim: 0.0 for dim in ERROR_PROFILE_DIMENSIONS},
-        "primary": "unknown",
+        "primary": "ambiguous",
         "secondary": [],
         "confidence": 0.0,
         "evidence": evidence,

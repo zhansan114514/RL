@@ -67,6 +67,8 @@ STEP_DEFAULTS = {
     "max_model_len": 4096,
     "max_lora_rank": 256,
     "router_top_k": 2,
+    "router_min_confidence": 0.1,
+    "router_fallback_to_uniform": False,
 }
 
 
@@ -435,13 +437,20 @@ def _run_deliberation_on_samples(
     temperature: float,
     router_top_k: int = 2,
     router_uniform: bool = False,
+    router_min_confidence: float = 0.1,
+    router_fallback_to_uniform: bool = False,
 ) -> EvalResult:
     """Run deliberation on samples with a shared vLLM engine. No model loading."""
     from src.society.multi_deliberation import multi_agent_deliberate_single_gpu
     from src.society.router import CriticRouter
 
     # Create router with the specified configuration
-    router = CriticRouter(top_k=router_top_k, uniform_weights=router_uniform)
+    router = CriticRouter(
+        top_k=router_top_k,
+        min_confidence=router_min_confidence,
+        fallback_to_uniform=router_fallback_to_uniform,
+        uniform_weights=router_uniform,
+    )
 
     start_time = time.time()
     all_final_answers = []
@@ -585,6 +594,8 @@ def run_all_evaluations(
     max_model_len: int = 4096,
     max_lora_rank: int = 256,
     router_top_k: int = 2,
+    router_min_confidence: float = 0.1,
+    router_fallback_to_uniform: bool = False,
     phase_actor_dir: str = "output/society/actors",
     phase_critic_dir: str = "output/society/critics",
     results_file: Optional[str] = None,
@@ -595,13 +606,13 @@ def run_all_evaluations(
       A0: Base model only (no LoRA, no training) — zero-training reference
       A1: 1 Actor + 1 Critic from PHASE 3/4 diversification (pre-society-training)
           → Isolates basic diversification effect vs base model
-      A2: 3 diverse Actors (phase 3) + 1 Critic (phase 4) — Actor diversity only
+      A2: 4 diverse Actors (phase 3) + 1 Critic (phase 4) — Actor diversity only
           → Isolates Actor diversity contribution vs A1
-      A3: 1 Actor (phase 3) + 4 Critics (phase 4) + Router — Critic specialization only
+      A3: 1 Actor (phase 3) + 5 Critics (phase 4) + Router — Critic specialization only
           → Isolates Critic specialization contribution vs A1
-      A4: 3 Actors + 4 Critics from FINAL registry, uniform weights — full agents, no routing
+      A4: 4 Actors + 5 Critics from FINAL registry, uniform weights — full agents, no routing
           → Shows society training + diversity effect without Router
-      A5: 3 Actors + 4 Critics from FINAL registry + Router — complete system
+      A5: 4 Actors + 5 Critics from FINAL registry + Router — complete system
           → Full system with all components
 
     Key: A1-A3 use pre-society-training LoRA (phase 3/4 registries),
@@ -655,6 +666,8 @@ def run_all_evaluations(
                 engine, a_configs, c_configs, samples, dataset_name,
                 lora, num_rounds, max_tokens, temperature,
                 router_top_k=1,
+                router_min_confidence=router_min_confidence,
+                router_fallback_to_uniform=router_fallback_to_uniform,
             )
             logger.info(f"  A0: initial={results['A0_base_model'].initial_accuracy:.3f} final={results['A0_base_model'].final_accuracy:.3f}")
             if results_file:
@@ -672,6 +685,8 @@ def run_all_evaluations(
                     samples, dataset_name,
                     phase_lora, num_rounds, max_tokens, temperature,
                     router_top_k=1,
+                    router_min_confidence=router_min_confidence,
+                    router_fallback_to_uniform=router_fallback_to_uniform,
                 )
             else:
                 logger.warning("  Phase registries empty, falling back to first agent from final registry")
@@ -684,15 +699,17 @@ def run_all_evaluations(
                     engine, a_configs, c_configs, samples, dataset_name,
                     lora, num_rounds, max_tokens, temperature,
                     router_top_k=1,
+                    router_min_confidence=router_min_confidence,
+                    router_fallback_to_uniform=router_fallback_to_uniform,
                 )
             logger.info(f"  A1: initial={results['A1_acc_collab'].initial_accuracy:.3f} final={results['A1_acc_collab'].final_accuracy:.3f}")
             if results_file:
                 _save_results(results_file, results)
 
-            # A2: 3 diverse Actors (phase 3) + 1 Critic (phase 4) — Actor diversity only
+            # A2: 4 diverse Actors (phase 3) + 1 Critic (phase 4) — Actor diversity only
             # Uses PRE-society-training LoRA from phase 3/4 diversification.
-            # Causal question: does having 3 diverse Actors improve over 1 Actor?
-            logger.info("[A2] 3 phase-diversified Actors + 1 phase-diversified Critic (Actor diversity)...")
+            # Causal question: does having 4 diverse Actors improve over 1 Actor?
+            logger.info("[A2] 4 phase-diversified Actors + 1 phase-diversified Critic (Actor diversity)...")
             if phase_actors and phase_critics:
                 a2_lora = dict(phase_lora)
                 # Keep only the first critic's lora
@@ -700,16 +717,18 @@ def run_all_evaluations(
                     a2_lora.pop(cn, None)
                 results["A2_actor_diversity"] = _run_deliberation_on_samples(
                     engine,
-                    phase_actors,
+                    phase_actors[:4],
                     [phase_critics[0]],
                     samples, dataset_name,
                     a2_lora, num_rounds, max_tokens, temperature,
                     router_top_k=1,
+                    router_min_confidence=router_min_confidence,
+                    router_fallback_to_uniform=router_fallback_to_uniform,
                 )
             else:
                 logger.warning("  Phase registries empty, falling back to final registry subset")
                 a_configs, _, a_lora = _build_agent_configs(
-                    registry, actor_names=all_actor_names[:3],
+                    registry, actor_names=all_actor_names[:4],
                 )
                 _, c_configs, c_lora = _build_agent_configs(
                     registry, critic_names=[all_critic_names[0]],
@@ -718,15 +737,17 @@ def run_all_evaluations(
                     engine, a_configs, c_configs, samples, dataset_name,
                     {**a_lora, **c_lora}, num_rounds, max_tokens, temperature,
                     router_top_k=1,
+                    router_min_confidence=router_min_confidence,
+                    router_fallback_to_uniform=router_fallback_to_uniform,
                 )
             logger.info(f"  A2: initial={results['A2_actor_diversity'].initial_accuracy:.3f} final={results['A2_actor_diversity'].final_accuracy:.3f}")
             if results_file:
                 _save_results(results_file, results)
 
-            # A3: 1 Actor (phase 3) + 4 Critics (phase 4) + Router — Critic specialization only
+            # A3: 1 Actor (phase 3) + 5 Critics (phase 4) + Router — Critic specialization only
             # Uses PRE-society-training LoRA from phase 3/4 diversification.
             # Causal question: does Critic specialization + Router improve over 1 Critic?
-            logger.info("[A3] 1 phase-diversified Actor + 4 phase-diversified Critics + Router (Critic specialization)...")
+            logger.info("[A3] 1 phase-diversified Actor + 5 phase-diversified Critics + Router (Critic specialization)...")
             if phase_actors and phase_critics:
                 a3_lora = dict(phase_lora)
                 # Keep only the first actor's lora
@@ -739,6 +760,8 @@ def run_all_evaluations(
                     samples, dataset_name,
                     a3_lora, num_rounds, max_tokens, temperature,
                     router_top_k=2,
+                    router_min_confidence=router_min_confidence,
+                    router_fallback_to_uniform=router_fallback_to_uniform,
                 )
             else:
                 logger.warning("  Phase registries empty, falling back to final registry subset")
@@ -752,36 +775,40 @@ def run_all_evaluations(
                     engine, a_configs, c_configs, samples, dataset_name,
                     {**a_lora, **c_lora}, num_rounds, max_tokens, temperature,
                     router_top_k=2,
+                    router_min_confidence=router_min_confidence,
+                    router_fallback_to_uniform=router_fallback_to_uniform,
                 )
             logger.info(f"  A3: initial={results['A3_critic_specialization'].initial_accuracy:.3f} final={results['A3_critic_specialization'].final_accuracy:.3f}")
             if results_file:
                 _save_results(results_file, results)
 
-            # A4: 3 Actors + 4 Critics from FINAL registry, uniform weights (no routing)
+            # A4: 4 Actors + 5 Critics from FINAL registry, uniform weights (no routing)
             # Uses POST-society-training LoRA — shows joint training + diversity effect.
             # Key difference from A5: uniform_weights=True means all critics
             # contribute equally (no softmax confidence gating)
-            logger.info("[A4] 3 Actors + 4 Critics from final registry (no routing, uniform weights)...")
+            logger.info("[A4] 4 Actors + 5 Critics from final registry (no routing, uniform weights)...")
             a_configs, c_configs, lora = _build_agent_configs(
                 registry,
-                actor_names=all_actor_names[:3],
+                actor_names=all_actor_names[:4],
                 critic_names=all_critic_names,
             )
             results["A4_no_routing"] = _run_deliberation_on_samples(
                 engine, a_configs, c_configs, samples, dataset_name,
                 lora, num_rounds, max_tokens, temperature,
-                router_top_k=4,       # Use ALL critics
+                router_top_k=len(c_configs),  # Use ALL critics
                 router_uniform=True,  # Equal weights (no softmax)
+                router_min_confidence=router_min_confidence,
+                router_fallback_to_uniform=router_fallback_to_uniform,
             )
             logger.info(f"  A4: initial={results['A4_no_routing'].initial_accuracy:.3f} final={results['A4_no_routing'].final_accuracy:.3f}")
             if results_file:
                 _save_results(results_file, results)
 
-            # A5: 3 Actors + 4 Critics from FINAL registry + Router (full system)
-            logger.info("[A5] 3 Actors + 4 Critics + Router (full system)...")
+            # A5: 4 Actors + 5 Critics from FINAL registry + Router (full system)
+            logger.info("[A5] 4 Actors + 5 Critics + Router (full system)...")
             a_configs, c_configs, lora = _build_agent_configs(
                 registry,
-                actor_names=all_actor_names[:3],
+                actor_names=all_actor_names[:4],
                 critic_names=all_critic_names,
             )
             results["A5_full_system"] = _run_deliberation_on_samples(
@@ -789,6 +816,8 @@ def run_all_evaluations(
                 lora, num_rounds, max_tokens, temperature,
                 router_top_k=router_top_k,  # From config
                 router_uniform=False,       # Softmax confidence weighting
+                router_min_confidence=router_min_confidence,
+                router_fallback_to_uniform=router_fallback_to_uniform,
             )
             logger.info(f"  A5: initial={results['A5_full_system'].initial_accuracy:.3f} final={results['A5_full_system'].final_accuracy:.3f}")
             if results_file:
@@ -801,6 +830,8 @@ def run_all_evaluations(
                 engine, a_configs, c_configs, samples, dataset_name,
                 lora, num_rounds, max_tokens, temperature,
                 router_top_k=router_top_k,
+                router_min_confidence=router_min_confidence,
+                router_fallback_to_uniform=router_fallback_to_uniform,
             )
 
     finally:
@@ -889,6 +920,8 @@ def main():
         max_model_len=args.max_model_len,
         max_lora_rank=args.max_lora_rank,
         router_top_k=args.router_top_k,
+        router_min_confidence=getattr(args, "router_min_confidence", 0.1),
+        router_fallback_to_uniform=getattr(args, "router_fallback_to_uniform", False),
         phase_actor_dir=phase_actor_dir,
         phase_critic_dir=phase_critic_dir,
         results_file=results_file,

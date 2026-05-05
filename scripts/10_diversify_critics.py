@@ -33,6 +33,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from _utils import setup_logging
 from src.utils.config import ConfigManager
 from src.society.multi_deliberation import LoRAError
+from src.society.critic_schema import (
+    CRITIC_JUDGEMENT_CONTRACT,
+    parse_critic_judgement,
+    render_critic_judgement,
+)
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -44,7 +49,7 @@ STEP_DEFAULTS = {
     "input_dir": "output/society/classified",
     "actor_base_dir": "output/society/actors",
     "output_dir": "output/society/critics",
-    "critic_skills": ["reasoning", "knowledge", "computation", "verification"],
+    "critic_skills": ["computation", "reasoning", "knowledge", "grounding", "verification"],
     "max_delib_samples": 300,
     "num_rounds": 5,
     "num_simulations": 5,
@@ -58,12 +63,12 @@ STEP_DEFAULTS = {
     "num_epochs": 1,
     "max_length": 2048,
     "beta": 0.1,
+    "min_real_specialty_items": 16,
+    "target_pairs_per_critic": 512,
+    "max_pairs_per_critic": 1024,
     "min_pairs_per_critic": 64,
-    "min_specialty_items": 32,
-    "min_specialty_ratio": 0.08,
-    "specialty_ratio": 0.7,
-    "general_ratio": 0.2,
-    "calibration_ratio": 0.1,
+    "allow_synthetic_critique": True,
+    "pair_mix": {"specialty": 0.7, "general": 0.2, "format": 0.1},
     "seed": 42,
     "device": 0,
     "dtype": "bfloat16",
@@ -527,6 +532,239 @@ def select_critic_preference_pairs(
     return preference_pairs
 
 
+def build_structured_critic_pairs(
+    raw_pairs: List[Dict[str, Any]],
+    routed_items: List[Any],
+    critic_skill: str,
+    max_pairs: int,
+    seed: int,
+    min_real_specialty_items: int,
+    pair_mix: Dict[str, float] | None = None,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """Build DPO pairs where chosen/rejected are structured Critic judgements."""
+    import numpy as np
+    from src.society.agent_registry import resolve_critic_skill
+
+    rng = np.random.default_rng(seed)
+    skill = resolve_critic_skill(critic_skill)
+    pair_mix = pair_mix or {"specialty": 0.7, "general": 0.2, "format": 0.1}
+
+    pair_by_id = {
+        p.get("raw_pair_id"): p
+        for p in raw_pairs
+        if p.get("raw_pair_id")
+    }
+    pair_by_content = {
+        (p.get("sample", {}).get("question", ""), p.get("actor_response", "")): p
+        for p in raw_pairs
+    }
+
+    specialty_items = [item for item in routed_items if item.skill == skill]
+    if len(specialty_items) < min_real_specialty_items:
+        return [], {
+            "status": "frozen_base",
+            "reason": "real_specialty_items_below_threshold",
+            "real_specialty_items": len(specialty_items),
+            "min_real_specialty_items": min_real_specialty_items,
+        }
+
+    general_items = [item for item in routed_items if item.skill is None]
+    other_items = [item for item in routed_items if item.skill is not None and item.skill != skill]
+    specialty_quota, general_quota, format_quota = _critic_pair_quotas(max_pairs, pair_mix)
+
+    selected: list[tuple[Any, str]] = []
+    selected.extend((item, "specialty") for item in _sample_items(rng, specialty_items, specialty_quota))
+    selected.extend((item, "general") for item in _sample_items(rng, general_items or routed_items, general_quota))
+    selected.extend((item, "format") for item in _sample_items(rng, specialty_items + other_items + general_items, format_quota))
+
+    structured_pairs: List[Dict[str, Any]] = []
+    for idx, (item, source_bucket) in enumerate(selected):
+        p = pair_by_id.get(getattr(item, "response_id", ""))
+        if p is None:
+            p = pair_by_content.get((item.sample.get("question", ""), item.response))
+        if p is None:
+            continue
+
+        profile = item.profile if isinstance(item.profile, dict) else {}
+        chosen = _render_chosen_judgement(p, profile)
+        rejected = _render_rejected_judgement(
+            p,
+            profile,
+            target_skill=skill.value,
+            negative_kind=_negative_kind(idx, source_bucket),
+        )
+        parsed = parse_critic_judgement(chosen, actor_answer=p.get("actor_answer"))
+        if not parsed.schema_valid:
+            raise RuntimeError(
+                f"Generated invalid structured critic chosen for {p.get('raw_pair_id')}: "
+                f"{parsed.schema_errors}"
+            )
+
+        structured_pairs.append({
+            "sample": p["sample"],
+            "chosen": chosen,
+            "rejected": rejected,
+            "actor_response": p.get("actor_response", ""),
+            "metadata": {
+                "target_skill": skill.value,
+                "assigned_skill": item.skill.value if item.skill else "general",
+                "source_bucket": source_bucket,
+                "routing_weight": item.weight,
+                "error_profile": profile,
+                "raw_pair_id": p.get("raw_pair_id", ""),
+                "actor_name": p.get("actor_name", ""),
+                "actor_answer": p.get("actor_answer", ""),
+                "correct_answer": p.get("correct_answer", ""),
+                "structured_judgement": True,
+            },
+        })
+
+    metrics = summarize_structured_critic_pairs(structured_pairs, len(specialty_items))
+    metrics["status"] = (
+        "trained_specialist"
+        if len(specialty_items) >= min_real_specialty_items
+        else "trained_low_data"
+    )
+    return structured_pairs[:max_pairs], metrics
+
+
+def summarize_structured_critic_pairs(
+    preference_pairs: List[Dict[str, Any]],
+    real_specialty_items: int,
+) -> Dict[str, Any]:
+    total = len(preference_pairs)
+    schema_valid = 0
+    for pair in preference_pairs:
+        parsed = parse_critic_judgement(
+            pair.get("chosen", ""),
+            actor_answer=pair.get("metadata", {}).get("actor_answer", ""),
+        )
+        if parsed.schema_valid:
+            schema_valid += 1
+    bucket_counts = Counter(
+        p.get("metadata", {}).get("source_bucket", "unknown")
+        for p in preference_pairs
+    )
+    assigned_counts = Counter(
+        p.get("metadata", {}).get("assigned_skill", "unknown")
+        for p in preference_pairs
+    )
+    return {
+        "sample_count": total,
+        "real_specialty_items": real_specialty_items,
+        "chosen_schema_valid_rate": schema_valid / total if total else 0.0,
+        "source_bucket_counts": dict(bucket_counts),
+        "assigned_skill_counts": dict(assigned_counts),
+        "synthetic_pair_count": 0,
+        "synthetic_ratio": 0.0,
+    }
+
+
+def _render_chosen_judgement(pair: Dict[str, Any], profile: Dict[str, Any]) -> str:
+    confidence = float(profile.get("confidence", 0.8) or 0.8)
+    primary = str(profile.get("primary", "")).strip().lower()
+    if primary not in {"computation", "reasoning", "knowledge", "grounding", "verification"}:
+        primary = "verification"
+    evidence = str(profile.get("evidence", "")).strip()
+    if not evidence:
+        evidence = "The actor response is inconsistent with the verified answer and needs correction."
+    return render_critic_judgement(
+        answer_correct=False,
+        suggested_final_answer=str(pair.get("correct_answer") or "unknown"),
+        error_type=primary,
+        confidence=max(0.1, min(1.0, confidence)),
+        critique=evidence,
+    )
+
+
+def _render_rejected_judgement(
+    pair: Dict[str, Any],
+    profile: Dict[str, Any],
+    target_skill: str,
+    negative_kind: str,
+) -> str:
+    actor_answer = str(pair.get("actor_answer") or "unknown")
+    correct_answer = str(pair.get("correct_answer") or "unknown")
+    primary = str(profile.get("primary", "verification")).strip().lower()
+    wrong_error_type = {
+        "computation": "knowledge",
+        "reasoning": "verification",
+        "knowledge": "grounding",
+        "grounding": "knowledge",
+        "verification": "reasoning",
+    }.get(primary, "reasoning")
+
+    if negative_kind == "schema_malformed":
+        return (
+            "The response may have an issue, but I am not sure.\n"
+            f"Suggested answer: {correct_answer}\n"
+            "Confidence is medium."
+        )
+    if negative_kind == "answer_correct_wrong":
+        return render_critic_judgement(
+            answer_correct=True,
+            suggested_final_answer=actor_answer,
+            error_type="none",
+            confidence=0.80,
+            critique="The actor answer is acceptable.",
+        )
+    if negative_kind == "suggested_answer_wrong":
+        return render_critic_judgement(
+            answer_correct=False,
+            suggested_final_answer=actor_answer,
+            error_type=primary if primary in {"computation", "reasoning", "knowledge", "grounding", "verification"} else target_skill,
+            confidence=0.75,
+            critique="The critique identifies a problem but repeats the actor's wrong answer.",
+        )
+    if negative_kind == "error_type_wrong":
+        return render_critic_judgement(
+            answer_correct=False,
+            suggested_final_answer=correct_answer,
+            error_type=wrong_error_type,
+            confidence=0.75,
+            critique="The suggested answer may be right, but the error type is misdiagnosed.",
+        )
+    return render_critic_judgement(
+        answer_correct=False,
+        suggested_final_answer=correct_answer,
+        error_type=primary if primary in {"computation", "reasoning", "knowledge", "grounding", "verification"} else target_skill,
+        confidence=0.35,
+        critique="Weak critique.",
+    )
+
+
+def _negative_kind(idx: int, source_bucket: str) -> str:
+    if source_bucket == "format":
+        return "schema_malformed"
+    kinds = (
+        ["schema_malformed"] * 2
+        + ["answer_correct_wrong"] * 3
+        + ["suggested_answer_wrong"] * 2
+        + ["error_type_wrong"] * 3
+        + ["critique_weak"]
+    )
+    return kinds[idx % len(kinds)]
+
+
+def _critic_pair_quotas(max_pairs: int, pair_mix: Dict[str, float]) -> tuple[int, int, int]:
+    specialty = float(pair_mix.get("specialty", 0.7))
+    general = float(pair_mix.get("general", 0.2))
+    fmt = float(pair_mix.get("format", 0.1))
+    total = specialty + general + fmt or 1.0
+    specialty_q = int(round(max_pairs * specialty / total))
+    general_q = int(round(max_pairs * general / total))
+    format_q = max_pairs - specialty_q - general_q
+    return specialty_q, general_q, format_q
+
+
+def _sample_items(rng, items: list[Any], n: int) -> list[Any]:
+    if n <= 0 or not items:
+        return []
+    replace = len(items) < n
+    indices = rng.choice(len(items), size=n if replace else min(n, len(items)), replace=replace)
+    return [items[int(i)] for i in indices]
+
+
 def _routed_item_to_json(item: Any) -> Dict[str, Any]:
     return {
         "sample": item.sample,
@@ -617,12 +855,17 @@ def train_critic_dpo(
     logger.info(f"    Pairs: {len(preference_pairs)}")
     logger.info(f"    Output: {critic_output_dir}")
 
-    # Reconstruct full prompts using the same template as inference
-    # (DELIBERATION_CRITIC with actor_response)
+    # Reconstruct full prompts using the same schema contract as inference.
+    # Prompts include question/options/context and actor_response only.  They do
+    # not include correct_answer; gold is used offline to render chosen labels.
     prompts = []
     for p in preference_pairs:
         sample = p.get("sample", {})
         actor_resp = p.get("actor_response", "")
+        skill_instruction = (
+            f"You are Critic-{critic_skill}. "
+            f"Specialize in detecting {critic_skill} errors.\n"
+        )
         if actor_resp:
             prompt = format_prompt(
                 dataset_name, PromptType.DELIBERATION_CRITIC, sample,
@@ -635,7 +878,7 @@ def train_critic_dpo(
                 sample,
                 include_answer_contract=False,
             )
-        prompts.append(prompt)
+        prompts.append(f"{skill_instruction}{CRITIC_JUDGEMENT_CONTRACT}\n\n{prompt}")
 
     # Convert preference_pairs to HuggingFace Dataset
     hf_data = {
@@ -706,8 +949,7 @@ def main():
     logger.info(
         "  Active critic thresholds: "
         f"min_pairs={args.min_pairs_per_critic}, "
-        f"min_specialty_items={args.min_specialty_items}, "
-        f"min_specialty_ratio={args.min_specialty_ratio}"
+        f"min_real_specialty_items={getattr(args, 'min_real_specialty_items', 16)}"
     )
     if args.min_pairs_per_critic > args.max_delib_samples:
         logger.warning(
@@ -717,10 +959,8 @@ def main():
             "will freeze every critic that relies on generated pairs."
         )
     logger.info(
-        "  Training mix ratios: "
-        f"specialty={args.specialty_ratio}, "
-        f"general={args.general_ratio}, "
-        f"calibration={args.calibration_ratio}"
+        "  Training pair mix: "
+        f"{getattr(args, 'pair_mix', {'specialty': 0.7, 'general': 0.2, 'format': 0.1})}"
     )
     logger.info("=" * 60)
 
@@ -820,7 +1060,7 @@ def main():
         logger.info(f"  Shared source samples: {len(source_samples)}")
 
         pool_metadata = {
-            "version": 2,
+            "version": 3,
             "model_name": args.model_name,
             "dataset": args.dataset,
             "actor_lora_fingerprints": fingerprint_lora_paths(actor_lora_paths),
@@ -911,22 +1151,18 @@ def main():
         for critic_skill in args.critic_skills:
             cache_file = _pairs_cache_path(critic_skill)
             logger.info(f"\n--- Selecting pairs for Critic: {critic_skill} ---")
-            preference_pairs = select_critic_preference_pairs(
+            preference_pairs, metrics = build_structured_critic_pairs(
                 raw_pairs=raw_pairs,
                 routed_items=routed_items,
                 critic_skill=critic_skill,
-                max_samples=args.max_delib_samples,
+                max_pairs=getattr(args, "max_pairs_per_critic", getattr(args, "target_pairs_per_critic", args.max_delib_samples)),
                 seed=args.seed,
-                min_specialty_items=args.min_specialty_items,
-                min_specialty_ratio=args.min_specialty_ratio,
-                specialty_ratio=args.specialty_ratio,
-                general_ratio=args.general_ratio,
-                calibration_ratio=args.calibration_ratio,
+                min_real_specialty_items=getattr(args, "min_real_specialty_items", 16),
+                pair_mix=getattr(args, "pair_mix", {"specialty": 0.7, "general": 0.2, "format": 0.1}),
             )
 
             if preference_pairs:
-                from src.society.diversity_split import summarize_critic_training_pairs
-                critic_metrics[critic_skill] = summarize_critic_training_pairs(preference_pairs)
+                critic_metrics[critic_skill] = metrics
                 if len(preference_pairs) < args.min_pairs_per_critic:
                     inactive_critics[critic_skill] = {
                         "reason": "selected_pairs_below_min_pairs_per_critic",
@@ -948,10 +1184,11 @@ def main():
                 all_pairs[critic_skill] = preference_pairs
             else:
                 inactive_critics[critic_skill] = {
-                    "reason": "specialty_pool_below_active_threshold",
-                    "min_specialty_items": args.min_specialty_items,
-                    "min_specialty_ratio": args.min_specialty_ratio,
+                    "reason": metrics.get("reason", "specialty_pool_below_active_threshold"),
+                    "min_real_specialty_items": getattr(args, "min_real_specialty_items", 16),
+                    "real_specialty_items": metrics.get("real_specialty_items", 0),
                 }
+                critic_metrics[critic_skill] = metrics
                 logger.warning(f"  No preference pairs for '{critic_skill}', skipping")
 
         # Clean up shared engine before DPO training (GPU memory intensive)
@@ -964,8 +1201,14 @@ def main():
         for critic_skill, preference_pairs in all_pairs.items():
             logger.info(f"\n--- Training Critic: {critic_skill} ---")
             if critic_skill not in critic_metrics:
-                from src.society.diversity_split import summarize_critic_training_pairs
-                critic_metrics[critic_skill] = summarize_critic_training_pairs(preference_pairs)
+                real_specialty_items = sum(
+                    1 for p in preference_pairs
+                    if p.get("metadata", {}).get("source_bucket") == "specialty"
+                )
+                critic_metrics[critic_skill] = summarize_structured_critic_pairs(
+                    preference_pairs,
+                    real_specialty_items,
+                )
 
             if len(preference_pairs) < args.min_pairs_per_critic:
                 inactive_critics[critic_skill] = {
@@ -1029,7 +1272,7 @@ def main():
                 "critic_skill": critic_skill,
                 "model_path": critic_paths[critic_skill],
                 "base_model": args.model_name,
-                "status": "active",
+                "status": critic_metrics[critic_skill].get("status", "trained_specialist"),
                 "participates": True,
                 "base_model_only": False,
                 "metrics": critic_metrics[critic_skill],
@@ -1056,13 +1299,12 @@ def main():
                 "inactive_critics": inactive_critics,
                 "active_selection": {
                     "min_pairs_per_critic": args.min_pairs_per_critic,
-                    "min_specialty_items": args.min_specialty_items,
-                    "min_specialty_ratio": args.min_specialty_ratio,
+                    "min_real_specialty_items": getattr(args, "min_real_specialty_items", 16),
+                    "target_pairs_per_critic": getattr(args, "target_pairs_per_critic", args.max_delib_samples),
+                    "max_pairs_per_critic": getattr(args, "max_pairs_per_critic", args.max_delib_samples),
                 },
                 "training_mix": {
-                    "specialty_ratio": args.specialty_ratio,
-                    "general_ratio": args.general_ratio,
-                    "calibration_ratio": args.calibration_ratio,
+                    "pair_mix": getattr(args, "pair_mix", {"specialty": 0.7, "general": 0.2, "format": 0.1}),
                 },
                 "strict_classification": getattr(args, "strict_classification", True),
                 "max_classification_failure_rate": getattr(args, "max_classification_failure_rate", 0.0),

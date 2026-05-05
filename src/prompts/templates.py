@@ -49,16 +49,20 @@ def answer_contract(sample: dict | None = None, task_type: str | None = None) ->
             "\n\nOutput format requirements:\n"
             "1. You MUST start your response with exactly one line:\n"
             "FINAL_ANSWER: Yes or No\n"
-            "2. Then briefly explain your reasoning below.\n"
-            "3. Do not change your answer after the first line."
+            "2. Then write exactly:\n"
+            "RATIONALE:\n"
+            "3. Provide 1-4 concise sentences explaining your reasoning.\n"
+            "4. Do not change your answer after the first line."
         )
     if resolved_task_type == "math":
         return (
             "\n\nOutput format requirements:\n"
             "1. You MUST start your response with exactly one line:\n"
             "FINAL_ANSWER: <numeric_or_expression_answer>\n"
-            "2. Then solve the problem step by step below.\n"
-            "3. Do not change your answer after the first line."
+            "2. Then write exactly:\n"
+            "RATIONALE:\n"
+            "3. Provide 1-4 concise sentences explaining your reasoning.\n"
+            "4. Do not change your answer after the first line."
         )
     if resolved_task_type == "mixed":
         return (
@@ -67,15 +71,19 @@ def answer_contract(sample: dict | None = None, task_type: str | None = None) ->
             "FINAL_ANSWER: <your_answer>\n"
             "   For yes/no questions: FINAL_ANSWER: Yes or FINAL_ANSWER: No\n"
             "   For multiple-choice questions: FINAL_ANSWER: A, B, C, or D\n"
-            "2. Then briefly explain your reasoning below.\n"
-            "3. Do not change your answer after the first line."
+            "2. Then write exactly:\n"
+            "RATIONALE:\n"
+            "3. Provide 1-4 concise sentences explaining your reasoning.\n"
+            "4. Do not change your answer after the first line."
         )
     return (
         "\n\nOutput format requirements:\n"
         "1. You MUST start your response with exactly one line:\n"
         "FINAL_ANSWER: A or B or C or D\n"
-        "2. Then briefly explain your reasoning below.\n"
-        "3. Do not change your answer after the first line."
+        "2. Then write exactly:\n"
+        "RATIONALE:\n"
+        "3. Provide 1-4 concise sentences explaining your reasoning.\n"
+        "4. Do not change your answer after the first line."
     )
 
 

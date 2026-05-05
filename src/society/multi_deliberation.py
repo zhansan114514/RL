@@ -28,7 +28,8 @@ from typing import Any, Optional
 
 from src.algorithms.reward import extract_answer_with_source
 from src.prompts.templates import answer_contract, append_answer_contract
-from src.society.agent_registry import AgentConfig, CRITIC_CONFIDENCE_SUFFIX
+from src.society.agent_registry import AgentConfig
+from src.society.critic_schema import CRITIC_JUDGEMENT_CONTRACT
 from src.society.router import CriticRouter, build_critic_feedback, RoutedFeedback
 
 logger = logging.getLogger(__name__)
@@ -753,7 +754,12 @@ def _build_actor_prompt(
 
     # Prepend actor's style-specific system prompt
     if actor.system_prompt:
-        prompt = f"{actor.system_prompt}\n\n{prompt}"
+        style_name = actor.reasoning_style.value if actor.reasoning_style else actor.name
+        prompt = (
+            f"You are Actor-{style_name}.\n"
+            "You must solve using this reasoning style.\n"
+            f"{actor.system_prompt}\n\n{prompt}"
+        )
 
     # Revision instruction for deliberation rounds
     if round_num > 0:
@@ -796,8 +802,8 @@ def _build_critic_prompt(
     if critic.system_prompt:
         prompt = f"{critic.system_prompt}\n\n{prompt}"
 
-    if CRITIC_CONFIDENCE_SUFFIX not in prompt:
-        prompt = f"{CRITIC_CONFIDENCE_SUFFIX}\n\n{prompt}"
+    if CRITIC_JUDGEMENT_CONTRACT not in prompt:
+        prompt = f"{CRITIC_JUDGEMENT_CONTRACT}\n\n{prompt}"
 
     return prompt
 

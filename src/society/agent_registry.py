@@ -2,8 +2,8 @@
 Agent Registry for managing diverse Actor-Critic Society.
 
 Defines agent types with specialized roles:
-- 3 Actors with different reasoning styles (ALGEBRAIC, DIRECT, BACKTRACKING)
-- 4 Critics with different critic-skill specialties (COMPUTATION, REASONING, KNOWLEDGE, VERIFICATION)
+- 4 Actors with MMLU-aware reasoning styles (DIRECT, EVIDENCE, COMPARATIVE, RULE_BASED)
+- 5 Critics with critic-skill specialties (COMPUTATION, REASONING, KNOWLEDGE, GROUNDING, VERIFICATION)
 
 Each Agent has its own LoRA adapter on top of a shared base model (Qwen2.5-7B-Instruct).
 """
@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Optional
+
+from src.society.critic_schema import CRITIC_JUDGEMENT_CONTRACT
 
 logger = logging.getLogger(__name__)
 
@@ -32,13 +34,12 @@ class AgentRole(Enum):
 
 class ReasoningStyle(Enum):
     """
-    Actor reasoning styles for diverse thinking chains.
-
-    From experiment plan: each Actor specializes in a distinct problem-solving approach.
+    Actor reasoning styles for diverse MMLU-compatible thinking chains.
     """
-    ALGEBRAIC = "algebraic"        # Symbolic manipulation, equations, variables
-    DIRECT = "direct"              # Direct step-by-step numerical computation
-    BACKTRACKING = "backtracking"  # Try-verify-revise approach
+    DIRECT = "direct"              # Final answer first with one concise reason
+    EVIDENCE = "evidence"          # Facts, concepts, and question wording
+    COMPARATIVE = "comparative"    # Option comparison and elimination
+    RULE_BASED = "rule_based"      # Definitions, formulas, rules, constraints
 
 
 class CriticSkill(Enum):
@@ -50,7 +51,8 @@ class CriticSkill(Enum):
     """
     COMPUTATION = "computation"        # Calculation, symbolic manipulation, formula computation
     REASONING = "reasoning"            # Inference chain, rule application, causal/logical jumps
-    KNOWLEDGE = "knowledge"            # Factual/domain knowledge, concepts, unsupported claims
+    KNOWLEDGE = "knowledge"            # Factual/domain knowledge and concepts
+    GROUNDING = "grounding"            # Support from question, choices, passage, or context
     VERIFICATION = "verification"      # Final answer checks, option mapping, self-check failures
 
 
@@ -62,9 +64,9 @@ def resolve_reasoning_style(value: str) -> ReasoningStyle:
     """Resolve a string to ReasoningStyle with robust case-insensitive matching.
 
     Matching priority:
-      1. Exact value match  (e.g. "algebraic")
-      2. Exact name match   (e.g. "ALGEBRAIC")
-      3. Case-insensitive value match (e.g. "Algebraic")
+      1. Exact value match  (e.g. "evidence")
+      2. Exact name match   (e.g. "EVIDENCE")
+      3. Case-insensitive value match (e.g. "Evidence")
 
     Raises ValueError (never silently falls back to a default).
     """
@@ -125,7 +127,7 @@ def resolve_critic_skill(value: str) -> CriticSkill:
     lower = value.lower()
     aliases = {
         "calculation": CriticSkill.COMPUTATION,
-        "grounding": CriticSkill.KNOWLEDGE,
+        "calculus": CriticSkill.COMPUTATION,
         "factual": CriticSkill.KNOWLEDGE,
     }
     if lower in aliases:
@@ -146,20 +148,24 @@ def resolve_critic_skill(value: str) -> CriticSkill:
 # ============================================================
 
 ACTOR_STYLE_PROMPTS = {
-    ReasoningStyle.ALGEBRAIC: (
-        "You are an algebraic reasoner. When solving problems, prefer to set up "
-        "equations with variables (e.g., 'let x ='), use symbolic manipulation, "
-        "and solve systems of equations when possible."
-    ),
     ReasoningStyle.DIRECT: (
-        "You are a direct computational reasoner. When solving problems, prefer "
-        "straightforward step-by-step numerical calculation without symbolic setup. "
-        "Compute each step explicitly."
+        "You are a direct answer-focused reasoner. "
+        "Give the final answer first, then provide one concise reason."
     ),
-    ReasoningStyle.BACKTRACKING: (
-        "You are a backtracking reasoner. When solving problems, first attempt a "
-        "solution, then verify it by substituting back or checking constraints. "
-        "If the verification fails, identify where you went wrong and revise."
+    ReasoningStyle.EVIDENCE: (
+        "You are an evidence-based reasoner. "
+        "Use relevant facts, concepts, question wording, and domain evidence "
+        "to justify your answer."
+    ),
+    ReasoningStyle.COMPARATIVE: (
+        "You are a comparative elimination reasoner. "
+        "Compare the options, eliminate implausible choices, and explain why "
+        "the selected option is best."
+    ),
+    ReasoningStyle.RULE_BASED: (
+        "You are a rule-based reasoner. "
+        "Apply definitions, formulas, formal rules, or constraints step by step "
+        "before choosing the answer."
     ),
 }
 
@@ -175,9 +181,15 @@ CRITIC_SPECIALTY_PROMPTS = {
         "wrong rule application, and unsupported reasoning jumps."
     ),
     CriticSkill.KNOWLEDGE: (
-        "You are a critic specializing in knowledge and grounding errors. "
-        "Check for wrong facts, domain concept confusion, unsupported claims, "
-        "misread question constraints, and mismatches with the provided options."
+        "You are a critic specializing in knowledge errors. "
+        "Check for wrong facts, domain concept confusion, missing background "
+        "knowledge, and misuse of terminology."
+    ),
+    CriticSkill.GROUNDING: (
+        "You are a critic specializing in grounding errors. "
+        "Check whether the response is supported by the question, choices, passage, "
+        "or provided context. Identify unsupported assumptions, ignored constraints, "
+        "and contradictions with the given information."
     ),
     CriticSkill.VERIFICATION: (
         "You are a critic specializing in verification failures. "
@@ -186,18 +198,9 @@ CRITIC_SPECIALTY_PROMPTS = {
     ),
 }
 
-# Verdict prompt suffix for Critic (used by MoE Router + weighted voting)
-CRITIC_CONFIDENCE_SUFFIX = (
-    "\n\nYou MUST start your response with exactly these four verdict fields "
-    "(one per line, before any analysis):\n"
-    "[Answer_Correct: yes or no]\n"
-    "[Suggested_Final_Answer: A or B or C or D or Yes or No or unknown]\n"
-    "[Error_Type: arithmetic or logic or hallucination or verification or none]\n"
-    "[Confidence: 0.0-1.0]\n"
-    "Then provide at most three concise sentences of evidence. "
-    "If Answer_Correct is yes, Suggested_Final_Answer must match the Actor's "
-    "FINAL_ANSWER when it is available; otherwise use unknown."
-)
+# Backward-compatible symbol for older imports. The contract lives in
+# src.society.critic_schema and should not be duplicated here.
+CRITIC_CONFIDENCE_SUFFIX = CRITIC_JUDGEMENT_CONTRACT
 
 
 # ============================================================
@@ -281,8 +284,8 @@ class AgentRegistry:
     """
     Registry for managing the Actor-Critic Society's agents.
 
-    Tracks 3 Actors (ALGEBRAIC, DIRECT, BACKTRACKING) and
-    4 Critics (COMPUTATION, REASONING, KNOWLEDGE, VERIFICATION),
+    Tracks 4 Actors (DIRECT, EVIDENCE, COMPARATIVE, RULE_BASED) and
+    5 Critics (COMPUTATION, REASONING, KNOWLEDGE, GROUNDING, VERIFICATION),
     each with their own LoRA adapter path.
     """
 
@@ -364,10 +367,10 @@ class AgentRegistry:
         base_model_path: str = "Qwen/Qwen2.5-7B-Instruct",
         cache_dir: str = "cache/society",
     ) -> "AgentRegistry":
-        """Create a registry with the default 3-Actor + 4-Critic setup."""
+        """Create a registry with the default 4-Actor + 5-Critic setup."""
         registry = cls(base_model_path=base_model_path)
 
-        # 3 Actors with distinct reasoning styles
+        # 4 Actors with distinct reasoning styles
         for style in ReasoningStyle:
             agent_name = f"actor_{style.value}"
             lora_path = f"{cache_dir}/actors/{agent_name}/adapter"
@@ -379,7 +382,7 @@ class AgentRegistry:
                 reasoning_style=style,
             ))
 
-        # 4 Critics with distinct skill specialties
+        # 5 Critics with distinct skill specialties
         for specialty in CriticSkill:
             agent_name = f"critic_{specialty.value}"
             lora_path = f"{cache_dir}/critics/{agent_name}/adapter"

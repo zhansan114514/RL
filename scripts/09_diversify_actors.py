@@ -1,17 +1,5 @@
 """
-Diversify Actors by training specialized LoRA adapters for each thinking style.
-
-For each Actor:
-1. Load base model
-2. Filter data by reasoning style
-3. Build DPO preference pairs
-4. Train with DPO (lora_r=256, alpha=512, lr=5e-5, beta=0.1)
-5. Save to cache/society/actors/{agent_id}/
-
-Usage:
-    python scripts/09_diversify_actors.py \
-        --config configs/society/experiment_mmlu.yaml \
-        --thinking_styles algebraic direct backtracking
+Diversify Actors by training one LoRA adapter per MMLU-aware reasoning style.
 """
 
 from __future__ import annotations
@@ -20,11 +8,21 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Dict, List
+from collections import Counter, defaultdict
+from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from _utils import setup_logging
+from src.algorithms.reward import extract_answer, math_answers_equal, normalize_answer
+from src.prompts.formatter import format_prompt
+from src.prompts.templates import PromptType
+from src.society.agent_registry import ReasoningStyle
+from src.society.augmentation import (
+    generate_style_conditioned_responses,
+    make_synthetic_rejected_response,
+)
 from src.utils.config import ConfigManager
 
 setup_logging()
@@ -32,11 +30,18 @@ logger = logging.getLogger(__name__)
 
 STEP_DEFAULTS = {
     "model_name": "Qwen/Qwen2.5-7B-Instruct",
-    "dataset": "math",
+    "dataset": "mmlu",
     "cache_dir": "output/society",
     "input_dir": "output/society/classified",
     "output_dir": "output/society/actors",
-    "reasoning_styles": ["algebraic", "direct", "backtracking"],
+    "reasoning_styles": ["direct", "evidence", "comparative", "rule_based"],
+    "min_pairs_per_actor": 256,
+    "target_pairs_per_actor": 512,
+    "max_pairs_per_actor": 1024,
+    "max_pairs_per_sample": 4,
+    "augment_when_below": 256,
+    "max_synthetic_ratio": 0.7,
+    "pair_mix": {"correctness": 0.7, "style": 0.2, "format": 0.1},
     "lora_r": 256,
     "lora_alpha": 512,
     "learning_rate": 5e-5,
@@ -47,393 +52,453 @@ STEP_DEFAULTS = {
     "beta": 0.1,
     "seed": 42,
     "device": 0,
-    "dtype": "bfloat16",
 }
 
 
 def parse_args():
-    parser = __import__("argparse").ArgumentParser(
-        description="Diversify Actors",
-    )
-    parser.add_argument(
-        "--config", type=str, default="configs/society/experiment_mmlu.yaml",
-        help="YAML config path.",
-    )
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Diversify Actors")
+    parser.add_argument("--config", type=str, default="configs/society/experiment_mmlu.yaml")
     cli_args = parser.parse_args()
 
     cfg = ConfigManager.initialize(config_path=cli_args.config)
-    return cfg.step("step03_diversify_actors", defaults=STEP_DEFAULTS).to_namespace()
+    args = cfg.step("step03_diversify_actors", defaults=STEP_DEFAULTS).to_namespace()
+    if not getattr(args, "api_key", ""):
+        args.api_key = os.environ.get("GLM_API_KEY", "")
+    return args
 
 
-def load_classified_data(input_dir: str) -> Dict[str, Any]:
-    """Load classified data from classification step."""
-    classified_file = os.path.join(input_dir, "classified_data.json")
-
-    if not os.path.exists(classified_file):
-        raise FileNotFoundError(f"Classified data not found: {classified_file}")
-
-    with open(classified_file) as f:
+def load_classified_data(input_dir: str) -> dict[str, Any]:
+    path = Path(input_dir) / "classified_data.json"
+    if not path.exists():
+        raise FileNotFoundError(f"Classified data not found: {path}")
+    with open(path) as f:
         data = json.load(f)
-
-    logger.info(f"Loaded {len(data['results'])} classified samples")
-
+    if data.get("schema_version") != 3:
+        raise ValueError(f"Expected classified_data schema_version=3, got {data.get('schema_version')}")
+    logger.info("Loaded %s classified samples", len(data.get("results", [])))
     return data
 
 
-def load_bootstrap_trajectories(cache_dir: str) -> Dict[str, Any]:
-    """Load bootstrap trajectories."""
-    bootstrap_dir = os.path.join(cache_dir, "bootstrap")
-    trajectory_file = os.path.join(bootstrap_dir, "trajectories.jsonl")
-
-    if not os.path.exists(trajectory_file):
-        raise FileNotFoundError(f"Trajectories not found: {trajectory_file}")
-
+def load_bootstrap_trajectories(cache_dir: str) -> dict[str, Any]:
+    path = Path(cache_dir) / "bootstrap" / "trajectories.jsonl"
+    if not path.exists():
+        raise FileNotFoundError(f"Trajectories not found: {path}")
     trajectories = {}
-    with open(trajectory_file) as f:
+    with open(path) as f:
         for line in f:
             if line.strip():
                 traj = json.loads(line)
-                sample_id = traj["sample_id"]
-                trajectories[sample_id] = traj
-
-    logger.info(f"Loaded {len(trajectories)} trajectories")
-
+                trajectories[traj["sample_id"]] = traj
+    logger.info("Loaded %s trajectories", len(trajectories))
     return trajectories
 
 
-def make_response_id(sample_id: str, round_num: int, agent_id: int) -> str:
-    return f"{sample_id}_round_{round_num}_agent_{agent_id}"
-
-
-def flatten_trajectory_responses(sample_id: str, traj: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Flatten initial and debate responses, preserving stable response_id."""
-    responses: List[Dict[str, Any]] = []
-    for resp in traj.get("initial_responses", []):
-        item = dict(resp)
-        round_num = int(item.get("round", 0))
-        agent_id = int(item.get("agent_id", 0))
-        item["response_id"] = item.get("response_id") or make_response_id(
-            sample_id, round_num, agent_id,
-        )
-        responses.append(item)
-    for round_responses in traj.get("debate_rounds", []):
-        for resp in round_responses:
+def flatten_trajectory_responses(sample_id: str, traj: dict[str, Any]) -> list[dict[str, Any]]:
+    responses: list[dict[str, Any]] = []
+    groups = [traj.get("initial_responses", [])]
+    groups.extend(traj.get("debate_rounds", []))
+    for group in groups:
+        for resp in group:
             item = dict(resp)
             round_num = int(item.get("round", 0))
             agent_id = int(item.get("agent_id", 0))
-            item["response_id"] = item.get("response_id") or make_response_id(
-                sample_id, round_num, agent_id,
-            )
+            item["response_id"] = item.get("response_id") or f"{sample_id}_round_{round_num}_agent_{agent_id}"
             responses.append(item)
     return responses
 
 
-def build_preference_pairs_for_style(
-    classified_results: List[Dict],
-    trajectories: Dict[str, Any],
-    thinking_style: str,
-    dataset_name: str,
-) -> List[Dict[str, Any]]:
-    """
-    Build DPO preference pairs for a specific thinking style.
+def _is_correct(response: str, sample: dict[str, Any]) -> bool:
+    task_type = sample.get("task_type", "multiple_choice")
+    correct_answer = sample.get("answer", "")
+    extracted = extract_answer(response, task_type)
+    if task_type == "math":
+        return math_answers_equal(extracted or "", correct_answer)
+    return normalize_answer(extracted or "", task_type) == normalize_answer(correct_answer, task_type)
 
-    Uses per-response labels (not sample-level aggregates) so that
-    each Actor trains only on responses whose style matches its own.
 
-    Chosen: correct response with matching style
-    Rejected: incorrect response (from same sample)
+def _format_valid(response: str) -> bool:
+    lines = [line.strip() for line in (response or "").splitlines() if line.strip()]
+    return bool(lines and lines[0].startswith("FINAL_ANSWER:") and "RATIONALE:" in lines[:4])
 
-    If too few style-specific responses are found, returns an empty list.
-    """
-    from src.algorithms.reward import extract_answer
 
-    preference_pairs = []
+def build_response_index(
+    classified_results: list[dict[str, Any]],
+    trajectories: dict[str, Any],
+) -> dict[str, list[dict[str, Any]]]:
+    by_sample: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    label_by_id: dict[str, dict[str, Any]] = {}
 
-    # Build a per-response style lookup keyed by stable response_id.
-    per_response_lookup: Dict[str, str] = {}
-    for r in classified_results:
-        for label in r.get("per_response_labels", []):
-            if label.get("reasoning_style"):
-                response_id = label.get("response_id")
-                if not response_id:
-                    raise ValueError(
-                        f"Missing response_id in classified label for sample {r['sample_id']}"
-                    )
-                per_response_lookup[response_id] = label["reasoning_style"]
+    for result in classified_results:
+        for label in result.get("per_response_labels", []):
+            rid = label.get("response_id")
+            if rid:
+                label_by_id[rid] = label
 
-    # Collect all samples that have at least one response matching this style
-    matched_sample_count = 0
-    for r in classified_results:
-        sample_id = r["sample_id"]
-        resp_labels = r.get("per_response_labels", [])
-
-        # Check if any response in this sample matches the target style
-        has_matching_style = any(
-            label.get("reasoning_style") == thinking_style
-            for label in resp_labels
-        )
-        if has_matching_style:
-            matched_sample_count += 1
-
-    # Strict: skip if too few style-specific samples
-    if matched_sample_count < 2:
-        logger.warning(
-            f"  Only {matched_sample_count} samples with style '{thinking_style}', "
-            f"skipping (need at least 2 for meaningful specialization)"
-        )
-        return preference_pairs
-
-    logger.info(f"  Found {matched_sample_count} samples with style '{thinking_style}'")
-
-    for r in classified_results:
-        sample_id = r["sample_id"]
-        resp_labels = r.get("per_response_labels", [])
-
-        if sample_id not in trajectories:
-            continue
-
-        traj = trajectories[sample_id]
-        sample = traj["sample"]
-        correct_answer = sample.get("answer", "")
-        task_type = sample.get("task_type", "math")
-
-        # Get responses from all rounds (initial + debate) for more diversity
-        all_responses = flatten_trajectory_responses(sample_id, traj)
-
-        if not all_responses:
-            continue
-
-        # Collect style-matching correct responses and any incorrect responses
-        style_correct_responses = []
-        incorrect_responses = []
-        for resp in all_responses:
-            response_text = resp.get("response", "")
+    for sample_id, traj in trajectories.items():
+        sample = traj.get("sample", {})
+        for resp in flatten_trajectory_responses(sample_id, traj):
             response_id = resp.get("response_id", "")
-            extracted_answer = extract_answer(response_text, task_type)
-
-            from src.algorithms.reward import math_answers_equal
-            if task_type == "math":
-                is_correct = math_answers_equal(extracted_answer or "", correct_answer)
-            else:
-                is_correct = (extracted_answer or "").upper() == (correct_answer or "").upper()
-
-            if is_correct:
-                # Only include as "chosen" if the per-response label matches this style
-                resp_style = per_response_lookup.get(response_id)
-                if resp_style == thinking_style:
-                    style_correct_responses.append((response_text, response_id))
-                # Skip correct responses that don't match this style
-            else:
-                incorrect_responses.append((response_text, response_id))
-
-        chosen_response = None
-        rejected_response = None
-
-        if style_correct_responses and incorrect_responses:
-            # Ideal: style-matching correct vs incorrect — strong preference signal
-            chosen_response, chosen_response_id = style_correct_responses[0]
-            rejected_response, rejected_response_id = incorrect_responses[0]
-        elif len(style_correct_responses) >= 2:
-            # All matching-style correct: no meaningful preference signal.
-            continue
-        elif len(incorrect_responses) >= 2:
-            # All incorrect: no meaningful preference signal, skip
-            continue
-
-        if chosen_response and rejected_response and chosen_response != rejected_response:
-            preference_pairs.append({
+            label = label_by_id.get(response_id, {})
+            response_text = resp.get("response", "")
+            is_correct = bool(label.get("is_correct")) if label else _is_correct(response_text, sample)
+            by_sample[sample_id].append({
+                "sample_id": sample_id,
+                "response_id": response_id,
                 "sample": sample,
-                "chosen": chosen_response,
-                "rejected": rejected_response,
-                "metadata": {
-                    "thinking_style": thinking_style,
-                    "sample_id": sample_id,
-                    "chosen_response_id": chosen_response_id,
-                    "rejected_response_id": rejected_response_id,
-                },
+                "response": response_text,
+                "is_correct": is_correct,
+                "primary_style": label.get("primary_style") or label.get("reasoning_style"),
+                "secondary_styles": label.get("secondary_styles", []),
+                "style_confidence": label.get("reasoning_style_confidence", 0.0),
+                "format_status": label.get("format_status") or ("valid" if _format_valid(response_text) else "answer_only"),
+                "synthetic": False,
             })
+    return by_sample
 
-    logger.info(f"  Built {len(preference_pairs)} preference pairs")
-    return preference_pairs
+
+def _take_limited(
+    items: list[dict[str, Any]],
+    limit_by_sample: Counter[str],
+    max_pairs_per_sample: int,
+) -> list[dict[str, Any]]:
+    selected = []
+    for item in items:
+        sid = item.get("sample_id", "")
+        if limit_by_sample[sid] >= max_pairs_per_sample:
+            continue
+        selected.append(item)
+        limit_by_sample[sid] += 1
+    return selected
+
+
+def build_preference_pairs_for_style(
+    by_sample: dict[str, list[dict[str, Any]]],
+    target_style: str,
+    args: Any,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    mix = dict(getattr(args, "pair_mix", {}) or {})
+    target_pairs = int(getattr(args, "target_pairs_per_actor", 512))
+    max_pairs = int(getattr(args, "max_pairs_per_actor", 1024))
+    max_pairs_per_sample = int(getattr(args, "max_pairs_per_sample", 4))
+    quotas = _pair_quotas(target_pairs, mix)
+
+    correctness_candidates = []
+    style_candidates = []
+    format_candidates = []
+
+    for sample_id, responses in by_sample.items():
+        style_correct = [
+            r for r in responses
+            if r["is_correct"] and r.get("primary_style") == target_style
+        ]
+        other_style_correct = [
+            r for r in responses
+            if r["is_correct"] and r.get("primary_style") and r.get("primary_style") != target_style
+        ]
+        incorrect = [r for r in responses if not r["is_correct"]]
+        malformed = [
+            r for r in responses
+            if r.get("format_status") in {"answer_only", "empty_or_invalid"}
+            or not _format_valid(r.get("response", ""))
+        ]
+
+        for chosen in style_correct:
+            for rejected in incorrect:
+                correctness_candidates.append(_make_pair(chosen, rejected, "correctness"))
+            for rejected in other_style_correct:
+                style_candidates.append(_make_pair(chosen, rejected, "style"))
+            for rejected in malformed:
+                if rejected["response_id"] != chosen["response_id"]:
+                    format_candidates.append(_make_pair(chosen, rejected, "format"))
+
+    pairs: list[dict[str, Any]] = []
+    per_sample_counter: Counter[str] = Counter()
+    for kind, pool in (
+        ("correctness", correctness_candidates),
+        ("style", style_candidates),
+        ("format", format_candidates),
+    ):
+        selected = _take_limited(pool, per_sample_counter, max_pairs_per_sample)
+        pairs.extend(selected[:quotas[kind]])
+
+    if len(pairs) < target_pairs:
+        filler = correctness_candidates + style_candidates + format_candidates
+        existing = {
+            (
+                p["metadata"].get("chosen_response_id"),
+                p["metadata"].get("rejected_response_id"),
+                p["metadata"].get("pair_type"),
+            )
+            for p in pairs
+        }
+        for pair in filler:
+            key = (
+                pair["metadata"].get("chosen_response_id"),
+                pair["metadata"].get("rejected_response_id"),
+                pair["metadata"].get("pair_type"),
+            )
+            if key in existing:
+                continue
+            sid = pair["metadata"].get("sample_id", "")
+            if per_sample_counter[sid] >= max_pairs_per_sample:
+                continue
+            pairs.append(pair)
+            per_sample_counter[sid] += 1
+            existing.add(key)
+            if len(pairs) >= target_pairs:
+                break
+
+    pairs = pairs[:max_pairs]
+    metrics = _pair_metrics(pairs)
+    metrics.update({
+        "real_pair_count": len(pairs),
+        "synthetic_pair_count": 0,
+        "synthetic_ratio": 0.0,
+        "candidate_counts": {
+            "correctness": len(correctness_candidates),
+            "style": len(style_candidates),
+            "format": len(format_candidates),
+        },
+    })
+    return pairs, metrics
+
+
+def augment_pairs_if_needed(
+    pairs: list[dict[str, Any]],
+    by_sample: dict[str, list[dict[str, Any]]],
+    target_style: str,
+    args: Any,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    min_pairs = int(getattr(args, "min_pairs_per_actor", 256))
+    augment_when_below = int(getattr(args, "augment_when_below", min_pairs))
+    if len(pairs) >= augment_when_below:
+        return pairs, {"synthetic_pair_count": 0, "synthetic_ratio": 0.0}
+
+    max_synth_ratio = float(getattr(args, "max_synthetic_ratio", 0.7))
+    max_total = int(getattr(args, "max_pairs_per_actor", 1024))
+    needed = max(0, min_pairs - len(pairs))
+    max_synth_by_ratio = int((max_synth_ratio * max(len(pairs), 1)) / max(1.0 - max_synth_ratio, 1e-6))
+    max_synthetic = min(needed, max_synth_by_ratio, max_total - len(pairs))
+    if max_synthetic <= 0:
+        return pairs, {"synthetic_pair_count": 0, "synthetic_ratio": 0.0}
+
+    samples = [items[0]["sample"] for items in by_sample.values() if items]
+    synthetic = generate_style_conditioned_responses(
+        samples=samples,
+        target_style=target_style,
+        dataset_name=args.dataset,
+        max_generations=max_synthetic,
+        api_key=getattr(args, "api_key", ""),
+        api_base=getattr(args, "api_base", "https://api.labforge.top"),
+        api_model=getattr(args, "api_model", "gpt5.5"),
+        cache_dir=args.input_dir,
+        request_timeout=getattr(args, "request_timeout", 60),
+        max_retries=getattr(args, "max_retries", 5),
+        retry_delay=getattr(args, "retry_delay", 5),
+    )
+
+    synthetic_pairs = []
+    for idx, item in enumerate(synthetic):
+        sample = item["sample"]
+        rejected = make_synthetic_rejected_response(sample)
+        synthetic_pairs.append({
+            "sample": sample,
+            "chosen": item["response"],
+            "rejected": rejected,
+            "metadata": {
+                "thinking_style": target_style,
+                "sample_id": sample.get("question", f"synthetic_{idx}"),
+                "chosen_response_id": f"synthetic_{target_style}_{idx}",
+                "rejected_response_id": f"synthetic_rejected_{target_style}_{idx}",
+                "pair_type": "synthetic_correctness",
+                "synthetic": True,
+                "style_confidence": item.get("style_confidence", 0.0),
+            },
+        })
+
+    pairs = (pairs + synthetic_pairs)[:max_total]
+    synth_count = sum(1 for p in pairs if p.get("metadata", {}).get("synthetic"))
+    return pairs, {
+        "synthetic_pair_count": synth_count,
+        "synthetic_ratio": synth_count / len(pairs) if pairs else 0.0,
+    }
+
+
+def _pair_quotas(target_pairs: int, mix: dict[str, float]) -> dict[str, int]:
+    defaults = {"correctness": 0.7, "style": 0.2, "format": 0.1}
+    ratios = {k: float(mix.get(k, defaults[k])) for k in defaults}
+    total = sum(ratios.values()) or 1.0
+    quotas = {k: int(round(target_pairs * ratios[k] / total)) for k in ratios}
+    delta = target_pairs - sum(quotas.values())
+    quotas["correctness"] += delta
+    return quotas
+
+
+def _make_pair(chosen: dict[str, Any], rejected: dict[str, Any], pair_type: str) -> dict[str, Any]:
+    return {
+        "sample": chosen["sample"],
+        "chosen": chosen["response"],
+        "rejected": rejected["response"],
+        "metadata": {
+            "thinking_style": chosen.get("primary_style"),
+            "sample_id": chosen.get("sample_id", ""),
+            "chosen_response_id": chosen.get("response_id", ""),
+            "rejected_response_id": rejected.get("response_id", ""),
+            "pair_type": pair_type,
+            "synthetic": bool(chosen.get("synthetic") or rejected.get("synthetic")),
+        },
+    }
+
+
+def _pair_metrics(pairs: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "pair_count": len(pairs),
+        "pair_type_counts": dict(Counter(
+            p.get("metadata", {}).get("pair_type", "unknown")
+            for p in pairs
+        )),
+        "unique_samples": len({
+            p.get("metadata", {}).get("sample_id", "")
+            for p in pairs
+        }),
+    }
 
 
 def train_actor_dpo(
     model_name: str,
-    preference_pairs: List[Dict],
+    preference_pairs: list[dict[str, Any]],
     thinking_style: str,
     output_dir: str,
     dataset_name: str,
-    lora_r: int,
-    lora_alpha: int,
-    learning_rate: float,
-    batch_size: int,
-    gradient_accumulation_steps: int,
-    num_epochs: int,
-    max_length: int,
-    beta: float,
-    seed: int,
-    device: int,
+    args: Any,
 ) -> str:
-    """Train Actor with DPO."""
     from datasets import Dataset
     from src.training.dpo_trainer import train_dpo
     from src.utils.model_utils import detect_model_type
-    from src.prompts.formatter import format_prompt
-    from src.prompts.templates import PromptType
 
     model_type = detect_model_type(model_name)
-
-    # Create output directory
     actor_output_dir = os.path.join(output_dir, f"actor_{thinking_style}")
     os.makedirs(actor_output_dir, exist_ok=True)
 
-    logger.info(f"  Training DPO for '{thinking_style}'...")
-    logger.info(f"    Pairs: {len(preference_pairs)}")
-    logger.info(f"    Output: {actor_output_dir}")
-
-    # Reconstruct full prompts using the same template as generation
     prompts = [
-        format_prompt(dataset_name, PromptType.SINGLE_SHOT, p["sample"])
+        _actor_training_prompt(dataset_name, thinking_style, p["sample"])
         for p in preference_pairs
     ]
-
-    # Convert preference_pairs to HuggingFace Dataset
-    hf_data = {
+    dataset = Dataset.from_dict({
         "prompt": prompts,
         "chosen": [p["chosen"] for p in preference_pairs],
         "rejected": [p["rejected"] for p in preference_pairs],
-    }
-    preference_dataset = Dataset.from_dict(hf_data)
-
-    # Train DPO
-    checkpoint_path = train_dpo(
+    })
+    return train_dpo(
         model_name_or_path=model_name,
-        preference_dataset=preference_dataset,
+        preference_dataset=dataset,
         output_dir=actor_output_dir,
         model_type=model_type,
-        lora_r=lora_r,
-        lora_alpha=lora_alpha,
-        learning_rate=learning_rate,
-        batch_size=batch_size,
-        gradient_accumulation_steps=gradient_accumulation_steps,
-        num_epochs=num_epochs,
-        max_length=max_length,
-        beta=beta,
-        seed=seed,
-        device=device,
+        lora_r=args.lora_r,
+        lora_alpha=args.lora_alpha,
+        learning_rate=args.learning_rate,
+        batch_size=args.batch_size,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        num_epochs=args.num_epochs,
+        max_length=args.max_length,
+        beta=args.beta,
+        seed=args.seed,
+        device=args.device,
     )
 
-    logger.info(f"  Checkpoint saved: {checkpoint_path}")
 
-    return checkpoint_path
+def _actor_training_prompt(dataset_name: str, thinking_style: str, sample: dict[str, Any]) -> str:
+    from src.society.agent_registry import ACTOR_STYLE_PROMPTS
+
+    style = ReasoningStyle(thinking_style)
+    base_prompt = format_prompt(dataset_name, PromptType.SINGLE_SHOT, sample)
+    return (
+        f"You are Actor-{thinking_style}.\n"
+        "You must solve using this reasoning style.\n"
+        f"{ACTOR_STYLE_PROMPTS[style]}\n\n{base_prompt}"
+    )
 
 
-def main():
+def main() -> None:
     args = parse_args()
-
-    # Setup directories
-    input_dir = args.input_dir
-    output_dir = args.output_dir
-    os.makedirs(output_dir, exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
 
     logger.info("=" * 60)
     logger.info("Diversify Actors")
-    logger.info(f"  Model: {args.model_name}")
-    logger.info(f"  Input dir: {input_dir}")
-    logger.info(f"  Output dir: {output_dir}")
-    logger.info(f"  Reasoning styles: {args.reasoning_styles}")
+    logger.info("  Model: %s", args.model_name)
+    logger.info("  Styles: %s", args.reasoning_styles)
     logger.info("=" * 60)
 
-    # Load classified data
-    logger.info("[Step 1] Loading classified data...")
-    classified_data = load_classified_data(input_dir)
-    classified_results = classified_data["results"]
-
-    # Load trajectories
-    logger.info("[Step 2] Loading bootstrap trajectories...")
+    classified = load_classified_data(args.input_dir)
     trajectories = load_bootstrap_trajectories(args.cache_dir)
+    by_sample = build_response_index(classified["results"], trajectories)
 
-    # Train each actor
-    logger.info("[Step 3] Training specialized actors...")
-
-    actor_paths = {}
+    actor_paths: dict[str, str] = {}
+    actor_metrics: dict[str, Any] = {}
 
     for thinking_style in args.reasoning_styles:
-        logger.info(f"\n--- Training Actor: {thinking_style} ---")
+        ReasoningStyle(thinking_style)
+        logger.info("--- Building Actor pairs: %s ---", thinking_style)
+        cache_path = Path(args.output_dir) / f"pairs_{thinking_style}.json"
+        metrics_path = Path(args.output_dir) / f"pairs_{thinking_style}_metrics.json"
 
-        # Check for cached preference pairs
-        pairs_cache = os.path.join(output_dir, f"pairs_{thinking_style}.json")
-        if os.path.exists(pairs_cache):
-            with open(pairs_cache) as f:
-                preference_pairs = json.load(f)
-            logger.info(f"  Loaded {len(preference_pairs)} cached pairs for '{thinking_style}'")
+        if cache_path.exists():
+            with open(cache_path) as f:
+                pairs = json.load(f)
+            metrics = _pair_metrics(pairs)
         else:
-            # Build preference pairs for this style
-            preference_pairs = build_preference_pairs_for_style(
-                classified_results,
-                trajectories,
-                thinking_style,
-                args.dataset,
+            pairs, metrics = build_preference_pairs_for_style(by_sample, thinking_style, args)
+            pairs, synth_metrics = augment_pairs_if_needed(pairs, by_sample, thinking_style, args)
+            metrics.update(synth_metrics)
+            metrics["real_pair_count"] = len(pairs) - metrics.get("synthetic_pair_count", 0)
+            metrics["trained_low_data"] = len(pairs) < int(args.min_pairs_per_actor)
+            with open(cache_path, "w") as f:
+                json.dump(pairs, f, indent=2, ensure_ascii=False)
+            with open(metrics_path, "w") as f:
+                json.dump(metrics, f, indent=2, ensure_ascii=False)
+
+        actor_metrics[thinking_style] = metrics
+        if len(pairs) < int(args.min_pairs_per_actor):
+            raise RuntimeError(
+                f"Actor {thinking_style} has {len(pairs)} pairs, below "
+                f"min_pairs_per_actor={args.min_pairs_per_actor}"
             )
 
-            if preference_pairs:
-                with open(pairs_cache, "w") as f:
-                    json.dump(preference_pairs, f)
-                logger.info(f"  Cached {len(preference_pairs)} pairs to {pairs_cache}")
-
-        if not preference_pairs:
-            logger.warning(f"  No preference pairs for '{thinking_style}', skipping")
-            continue
-
-        # Train DPO
-        checkpoint_path = train_actor_dpo(
+        checkpoint = train_actor_dpo(
             model_name=args.model_name,
-            preference_pairs=preference_pairs,
+            preference_pairs=pairs,
             thinking_style=thinking_style,
-            output_dir=output_dir,
+            output_dir=args.output_dir,
             dataset_name=args.dataset,
-            lora_r=args.lora_r,
-            lora_alpha=args.lora_alpha,
-            learning_rate=args.learning_rate,
-            batch_size=args.batch_size,
-            gradient_accumulation_steps=args.gradient_accumulation_steps,
-            num_epochs=args.num_epochs,
-            max_length=args.max_length,
-            beta=args.beta,
-            seed=args.seed,
-            device=args.device,
+            args=args,
         )
+        actor_paths[thinking_style] = checkpoint
 
-        actor_paths[thinking_style] = checkpoint_path
-
-    # Save actor registry
-    logger.info("\n[Step 4] Saving actor registry...")
-
-    registry_file = os.path.join(output_dir, "actor_registry.json")
+    registry_file = Path(args.output_dir) / "actor_registry.json"
     with open(registry_file, "w") as f:
         json.dump({
+            "schema_version": 3,
             "actors": {
                 style: {
                     "thinking_style": style,
                     "model_path": path,
                     "base_model": args.model_name,
+                    "metrics": actor_metrics.get(style, {}),
                 }
                 for style, path in actor_paths.items()
             },
             "metadata": {
                 "base_model": args.model_name,
                 "num_actors": len(actor_paths),
+                "min_pairs_per_actor": args.min_pairs_per_actor,
+                "target_pairs_per_actor": args.target_pairs_per_actor,
+                "max_pairs_per_actor": args.max_pairs_per_actor,
             },
-        }, f, indent=2)
+        }, f, indent=2, ensure_ascii=False)
 
-    logger.info(f"  Registry saved: {registry_file}")
-
-    logger.info("=" * 60)
-    logger.info("Actor diversification complete!")
-    logger.info(f"  Trained {len(actor_paths)} actors:")
-    for style, path in actor_paths.items():
-        logger.info(f"    {style}: {path}")
-    logger.info("=" * 60)
+    logger.info("Actor diversification complete: %s", registry_file)
 
 
 if __name__ == "__main__":

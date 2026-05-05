@@ -6,8 +6,9 @@ Raises ClassificationError when API is required but unavailable,
 instead of silently falling back to unreliable heuristics.
 
 From experiment plan:
-- Reasoning styles (for correct responses): ALGEBRAIC, DIRECT, BACKTRACKING
+- Reasoning styles (for correct responses): direct/evidence/comparative/rule_based
 - Error profiles (for incorrect responses): computation/reasoning/knowledge/grounding/verification
+  plus format_failure/ambiguous routing labels
 """
 
 from __future__ import annotations
@@ -41,14 +42,23 @@ class ClassificationError(Exception):
 @dataclass
 class ReasoningStyleResult:
     """Result of reasoning style classification."""
-    style: ReasoningStyle
+    primary_style: ReasoningStyle
+    secondary_styles: list[ReasoningStyle]
+    format_status: str
     confidence: float
+    evidence: str = ""
     raw_response: str = ""
+
+    @property
+    def style(self) -> ReasoningStyle:
+        """Alias for callers that need the primary style enum."""
+        return self.primary_style
 
 
 @dataclass
 class ErrorProfileResult:
     """Result of multi-dimensional error profile classification."""
+    format_status: str
     scores: dict[str, float]
     primary: str
     secondary: list[str]
@@ -78,19 +88,31 @@ def normalize_chat_api_url(api_url: str) -> str:
         return f"{url}/chat/completions"
     return f"{url}/v1/chat/completions"
 
-# Classification prompts (from experiment plan)
-REASONING_STYLE_PROMPT = """Given a math problem and a correct solution, classify the reasoning style:
+# Classification prompts
+REASONING_STYLE_PROMPT = """Classify the reasoning style of this model response for an MMLU-style task.
 
-Problem: {question}
-Solution: {response}
-Correct Answer: {answer}
+Question:
+{question}
 
-Classify into exactly one category:
-- ALGEBRAIC: Uses symbolic manipulation, equations, variables (e.g., "let x =", solving systems)
-- DIRECT: Direct step-by-step numerical computation without symbolic setup
-- BACKTRACKING: Starts with an attempt, verifies it, then revises if needed
+Response:
+{response}
 
-Respond with only the category name."""
+Ignore any leading FINAL_ANSWER line. Classify the reasoning body.
+
+Definitions:
+- direct: final answer with one short reason and little decomposition
+- evidence: uses relevant facts, concepts, question wording, or domain evidence
+- comparative: compares options or eliminates alternatives
+- rule_based: applies definitions, formulas, formal rules, or constraints step by step
+
+Return JSON only:
+{{
+  "primary_style": "direct|evidence|comparative|rule_based",
+  "secondary_styles": ["direct|evidence|comparative|rule_based"],
+  "format_status": "valid|answer_only|empty_or_invalid",
+  "confidence": 0.0,
+  "evidence": "short reason"
+}}"""
 
 ERROR_PROFILE_PROMPT = """
 You are classifying why a model response is wrong.
@@ -121,6 +143,7 @@ Score each error dimension from 0.0 to 1.0:
 
 Return JSON only:
 {{
+  "format_status": "valid|answer_only|empty_or_invalid",
   "scores": {{
     "computation": float,
     "reasoning": float,
@@ -128,7 +151,7 @@ Return JSON only:
     "grounding": float,
     "verification": float
   }},
-  "primary": "computation|reasoning|knowledge|grounding|verification|unknown",
+  "primary": "computation|reasoning|knowledge|grounding|verification|format_failure|ambiguous",
   "secondary": ["computation|reasoning|knowledge|grounding|verification"],
   "confidence": float,
   "evidence": "short reason"
@@ -142,6 +165,8 @@ ERROR_PROFILE_DIMENSIONS = (
     "grounding",
     "verification",
 )
+ERROR_PROFILE_PRIMARY_LABELS = ERROR_PROFILE_DIMENSIONS + ("format_failure", "ambiguous")
+FORMAT_STATUSES = {"valid", "answer_only", "empty_or_invalid"}
 
 
 # ============================================================
@@ -297,60 +322,93 @@ def _call_api(
 # ============================================================
 
 def _parse_style_response(response: str) -> Optional[ReasoningStyle]:
-    """Parse API response into ReasoningStyle.
-
-    Handles markdown bold, word variants, and verbose responses.
-    Uses word-boundary matching to avoid false positives like
-    'NOT ALGEBRAIC' matching ALGEBRAIC.
-    """
+    """Parse a style label from JSON or fallback text."""
     if not response:
         return None
     import re
-    # Strip markdown bold/italic, quotes, brackets
-    clean = re.sub(r'[*_`"\'\(\)\[\]{}]', ' ', response.upper().strip())
+
+    data = _extract_json(response)
+    if isinstance(data, dict):
+        label = str(data.get("primary_style", "")).strip().lower()
+        try:
+            return ReasoningStyle(label)
+        except ValueError:
+            pass
+
+    clean = re.sub(r'[*_`"\'\(\)\[\]{}]', ' ', response.lower().strip())
     for style in ReasoningStyle:
-        pattern = r'\b' + re.escape(style.value.upper()) + r'\b'
+        pattern = r'\b' + re.escape(style.value) + r'\b'
         if re.search(pattern, clean):
             return style
-    # Variant matching (e.g., ALGEBRAICALLY -> ALGEBRAIC)
+
     variants = {
-        "ALGEBRAICALLY": ReasoningStyle.ALGEBRAIC,
-        "ALGEBRA": ReasoningStyle.ALGEBRAIC,
-        "DIRECTLY": ReasoningStyle.DIRECT,
-        "BACKTRACK": ReasoningStyle.BACKTRACKING,
+        "directly": ReasoningStyle.DIRECT,
+        "evidential": ReasoningStyle.EVIDENCE,
+        "evidence_based": ReasoningStyle.EVIDENCE,
+        "comparison": ReasoningStyle.COMPARATIVE,
+        "comparative_elimination": ReasoningStyle.COMPARATIVE,
+        "elimination": ReasoningStyle.COMPARATIVE,
+        "rule": ReasoningStyle.RULE_BASED,
+        "rulebased": ReasoningStyle.RULE_BASED,
     }
-    words = re.findall(r'\b[A-Z]+\b', clean)
+    words = re.findall(r'\b[a-z_]+\b', clean)
     for word in words:
         if word in variants:
             return variants[word]
     return None
 
 
-def _clamp01(value: object, default: float = 0.0) -> float:
-    """Convert a value to a bounded 0..1 float."""
-    try:
-        return max(0.0, min(1.0, float(value)))
-    except (TypeError, ValueError):
-        return default
+def _parse_style_json_response(response: str) -> Optional[ReasoningStyleResult]:
+    """Parse the JSON style-classification response."""
+    data = _extract_json(response)
+    if not isinstance(data, dict):
+        style = _parse_style_response(response)
+        if style is None:
+            return None
+        return ReasoningStyleResult(
+            primary_style=style,
+            secondary_styles=[],
+            format_status="valid",
+            confidence=0.9,
+            evidence="parsed fallback label",
+            raw_response=response or "",
+        )
 
+    style = _parse_style_response(response)
+    if style is None:
+        return None
 
-def _unknown_error_profile(raw_response: str = "", evidence: str = "") -> ErrorProfileResult:
-    """Return an explicit unknown profile without assigning it to reasoning/logic."""
-    return ErrorProfileResult(
-        scores={dim: 0.0 for dim in ERROR_PROFILE_DIMENSIONS},
-        primary="unknown",
-        secondary=[],
-        confidence=0.0,
-        evidence=evidence,
-        raw_response=raw_response,
+    secondary_raw = data.get("secondary_styles", [])
+    if isinstance(secondary_raw, str):
+        secondary_raw = [secondary_raw]
+    secondary_styles: list[ReasoningStyle] = []
+    if isinstance(secondary_raw, list):
+        for label in secondary_raw:
+            try:
+                parsed = ReasoningStyle(str(label).strip().lower())
+            except ValueError:
+                continue
+            if parsed != style and parsed not in secondary_styles:
+                secondary_styles.append(parsed)
+
+    format_status = str(data.get("format_status", "valid")).strip().lower()
+    if format_status not in FORMAT_STATUSES:
+        format_status = "valid"
+
+    return ReasoningStyleResult(
+        primary_style=style,
+        secondary_styles=secondary_styles,
+        format_status=format_status,
+        confidence=_clamp01(data.get("confidence"), 0.5),
+        evidence=str(data.get("evidence", "")).strip(),
+        raw_response=response or "",
     )
 
 
-def _parse_error_profile_response(response: str) -> Optional[ErrorProfileResult]:
-    """Parse a JSON error-profile API response."""
+def _extract_json(response: str) -> Optional[object]:
+    """Extract a JSON object or array from model output."""
     if not response:
         return None
-
     import re
 
     text = response.strip()
@@ -364,25 +422,48 @@ def _parse_error_profile_response(response: str) -> Optional[ErrorProfileResult]
         text = text[start:end + 1]
 
     try:
-        data = json.loads(text)
+        return json.loads(text)
     except json.JSONDecodeError:
-        # GLM API returns LaTeX-style backslashes (e.g. \( \sqrt \))
-        # which are invalid JSON escape sequences. Fix and retry.
         try:
             fixed = re.sub(
                 r'\\([^"\\/bfnrtu])',
                 lambda m: '\\\\' + m.group(1),
                 text,
             )
-            data = json.loads(fixed)
+            return json.loads(fixed)
         except json.JSONDecodeError:
-            # Last resort: strip evidence field entirely and retry
-            try:
-                stripped = re.sub(r'"evidence"\s*:\s*"[^"]*"', '"evidence": ""', text)
-                stripped = re.sub(r'"evidence"\s*:\s*\{[^}]*\}', '"evidence": ""', stripped)
-                data = json.loads(stripped)
-            except json.JSONDecodeError:
-                return None
+            return None
+
+
+def _clamp01(value: object, default: float = 0.0) -> float:
+    """Convert a value to a bounded 0..1 float."""
+    try:
+        return max(0.0, min(1.0, float(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _ambiguous_error_profile(raw_response: str = "", evidence: str = "") -> ErrorProfileResult:
+    """Return an explicit ambiguous profile without assigning a specialist."""
+    return ErrorProfileResult(
+        format_status="empty_or_invalid",
+        scores={dim: 0.0 for dim in ERROR_PROFILE_DIMENSIONS},
+        primary="ambiguous",
+        secondary=[],
+        confidence=0.0,
+        evidence=evidence,
+        raw_response=raw_response,
+    )
+
+
+def _parse_error_profile_response(response: str) -> Optional[ErrorProfileResult]:
+    """Parse a JSON error-profile API response."""
+    if not response:
+        return None
+
+    data = _extract_json(response)
+    if not isinstance(data, dict):
+        return None
 
     raw_scores = data.get("scores", {})
     if not isinstance(raw_scores, dict):
@@ -394,8 +475,8 @@ def _parse_error_profile_response(response: str) -> Optional[ErrorProfileResult]
     }
 
     primary = str(data.get("primary", "")).strip().lower()
-    if primary not in ERROR_PROFILE_DIMENSIONS:
-        primary = max(scores.items(), key=lambda kv: kv[1])[0] if any(scores.values()) else "unknown"
+    if primary not in ERROR_PROFILE_PRIMARY_LABELS:
+        primary = max(scores.items(), key=lambda kv: kv[1])[0] if any(scores.values()) else "ambiguous"
 
     secondary_raw = data.get("secondary", [])
     if isinstance(secondary_raw, str):
@@ -409,8 +490,19 @@ def _parse_error_profile_response(response: str) -> Optional[ErrorProfileResult]
 
     confidence = _clamp01(data.get("confidence"), 0.5)
     evidence = str(data.get("evidence", "")).strip()
+    format_status = str(data.get("format_status", "valid")).strip().lower()
+    if format_status not in FORMAT_STATUSES:
+        format_status = "valid"
+    if format_status in {"answer_only", "empty_or_invalid"}:
+        primary = "format_failure"
+        secondary = [
+            label
+            for label in secondary
+            if label in ERROR_PROFILE_DIMENSIONS
+        ]
 
     return ErrorProfileResult(
+        format_status=format_status,
         scores=scores,
         primary=primary,
         secondary=secondary,
@@ -515,8 +607,15 @@ def classify_reasoning_style(
     cached = _load_cache(cache_path)
     if cached:
         return ReasoningStyleResult(
-            style=ReasoningStyle(cached["style"]),
+            primary_style=ReasoningStyle(cached.get("primary_style") or cached["style"]),
+            secondary_styles=[
+                ReasoningStyle(s)
+                for s in cached.get("secondary_styles", [])
+                if s in {style.value for style in ReasoningStyle}
+            ],
+            format_status=cached.get("format_status", "valid"),
             confidence=cached.get("confidence", 0.9),
+            evidence=cached.get("evidence", ""),
             raw_response=cached.get("raw_response", ""),
         )
 
@@ -525,7 +624,6 @@ def classify_reasoning_style(
         prompt = REASONING_STYLE_PROMPT.format(
             question=question,
             response=response[:2000],
-            answer=correct_answer,
         )
         api_response = _call_api(
             prompt,
@@ -536,29 +634,26 @@ def classify_reasoning_style(
             max_retries=max_retries,
             retry_delay=retry_delay,
         )
-        style = _parse_style_response(api_response)
+        result = _parse_style_json_response(api_response)
 
-        if style is not None:
+        if result is not None:
             _save_cache(cache_path, {
-                "style": style.value,
-                "confidence": 0.9,
+                "style": result.primary_style.value,
+                "primary_style": result.primary_style.value,
+                "secondary_styles": [s.value for s in result.secondary_styles],
+                "format_status": result.format_status,
+                "confidence": result.confidence,
+                "evidence": result.evidence,
                 "raw_response": api_response or "",
             })
-            return ReasoningStyleResult(
-                style=style, confidence=0.9, raw_response=api_response or ""
-            )
+            return result
 
         # API responded but we couldn't parse it
         raise ClassificationError(
             f"Could not parse reasoning style from API response: {api_response!r}"
         )
 
-    # use_api=False: fall back to deterministic assignment
-    import hashlib
-    styles = list(ReasoningStyle)
-    idx = int(hashlib.md5((question + response).encode()).hexdigest(), 16) % len(styles)
-    fallback = styles[idx]
-    return ReasoningStyleResult(style=fallback, confidence=0.5, raw_response="fallback")
+    raise ClassificationError("Classification requires API or cached result.")
 
 
 def classify_error_profile(
@@ -608,10 +703,15 @@ def classify_error_profile(
     # Check cache first
     cached = _load_cache(cache_path)
     if cached:
+        cached_format_status = cached.get("format_status", "valid")
+        cached_primary = cached.get("primary", "ambiguous")
+        if cached_format_status in {"answer_only", "empty_or_invalid"}:
+            cached_primary = "format_failure"
         return ErrorProfileResult(
+            format_status=cached_format_status,
             scores={dim: _clamp01(cached.get("scores", {}).get(dim), 0.0)
                     for dim in ERROR_PROFILE_DIMENSIONS},
-            primary=cached.get("primary", "unknown"),
+            primary=cached_primary,
             secondary=cached.get("secondary", []),
             confidence=_clamp01(cached.get("confidence"), 0.0),
             evidence=cached.get("evidence", ""),
@@ -644,6 +744,7 @@ def classify_error_profile(
 
         if profile is not None:
             _save_cache(cache_path, {
+                "format_status": profile.format_status,
                 "scores": profile.scores,
                 "primary": profile.primary,
                 "secondary": profile.secondary,
@@ -657,7 +758,7 @@ def classify_error_profile(
             f"Could not parse error profile JSON from API response: {api_response!r}"
         )
 
-    return _unknown_error_profile(raw_response="fallback", evidence="use_api=False")
+    raise ClassificationError("Classification requires API or cached result.")
 
 
 # ============================================================

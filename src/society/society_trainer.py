@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.society.agent_registry import AgentRegistry, AgentConfig, ReasoningStyle
+from src.society.critic_schema import CRITIC_JUDGEMENT_CONTRACT, render_critic_judgement
 from src.society.data_classifier import (
     classify_reasoning_style, ClassificationError,
 )
@@ -69,6 +70,41 @@ def _release_vllm_engine(engine: Any, adapters: Optional[dict[str, Any]] = None)
         adapters.clear()
 
     _cleanup_gpu()
+
+
+def _render_structured_critic_chosen(pair: dict, profile: dict) -> str:
+    primary = str(profile.get("primary", "verification")).strip().lower()
+    if primary not in {"computation", "reasoning", "knowledge", "grounding", "verification"}:
+        primary = "verification"
+    confidence = profile.get("confidence", 0.8)
+    try:
+        confidence = max(0.1, min(1.0, float(confidence)))
+    except (TypeError, ValueError):
+        confidence = 0.8
+    evidence = str(profile.get("evidence", "")).strip()
+    if not evidence:
+        evidence = "The actor response is inconsistent with the verified answer and needs correction."
+    return render_critic_judgement(
+        answer_correct=False,
+        suggested_final_answer=str(pair.get("correct_answer") or "unknown"),
+        error_type=primary,
+        confidence=confidence,
+        critique=evidence,
+    )
+
+
+def _render_structured_critic_rejected(pair: dict, profile: dict, target_skill: str) -> str:
+    actor_answer = str(pair.get("actor_answer") or "unknown")
+    primary = str(profile.get("primary", target_skill)).strip().lower()
+    if primary not in {"computation", "reasoning", "knowledge", "grounding", "verification"}:
+        primary = target_skill
+    return render_critic_judgement(
+        answer_correct=True,
+        suggested_final_answer=actor_answer,
+        error_type="none",
+        confidence=0.80,
+        critique="The actor answer is acceptable.",
+    )
 
 
 def _create_phase_engine(
@@ -919,19 +955,25 @@ def _generate_critic_pairs_algorithm1(
                 key = (item.sample.get("question", ""), item.response)
                 p = pair_index.get(key)
                 if p is not None:
+                    profile = item.profile if isinstance(item.profile, dict) else {}
+                    chosen = _render_structured_critic_chosen(p, profile)
+                    rejected = _render_structured_critic_rejected(p, profile, specialty.value)
                     preference_pairs.append({
                         "sample": p["sample"],
-                        "chosen": p["chosen"],
-                        "rejected": p["rejected"],
+                        "chosen": chosen,
+                        "rejected": rejected,
                         "actor_response": p.get("actor_response", ""),
                         "metadata": {
                             "target_skill": specialty.value,
                             "assigned_skill": item.skill.value if item.skill else "general",
                             "source_bucket": item.source_bucket,
                             "routing_weight": item.weight,
-                            "error_profile": item.profile,
+                            "error_profile": profile,
                             "delta": p["delta"],
                             "direction": p["direction"],
+                            "actor_answer": p.get("actor_answer", ""),
+                            "correct_answer": p.get("correct_answer", ""),
+                            "structured_judgement": True,
                         },
                     })
 
@@ -1296,6 +1338,12 @@ def _run_dpo_training(
                     PromptType.DELIBERATION_CRITIC,
                     sample,
                     actor_response=p["actor_response"],
+                )
+                target_skill = p.get("metadata", {}).get("target_skill", "general")
+                prompt = (
+                    f"You are Critic-{target_skill}. "
+                    f"Specialize in detecting {target_skill} errors.\n"
+                    f"{CRITIC_JUDGEMENT_CONTRACT}\n\n{prompt}"
                 )
             else:
                 prompt = format_prompt(

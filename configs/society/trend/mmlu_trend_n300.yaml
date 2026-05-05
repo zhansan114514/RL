@@ -6,6 +6,7 @@ api:
   provider: "gpt"  # "glm" or "gpt"
 
 common:
+  schema_version: 3
   model_name: "Qwen/Qwen2.5-7B-Instruct"
   base_model: "Qwen/Qwen2.5-7B-Instruct"
   dataset: "mmlu"
@@ -40,12 +41,26 @@ step02_classify:
   use_batch_api: true
   batch_api_max_responses: 20
   max_workers: 8
+  reasoning_styles: ["direct", "evidence", "comparative", "rule_based"]
+  error_dimensions: ["computation", "reasoning", "knowledge", "grounding", "verification"]
+  min_style_confidence: 0.5
+  min_error_confidence: 0.5
 
 # Phase 3: Actor diversification
 step03_diversify_actors:
   input_dir: "output/society_mmlu_trend_n300/classified"
   output_dir: "output/society_mmlu_trend_n300/actors"
-  reasoning_styles: ["algebraic", "direct", "backtracking"]
+  reasoning_styles: ["direct", "evidence", "comparative", "rule_based"]
+  min_pairs_per_actor: 256
+  target_pairs_per_actor: 512
+  max_pairs_per_actor: 1024
+  max_pairs_per_sample: 4
+  augment_when_below: 256
+  max_synthetic_ratio: 0.7
+  pair_mix:
+    correctness: 0.7
+    style: 0.2
+    format: 0.1
   lora_r: 256
   lora_alpha: 512
   learning_rate: 5.0e-5
@@ -60,7 +75,7 @@ step04_diversify_critics:
   input_dir: "output/society_mmlu_trend_n300/classified"
   actor_base_dir: "output/society_mmlu_trend_n300/actors"
   output_dir: "output/society_mmlu_trend_n300/critics"
-  critic_skills: ["reasoning", "knowledge", "computation", "verification"]
+  critic_skills: ["computation", "reasoning", "knowledge", "grounding", "verification"]
   max_delib_samples: 120
   num_rounds: 2
   num_simulations: 2
@@ -74,12 +89,15 @@ step04_diversify_critics:
   num_epochs: 1
   max_length: 2048
   beta: 0.1
+  min_real_specialty_items: 16
+  target_pairs_per_critic: 256
+  max_pairs_per_critic: 512
   min_pairs_per_critic: 32
-  min_specialty_items: 8
-  min_specialty_ratio: 0.0
-  specialty_ratio: 0.5
-  general_ratio: 0.35
-  calibration_ratio: 0.15
+  allow_synthetic_critique: true
+  pair_mix:
+    specialty: 0.7
+    general: 0.2
+    format: 0.1
   max_lora_rank: 256
   strict_classification: true
   max_classification_failure_rate: 0.0
@@ -147,3 +165,12 @@ step06_evaluate:
   num_samples_for_qualitative: 5
   max_lora_rank: 256
   router_top_k: 2
+  router_min_confidence: 0.1
+  router_require_schema_valid: true
+  router_fallback_to_uniform: false
+
+router:
+  top_k: 2
+  min_confidence: 0.1
+  require_schema_valid: true
+  fallback_to_uniform: false

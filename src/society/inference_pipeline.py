@@ -92,6 +92,8 @@ def society_inference(
     voting_strategy: str = "majority_vote",
     router_top_k: int = 2,
     router_uniform: bool = False,
+    router_min_confidence: float = 0.1,
+    router_fallback_to_uniform: bool = False,
     checkpoint_dir: Optional[str] = None,
     ablation_label: Optional[str] = None,
 ) -> InferenceResult:
@@ -100,10 +102,10 @@ def society_inference(
 
     Supports ablation experiments:
     - A1: num_actors=1, num_critics=1 (baseline ACC-Collab)
-    - A2: num_actors=3, num_critics=1 (Actor diversity only)
-    - A3: num_actors=1, num_critics=4, router_top_k=2 (Critic specialization only)
-    - A4: num_actors=3, num_critics=4, router_top_k=4, router_uniform=True (no routing)
-    - A5: num_actors=3, num_critics=4, router_top_k=2, router_uniform=False (full system)
+    - A2: num_actors=4, num_critics=1 (Actor diversity only)
+    - A3: num_actors=1, num_critics=5, router_top_k=2 (Critic specialization only)
+    - A4: num_actors=4, num_critics=5, router_top_k=5, router_uniform=True (no routing)
+    - A5: num_actors=4, num_critics=5, router_top_k=2, router_uniform=False (full system)
 
     Args:
         registry: AgentRegistry with all agents.
@@ -153,7 +155,12 @@ def society_inference(
     )
 
     # Run multi-agent deliberation
-    router = CriticRouter(top_k=router_top_k, uniform_weights=router_uniform)
+    router = CriticRouter(
+        top_k=router_top_k,
+        min_confidence=router_min_confidence,
+        fallback_to_uniform=router_fallback_to_uniform,
+        uniform_weights=router_uniform,
+    )
     result = multi_agent_deliberate_single_gpu(
         inference_engine=inference_engine,
         actors=actors,
@@ -182,6 +189,8 @@ def society_inference(
             "num_actors": len(actors),
             "num_critics": len(critics),
             "router_top_k": router_top_k,
+            "router_min_confidence": router_min_confidence,
+            "router_fallback_to_uniform": router_fallback_to_uniform,
             "num_rounds": num_rounds,
             "lora_enabled": any(a.lora_path for a in actors + critics),
         },
@@ -420,14 +429,14 @@ ABLATION_CONFIGS = {
             "description": "Base model baseline (no LoRA, no training)"},
     "A1": {"num_actors": 1, "num_critics": 1, "router_top_k": 1, "router_uniform": False,
             "description": "1 trained Actor + 1 trained Critic (ACC-Collab baseline)"},
-    "A2": {"num_actors": 3, "num_critics": 1, "router_top_k": 1, "router_uniform": False,
-            "description": "3 trained Actors + 1 trained Critic (Actor diversity only)"},
-    "A3": {"num_actors": 1, "num_critics": 4, "router_top_k": 2, "router_uniform": False,
-            "description": "1 trained Actor + 4 trained Critics + Router (Critic specialization only)"},
-    "A4": {"num_actors": 3, "num_critics": 4, "router_top_k": 4, "router_uniform": True,
-            "description": "3 trained Actors + 4 trained Critics, uniform weights (no routing)"},
-    "A5": {"num_actors": 3, "num_critics": 4, "router_top_k": 2, "router_uniform": False,
-            "description": "3 trained Actors + 4 trained Critics + Router (full system)"},
+    "A2": {"num_actors": 4, "num_critics": 1, "router_top_k": 1, "router_uniform": False,
+            "description": "4 trained Actors + 1 trained Critic (Actor diversity only)"},
+    "A3": {"num_actors": 1, "num_critics": 5, "router_top_k": 2, "router_uniform": False,
+            "description": "1 trained Actor + 5 trained Critics + Router (Critic specialization only)"},
+    "A4": {"num_actors": 4, "num_critics": 5, "router_top_k": 5, "router_uniform": True,
+            "description": "4 trained Actors + 5 trained Critics, uniform weights (no routing)"},
+    "A5": {"num_actors": 4, "num_critics": 5, "router_top_k": 2, "router_uniform": False,
+            "description": "4 trained Actors + 5 trained Critics + Router (full system)"},
 }
 
 
@@ -438,6 +447,8 @@ def run_ablation(
     inference_engine: Any,
     configs: Optional[list[str]] = None,
     num_rounds: int = 5,
+    router_min_confidence: float = 0.1,
+    router_fallback_to_uniform: bool = False,
     checkpoint_dir: Optional[str] = None,
 ) -> dict[str, list[InferenceResult]]:
     """
@@ -483,6 +494,8 @@ def run_ablation(
                 num_rounds=num_rounds,
                 router_top_k=config["router_top_k"],
                 router_uniform=config.get("router_uniform", False),
+                router_min_confidence=router_min_confidence,
+                router_fallback_to_uniform=router_fallback_to_uniform,
                 voting_strategy=voting_strategy,
                 checkpoint_dir=checkpoint_dir,
                 ablation_label=config_name,

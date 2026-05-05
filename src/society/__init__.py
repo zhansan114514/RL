@@ -6,8 +6,8 @@ combining ACC-Collab (Actor-Critic collaboration) with Multiagent FT
 (diverse thinking chains for complex reasoning).
 
 Architecture:
-- 3 Actors: ALGEBRAIC, DIRECT, BACKTRACKING reasoning styles
-- 4 Critics: COMPUTATION, REASONING, KNOWLEDGE, VERIFICATION skill specialties
+- 4 Actors: DIRECT, EVIDENCE, COMPARATIVE, RULE_BASED reasoning styles
+- 5 Critics: COMPUTATION, REASONING, KNOWLEDGE, GROUNDING, VERIFICATION skill specialties
 - MoE Router: Confidence-based softmax routing (no trainable params)
 - Single GPU: Sequential LoRA load/unload with disk-based crash recovery
 """
@@ -50,6 +50,17 @@ from src.society.diversity_split import (
     RoutedTrainingItem,
     assign_error_profile,
     summarize_critic_training_pairs,
+)
+from src.society.critic_schema import (
+    CRITIC_JUDGEMENT_CONTRACT,
+    CriticJudgement,
+    render_critic_judgement,
+    parse_critic_judgement,
+)
+from src.society.diagnostics import (
+    summarize_critic_schema,
+    summarize_router_rounds,
+    classification_distribution_report,
 )
 from src.society.society_trainer import (
     society_alternating_train,
@@ -96,6 +107,15 @@ __all__ = [
     "RoutedTrainingItem",
     "assign_error_profile",
     "summarize_critic_training_pairs",
+    # Critic Schema
+    "CRITIC_JUDGEMENT_CONTRACT",
+    "CriticJudgement",
+    "render_critic_judgement",
+    "parse_critic_judgement",
+    # Diagnostics
+    "summarize_critic_schema",
+    "summarize_router_rounds",
+    "classification_distribution_report",
     # Society Trainer
     "society_alternating_train",
     "SocietyTrainingResult",
