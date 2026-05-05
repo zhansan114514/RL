@@ -29,9 +29,11 @@ from src.society.router import (
     CriticRouter,
     CriticFeedback,
     RoutedFeedback,
+    build_critic_feedback,
+)
+from src.society.critic_schema import (
     parse_confidence,
     parse_answer_correct,
-    build_critic_feedback,
 )
 from src.society.data_classifier import (
     DataClassifier,

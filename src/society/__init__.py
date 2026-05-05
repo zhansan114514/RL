@@ -27,12 +27,9 @@ from src.society.router import (
     CriticRouter,
     CriticFeedback,
     RoutedFeedback,
-    parse_confidence,
-    parse_answer_correct,
     build_critic_feedback,
 )
 from src.society.multi_deliberation import (
-    multi_agent_deliberate,
     multi_agent_deliberate_single_gpu,
     MultiDeliberationResult,
     DeliberationRound,
@@ -56,11 +53,8 @@ from src.society.critic_schema import (
     CriticJudgement,
     render_critic_judgement,
     parse_critic_judgement,
-)
-from src.society.diagnostics import (
-    summarize_critic_schema,
-    summarize_router_rounds,
-    classification_distribution_report,
+    parse_confidence,
+    parse_answer_correct,
 )
 from src.society.society_trainer import (
     society_alternating_train,
@@ -91,7 +85,6 @@ __all__ = [
     "parse_answer_correct",
     "build_critic_feedback",
     # Multi-Deliberation
-    "multi_agent_deliberate",
     "multi_agent_deliberate_single_gpu",
     "MultiDeliberationResult",
     "DeliberationRound",
@@ -112,10 +105,6 @@ __all__ = [
     "CriticJudgement",
     "render_critic_judgement",
     "parse_critic_judgement",
-    # Diagnostics
-    "summarize_critic_schema",
-    "summarize_router_rounds",
-    "classification_distribution_report",
     # Society Trainer
     "society_alternating_train",
     "SocietyTrainingResult",

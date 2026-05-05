@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from _utils import setup_logging
 from src.utils.config import ConfigManager
 from src.society.multi_deliberation import LoRAError
+from src.society.society_trainer import LoRAModelAdapter
 from src.society.critic_schema import (
     CRITIC_JUDGEMENT_CONTRACT,
     parse_critic_judgement,
@@ -103,63 +104,18 @@ def parse_args():
     return cfg.step("step04_diversify_critics", defaults=STEP_DEFAULTS).to_namespace()
 
 
-# ============================================================
-# LoRA Model Adapter — same pattern as society_trainer.py
-# Bridges shared VLLMInference + LoRA to the generate() /
-# generate_single() interface expected by trajectory.py.
-# ============================================================
-
-class _LoRAModelAdapter:
-    """Wraps a shared VLLMInference engine with an optional LoRA adapter."""
-
-    def __init__(self, engine: Any, lora_request: Any = None):
-        self._engine = engine
-        self._lora_request = lora_request
-
-    def generate(self, prompts, max_tokens=256, temperature=0.7, **kwargs):
-        if self._lora_request is not None:
-            return self._generate_with_lora(prompts, max_tokens, temperature)
-        return self._engine.generate(
-            prompts, max_tokens=max_tokens, temperature=temperature, **kwargs,
-        )
-
-    def generate_single(self, prompt, max_tokens=256, temperature=0.7, **kwargs):
-        results = self.generate(
-            [prompt], max_tokens=max_tokens, temperature=temperature, **kwargs,
-        )
-        return results[0] if results else ""
-
-    def _generate_with_lora(self, prompts, max_tokens, temperature):
-        if hasattr(self._engine, "generate_with_lora"):
-            return self._engine.generate_with_lora(
-                prompts, self._lora_request,
-                max_tokens=max_tokens, temperature=temperature,
-            )
-        if hasattr(self._engine, "_llm") and self._engine._llm is not None:
-            from vllm import SamplingParams
-            params = SamplingParams(max_tokens=max_tokens, temperature=temperature, n=1)
-            outputs = self._engine._llm.generate(
-                prompts, params, lora_request=self._lora_request,
-            )
-            return [c.text for o in outputs for c in o.outputs]
-        raise RuntimeError(
-            "Engine does not support LoRA generation. "
-            "Create VLLMInference with enable_lora=True."
-        )
-
-
 def _build_adapters(
     engine: Any,
     lora_paths: Dict[str, str],
-) -> Dict[str, _LoRAModelAdapter]:
-    """Create _LoRAModelAdapter for each named agent path.
+) -> Dict[str, LoRAModelAdapter]:
+    """Create LoRAModelAdapter for each named agent path.
 
     Every provided path is required.  Continuing with a base actor after a
     failed LoRA load would corrupt the critic-diversification experiment.
     """
     from src.society.multi_deliberation import _load_lora_adapter
 
-    adapters: Dict[str, _LoRAModelAdapter] = {}
+    adapters: Dict[str, LoRAModelAdapter] = {}
     for name, path in lora_paths.items():
         lora_req = None
         if path:
@@ -176,7 +132,7 @@ def _build_adapters(
                     f"Required LoRA adapter for actor '{name}' at "
                     f"'{path}' produced no LoRARequest."
                 )
-        adapters[name] = _LoRAModelAdapter(engine, lora_req)
+        adapters[name] = LoRAModelAdapter(engine, lora_req)
     return adapters
 
 
@@ -286,11 +242,11 @@ def build_critic_raw_pairs(
 
         adapters = _build_adapters(engine, all_lora_paths)
         if not adapters:
-            adapters = {"base_actor": _LoRAModelAdapter(engine, None)}
+            adapters = {"base_actor": LoRAModelAdapter(engine, None)}
         actor_names = list(adapters.keys())
 
         # Base Critic adapter (no LoRA)
-        critic_adapter = _LoRAModelAdapter(engine, None)
+        critic_adapter = LoRAModelAdapter(engine, None)
 
         actor_groups: Dict[str, List[Dict]] = {}
         for i, sample in enumerate(samples[:n_samples]):

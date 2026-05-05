@@ -12,6 +12,129 @@ from src.algorithms.reward import extract_balanced_braces
 logger = logging.getLogger(__name__)
 
 
+def _standardize_yes_no(sample: dict[str, Any], result: dict[str, Any]) -> None:
+    """BoolQ format."""
+    result["question"] = sample.get("question", "")
+    result["passage"] = sample.get("passage", "")
+    answer = sample.get("answer", "")
+    result["answer"] = "yes" if answer is True or str(answer).lower() == "true" else "no"
+    result["choices"] = ["Yes", "No"]
+
+
+def _standardize_mc(sample: dict[str, Any], result: dict[str, Any]) -> None:
+    """MMLU/SCIQ/ARC format."""
+    result["question"] = sample.get("question", "")
+    result["passage"] = sample.get("passage", "")
+
+    choices = sample.get("choices", [])
+    if isinstance(choices, dict):
+        # ARC format: {"text": [...], "label": ["A", "B", ...]}
+        choice_texts = choices.get("text", [])
+        choice_labels = choices.get("label", [])
+        result["choices"] = choice_texts
+        result["choice_labels"] = choice_labels if choice_labels else [chr(65 + i) for i in range(len(choice_texts))]
+    elif isinstance(choices, list) and choices:
+        result["choices"] = choices
+        labels = [chr(65 + i) for i in range(len(choices))]
+        result["choice_labels"] = labels
+    else:
+        # No choices provided: SCIQ format (correct_answer + distractor1/2/3)
+        correct = sample.get("correct_answer", "")
+        distractors = [
+            sample.get(f"distractor{i}", "")
+            for i in range(1, 4)
+            if sample.get(f"distractor{i}")
+        ]
+        if correct and distractors:
+            import random as _rng
+            import hashlib
+            # Deterministic seed from sample content so the same SCIQ
+            # sample always produces the same option order and answer
+            # label across processes and runs.
+            seed_bytes = hashlib.md5(
+                (correct + "".join(distractors)).encode()
+            ).digest()
+            seed_int = int.from_bytes(seed_bytes[:4], "little")
+            _r = _rng.Random(seed_int)
+            all_options = [correct] + distractors
+            _r.shuffle(all_options)
+            result["choices"] = all_options
+            result["choice_labels"] = [chr(65 + i) for i in range(len(all_options))]
+            correct_idx = all_options.index(correct)
+            result["answer"] = chr(65 + correct_idx)
+
+    # Handle answer as index or string (skip if already set by SCIQ handler)
+    if not result["answer"]:
+        answer = sample.get("answer", sample.get("answerKey", ""))
+        if isinstance(answer, int):
+            n_choices = len(result["choices"]) if result["choices"] else 4
+            result["answer"] = chr(65 + answer) if answer < n_choices else ""
+        elif isinstance(answer, str):
+            result["answer"] = answer.upper().strip("()")
+
+
+def _standardize_math(sample: dict[str, Any], result: dict[str, Any]) -> None:
+    """MATH/GSM8K format with \boxed{} or "#### number" answers."""
+    result["question"] = sample.get("question", sample.get("problem", ""))
+    result["passage"] = ""
+
+    raw_answer = sample.get("answer", sample.get("solution", ""))
+    if isinstance(raw_answer, str):
+        # Try to extract from \boxed{} with balanced brace matching
+        boxed_match = re.search(r'\\boxed\{', raw_answer)
+        if boxed_match:
+            brace_start = boxed_match.end() - 1
+            content = extract_balanced_braces(raw_answer, brace_start)
+            result["answer"] = content.strip() if content else raw_answer.strip()
+        # Try GSM8K "#### number" format
+        elif "####" in raw_answer:
+            after_hash = raw_answer.split("####")[-1].strip()
+            num_match = re.search(r'-?[0-9]+(?:\.[0-9]+)?', after_hash)
+            result["answer"] = num_match.group(0) if num_match else after_hash
+        else:
+            # Extract last number as fallback
+            nums = re.findall(r'-?[0-9]+(?:\.[0-9]+)?', raw_answer)
+            result["answer"] = nums[-1] if nums else raw_answer.strip()
+    else:
+        result["answer"] = str(raw_answer).strip()
+
+    result["choices"] = []
+
+
+def _standardize_mixed(sample: dict[str, Any], result: dict[str, Any]) -> None:
+    """BBH format: could be yes/no, multiple choice, or free-form."""
+    result["question"] = sample.get("question", sample.get("input", ""))
+    result["passage"] = ""
+
+    # Try to extract choices if present
+    choices = sample.get("choices", [])
+    if isinstance(choices, list) and choices:
+        result["choices"] = choices
+        result["choice_labels"] = [chr(65 + i) for i in range(len(choices))]
+    elif isinstance(choices, dict):
+        choice_texts = choices.get("text", [])
+        result["choices"] = choice_texts
+        result["choice_labels"] = choices.get("label", [chr(65 + i) for i in range(len(choice_texts))])
+
+    # Handle answer
+    answer = sample.get("answer", sample.get("target", ""))
+    if isinstance(answer, str):
+        result["answer"] = answer.strip()
+    elif isinstance(answer, bool):
+        result["answer"] = "yes" if answer else "no"
+        result["choices"] = ["Yes", "No"]
+    else:
+        result["answer"] = str(answer).strip()
+
+
+_STANDARDIZERS = {
+    "yes_no": _standardize_yes_no,
+    "multiple_choice": _standardize_mc,
+    "math": _standardize_math,
+    "mixed": _standardize_mixed,
+}
+
+
 def standardize_sample(
     sample: dict[str, Any],
     task_type: str = "yes_no",
@@ -26,7 +149,6 @@ def standardize_sample(
     Returns:
         Standardized sample with keys: question, passage, answer, choices.
     """
-    # Preserve metadata fields if present, with defaults
     result = {
         "dataset": sample.get("dataset", ""),
         "source_split": sample.get("source_split", ""),
@@ -41,121 +163,12 @@ def standardize_sample(
         "task_type": task_type,
     }
 
-    if task_type == "yes_no":
-        # BoolQ format
-        result["question"] = sample.get("question", "")
-        result["passage"] = sample.get("passage", "")
-        answer = sample.get("answer", "")
-        result["answer"] = "yes" if answer is True or str(answer).lower() == "true" else "no"
-        result["choices"] = ["Yes", "No"]
+    handler = _STANDARDIZERS.get(task_type)
+    if handler is None:
+        logger.warning(f"Unknown task_type: {task_type}")
+        return result
 
-    elif task_type == "multiple_choice":
-        # MMLU/SCIQ/ARC format
-        result["question"] = sample.get("question", "")
-        result["passage"] = sample.get("passage", "")
-
-        choices = sample.get("choices", [])
-        if isinstance(choices, dict):
-            # ARC format: {"text": [...], "label": ["A", "B", ...]}
-            choice_texts = choices.get("text", [])
-            choice_labels = choices.get("label", [])
-            result["choices"] = choice_texts
-            result["choice_labels"] = choice_labels if choice_labels else [chr(65 + i) for i in range(len(choice_texts))]
-        elif isinstance(choices, list) and choices:
-            result["choices"] = choices
-            # Map choices to A/B/C/D
-            labels = [chr(65 + i) for i in range(len(choices))]
-            result["choice_labels"] = labels
-        else:
-            # No choices provided: SCIQ format (correct_answer + distractor1/2/3)
-            # Also handles choices=[] (empty list) from datasets without explicit choices.
-            correct = sample.get("correct_answer", "")
-            distractors = [
-                sample.get(f"distractor{i}", "")
-                for i in range(1, 4)
-                if sample.get(f"distractor{i}")
-            ]
-            if correct and distractors:
-                import random as _rng
-                import hashlib
-                # Deterministic seed from sample content so the same SCIQ
-                # sample always produces the same option order and answer
-                # label across processes and runs.
-                seed_bytes = hashlib.md5(
-                    (correct + "".join(distractors)).encode()
-                ).digest()
-                seed_int = int.from_bytes(seed_bytes[:4], "little")
-                _r = _rng.Random(seed_int)
-                all_options = [correct] + distractors
-                _r.shuffle(all_options)
-                result["choices"] = all_options
-                result["choice_labels"] = [chr(65 + i) for i in range(len(all_options))]
-                correct_idx = all_options.index(correct)
-                result["answer"] = chr(65 + correct_idx)
-
-        # Handle answer as index or string (skip if already set by SCIQ handler)
-        if not result["answer"]:
-            answer = sample.get("answer", sample.get("answerKey", ""))
-            if isinstance(answer, int):
-                n_choices = len(result["choices"]) if result["choices"] else 4
-                result["answer"] = chr(65 + answer) if answer < n_choices else ""
-            elif isinstance(answer, str):
-                result["answer"] = answer.upper().strip("()")
-
-    elif task_type == "math":
-        # MATH/GSM8K format with \boxed{} or "#### number" answers
-        result["question"] = sample.get("question", sample.get("problem", ""))
-        result["passage"] = ""
-
-        # Extract answer from various formats
-        raw_answer = sample.get("answer", sample.get("solution", ""))
-        if isinstance(raw_answer, str):
-            # Try to extract from \boxed{...} with balanced brace matching
-            boxed_match = re.search(r'\\boxed\{', raw_answer)
-            if boxed_match:
-                brace_start = boxed_match.end() - 1
-                content = extract_balanced_braces(raw_answer, brace_start)
-                result["answer"] = content.strip() if content else raw_answer.strip()
-            # Try GSM8K "#### number" format
-            elif "####" in raw_answer:
-                after_hash = raw_answer.split("####")[-1].strip()
-                # Extract numeric value
-                num_match = re.search(r'-?[0-9]+(?:\.[0-9]+)?', after_hash)
-                result["answer"] = num_match.group(0) if num_match else after_hash
-            else:
-                # Extract last number as fallback
-                nums = re.findall(r'-?[0-9]+(?:\.[0-9]+)?', raw_answer)
-                result["answer"] = nums[-1] if nums else raw_answer.strip()
-        else:
-            result["answer"] = str(raw_answer).strip()
-
-        result["choices"] = []
-
-    elif task_type == "mixed":
-        # BBH format: could be yes/no, multiple choice, or free-form
-        result["question"] = sample.get("question", sample.get("input", ""))
-        result["passage"] = ""
-
-        # Try to extract choices if present
-        choices = sample.get("choices", [])
-        if isinstance(choices, list) and choices:
-            result["choices"] = choices
-            result["choice_labels"] = [chr(65 + i) for i in range(len(choices))]
-        elif isinstance(choices, dict):
-            choice_texts = choices.get("text", [])
-            result["choices"] = choice_texts
-            result["choice_labels"] = choices.get("label", [chr(65 + i) for i in range(len(choice_texts))])
-
-        # Handle answer
-        answer = sample.get("answer", sample.get("target", ""))
-        if isinstance(answer, str):
-            result["answer"] = answer.strip()
-        elif isinstance(answer, bool):
-            result["answer"] = "yes" if answer else "no"
-            result["choices"] = ["Yes", "No"]
-        else:
-            result["answer"] = str(answer).strip()
-
+    handler(sample, result)
     return result
 
 

@@ -19,10 +19,7 @@ import numpy as np
 
 from src.society.agent_registry import AgentConfig, CriticSkill
 from src.society.critic_schema import (
-    parse_answer_correct,
-    parse_confidence,
     parse_critic_judgement,
-    parse_error_type,
     parse_suggested_answer,
     strip_critic_judgement_fields,
 )

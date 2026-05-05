@@ -34,6 +34,17 @@ DEFAULT_LOCAL_CONFIG_PATH = os.path.join(CONFIGS_DIR, "local.yaml")
 # Step-specific section key prefixes in experiment YAMLs
 _STEP_PREFIXES = ("step", "phase")
 
+# API field aliases used for resolving provider-specific config
+_API_ALIASES = {
+    "api_key": ("api_key", "key"),
+    "api_base": ("api_base", "base_url", "base"),
+    "api_model": ("api_model", "model"),
+    "request_timeout": ("request_timeout", "timeout"),
+    "retry_delay": ("retry_delay",),
+    "max_retries": ("max_retries",),
+    "api_temperature": ("api_temperature", "temperature"),
+}
+
 
 class StepConfig:
     """Step-specific config with attribute access and argparse.Namespace compat."""
@@ -62,6 +73,16 @@ class StepConfig:
 
     def __repr__(self) -> str:
         return f"StepConfig({self._data})"
+
+
+def _resolve_api_aliases(source: dict, target: dict) -> None:
+    """Resolve API field aliases from source dict into target dict."""
+    for target_key, aliases in _API_ALIASES.items():
+        for alias in aliases:
+            value = source.get(alias)
+            if value is not None and value != "":
+                target[target_key] = value
+                break
 
 
 class ConfigManager:
@@ -238,98 +259,51 @@ class ConfigManager:
         Returns:
             StepConfig with attribute access and ``to_namespace()``.
         """
-        merged = {}
-
         cfg_dict = OmegaConf.to_container(self._config, resolve=True)
-        if isinstance(cfg_dict, dict):
-            common_cfg = cfg_dict.get("common", {})
-            if isinstance(common_cfg, dict):
-                for key, value in common_cfg.items():
-                    if value is not None:
-                        merged[key] = value
+        if not isinstance(cfg_dict, dict):
+            cfg_dict = {}
 
-            # Merge top-level data: section, flattening nested keys
-            # e.g., data.mmlu.load_mode -> merged["mmlu_load_mode"]
-            data_cfg = cfg_dict.get("data", {})
-            if isinstance(data_cfg, dict):
-                for section_key, section_val in data_cfg.items():
-                    if section_val is None:
-                        continue
-                    if isinstance(section_val, dict):
-                        for sub_key, sub_val in section_val.items():
-                            if sub_val is not None:
-                                merged[f"{section_key}_{sub_key}"] = sub_val
-                    else:
-                        merged[section_key] = section_val
+        merged: dict[str, Any] = {}
 
-            # Merge top-level sampling: section as a dict
-            sampling_cfg = cfg_dict.get("sampling", {})
-            if isinstance(sampling_cfg, dict) and sampling_cfg:
-                merged["sampling"] = sampling_cfg
+        # 1. common: section
+        common_cfg = cfg_dict.get("common", {})
+        if isinstance(common_cfg, dict):
+            for key, value in common_cfg.items():
+                if value is not None:
+                    merged[key] = value
 
-            api_cfg = cfg_dict.get("api", {})
-            if isinstance(api_cfg, dict):
-                api_aliases = {
-                    "api_key": ("api_key", "key"),
-                    "api_base": ("api_base", "base_url", "base"),
-                    "api_model": ("api_model", "model"),
-                    "request_timeout": ("request_timeout", "timeout"),
-                    "retry_delay": ("retry_delay",),
-                    "max_retries": ("max_retries",),
-                    "api_temperature": ("api_temperature", "temperature"),
-                }
-                for target, aliases in api_aliases.items():
-                    for alias in aliases:
-                        value = api_cfg.get(alias)
-                        if value is not None and value != "":
-                            merged[target] = value
-                            break
-                provider = api_cfg.get("provider")
-                if provider:
-                    merged["api_provider"] = provider
+        # 2. data: section (flatten nested keys)
+        self._flatten_data_section(cfg_dict.get("data", {}), merged)
 
-            # Step-specific section overrides common and top-level API defaults.
-            step_cfg = cfg_dict.get(step_key, {})
-            if isinstance(step_cfg, dict):
-                for key, value in step_cfg.items():
-                    if value is not None:
-                        merged[key] = value
+        # 3. sampling: section
+        sampling_cfg = cfg_dict.get("sampling", {})
+        if isinstance(sampling_cfg, dict) and sampling_cfg:
+            merged["sampling"] = sampling_cfg
 
-            if isinstance(api_cfg, dict):
-                provider_name = merged.get("api_provider") or api_cfg.get("provider")
-                providers = api_cfg.get("providers", {})
-                if provider_name and isinstance(providers, dict):
-                    provider_cfg = providers.get(provider_name)
-                    if provider_cfg is None:
-                        raise ConfigKeyError(
-                            f"API provider '{provider_name}' is not defined in api.providers"
-                        )
-                    if not isinstance(provider_cfg, dict):
-                        provider_cfg = OmegaConf.to_container(provider_cfg, resolve=True)
-                    provider_aliases = {
-                        "api_key": ("api_key", "key"),
-                        "api_base": ("api_base", "base_url", "base"),
-                        "api_model": ("api_model", "model"),
-                        "request_timeout": ("request_timeout", "timeout"),
-                        "retry_delay": ("retry_delay",),
-                        "max_retries": ("max_retries",),
-                        "api_temperature": ("api_temperature", "temperature"),
-                    }
-                    for target, aliases in provider_aliases.items():
-                        for alias in aliases:
-                            value = provider_cfg.get(alias)
-                            if value is not None and value != "":
-                                merged[target] = value
-                                break
+        # 4. Top-level api: defaults
+        api_cfg = cfg_dict.get("api", {})
+        if isinstance(api_cfg, dict):
+            _resolve_api_aliases(api_cfg, merged)
+            provider = api_cfg.get("provider")
+            if provider:
+                merged["api_provider"] = provider
 
+        # 5. Step-specific overrides
+        step_cfg = cfg_dict.get(step_key, {})
+        if isinstance(step_cfg, dict):
+            for key, value in step_cfg.items():
+                if value is not None:
+                    merged[key] = value
+
+        # 6. Selected api.providers entry (highest priority for API fields)
+        if isinstance(api_cfg, dict):
+            self._resolve_provider_config(api_cfg, merged)
+
+        # Validate required keys
         if defaults:
             missing = [
                 key for key in defaults
-                if (
-                    key not in merged
-                    or merged.get(key) is None
-                    or merged.get(key) == ""
-                )
+                if key not in merged or merged.get(key) is None or merged.get(key) == ""
             ]
             if missing:
                 raise ConfigKeyError(
@@ -338,6 +312,39 @@ class ConfigManager:
                 )
 
         return StepConfig(merged)
+
+    @staticmethod
+    def _flatten_data_section(data_cfg: Any, target: dict) -> None:
+        """Flatten nested data section keys (e.g. data.mmlu.load_mode -> mmlu_load_mode)."""
+        if not isinstance(data_cfg, dict):
+            return
+        for section_key, section_val in data_cfg.items():
+            if section_val is None:
+                continue
+            if isinstance(section_val, dict):
+                for sub_key, sub_val in section_val.items():
+                    if sub_val is not None:
+                        target[f"{section_key}_{sub_key}"] = sub_val
+            else:
+                target[section_key] = section_val
+
+    @staticmethod
+    def _resolve_provider_config(api_cfg: dict, merged: dict) -> None:
+        """Resolve the selected API provider's config and merge into target."""
+        provider_name = merged.get("api_provider") or api_cfg.get("provider")
+        providers = api_cfg.get("providers", {})
+        if not provider_name or not isinstance(providers, dict):
+            return
+
+        provider_cfg = providers.get(provider_name)
+        if provider_cfg is None:
+            raise ConfigKeyError(
+                f"API provider '{provider_name}' is not defined in api.providers"
+            )
+        if not isinstance(provider_cfg, dict):
+            provider_cfg = OmegaConf.to_container(provider_cfg, resolve=True)
+
+        _resolve_api_aliases(provider_cfg, merged)
 
     @property
     def loaded_paths(self) -> list[str]:

@@ -78,10 +78,6 @@ def extract_answer_with_source(response: str, task_type: str = "yes_no") -> Answ
         return AnswerExtraction(answer=None, source=None)
 
 
-def _extract_yes_no(text: str) -> Optional[str]:
-    return _extract_yes_no_with_source(text).answer
-
-
 def _extract_yes_no_with_source(text: str) -> AnswerExtraction:
     """Extract Yes/No from response (returns uppercase).
 
@@ -119,10 +115,6 @@ def _extract_yes_no_with_source(text: str) -> AnswerExtraction:
         return AnswerExtraction(answer=matches[-1].strip().upper(), source="fallback")
 
     return AnswerExtraction(answer=None, source=None)
-
-
-def _extract_mc(text: str) -> Optional[str]:
-    return _extract_mc_with_source(text).answer
 
 
 def _extract_mc_with_source(text: str) -> AnswerExtraction:
@@ -198,10 +190,6 @@ def extract_balanced_braces(text: str, start: int) -> Optional[str]:
                 return text[start + 1:i]
         i += 1
     return None
-
-
-def _extract_math(text: str) -> Optional[str]:
-    return _extract_math_with_source(text).answer
 
 
 def _extract_math_with_source(text: str) -> AnswerExtraction:

@@ -238,6 +238,9 @@ def _load_bbh(
     """
     import random
 
+    if not isinstance(raw, DatasetDict):
+        raise TypeError(f"BBH loader expects a DatasetDict, got {type(raw).__name__}")
+
     ratios = split_ratios or {"test": 0.25, "validation": 0.10}
     rng = random.Random(seed)
 
@@ -245,48 +248,29 @@ def _load_bbh(
     val_samples = []
     test_samples = []
 
-    if isinstance(raw, DatasetDict):
-        for task_name, task_data in raw.items():
-            task_samples = list(task_data)
-            for sample in task_samples:
-                sample["bbh_task"] = task_name
+    for task_name, task_data in raw.items():
+        task_samples = list(task_data)
+        for sample in task_samples:
+            sample["bbh_task"] = task_name
 
-            rng.shuffle(task_samples)
+        rng.shuffle(task_samples)
 
-            n_task = len(task_samples)
-            n_test = int(n_task * ratios["test"])
-            n_val = int(n_task * ratios["validation"])
+        n_task = len(task_samples)
+        n_test = int(n_task * ratios["test"])
+        n_val = int(n_task * ratios["validation"])
 
-            task_test = task_samples[:n_test]
-            task_val = task_samples[n_test : n_test + n_val]
-            task_train = task_samples[n_test + n_val :]
+        task_test = task_samples[:n_test]
+        task_val = task_samples[n_test : n_test + n_val]
+        task_train = task_samples[n_test + n_val :]
 
-            test_samples.extend(task_test)
-            val_samples.extend(task_val)
-            train_samples.extend(task_train)
+        test_samples.extend(task_test)
+        val_samples.extend(task_val)
+        train_samples.extend(task_train)
 
-            logger.info(
-                f"  Task {task_name}: train={len(task_train)}, "
-                f"val={len(task_val)}, test={len(task_test)}"
-            )
-    else:
-        all_samples = []
-        for item in raw:
-            if isinstance(item, dict):
-                sample = item
-            else:
-                sample = {"data": item}
-            sample["bbh_task"] = "unknown"
-            all_samples.append(sample)
-        rng.shuffle(all_samples)
-
-        n_total = len(all_samples)
-        n_test = int(n_total * ratios["test"])
-        n_val = int(n_total * ratios["validation"])
-
-        test_samples = all_samples[:n_test]
-        val_samples = all_samples[n_test : n_test + n_val]
-        train_samples = all_samples[n_test + n_val :]
+        logger.info(
+            f"  Task {task_name}: train={len(task_train)}, "
+            f"val={len(task_val)}, test={len(task_test)}"
+        )
 
     result = {}
     for split_name, samples in [

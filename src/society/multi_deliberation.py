@@ -632,9 +632,6 @@ def multi_agent_deliberate_single_gpu(
     )
 
 
-# Keep old name for backward compat
-multi_agent_deliberate = multi_agent_deliberate_single_gpu
-
 
 # ============================================================
 # LoRA-aware generation helper
@@ -806,35 +803,3 @@ def _build_critic_prompt(
         prompt = f"{CRITIC_JUDGEMENT_CONTRACT}\n\n{prompt}"
 
     return prompt
-
-
-# Backward-compatible wrappers (used by society_trainer.py)
-def _generate_actor_response(
-    engine: Any,
-    actor: AgentConfig,
-    sample: dict,
-    dataset_name: str,
-    round_num: int,
-    previous_responses: list[str],
-    max_tokens: int,
-    temperature: float,
-) -> str:
-    """Generate a single Actor response (backward-compatible wrapper)."""
-    prompt = _build_actor_prompt(actor, sample, dataset_name, round_num, previous_responses)
-    result = engine.generate_single(prompt, max_tokens=max_tokens, temperature=temperature)
-    return result if isinstance(result, str) else str(result)
-
-
-def _generate_critic_feedback(
-    engine: Any,
-    critic: AgentConfig,
-    sample: dict,
-    dataset_name: str,
-    actor_response: str,
-    max_tokens: int,
-    temperature: float,
-) -> str:
-    """Generate Critic feedback for an Actor response (backward-compatible wrapper)."""
-    prompt = _build_critic_prompt(critic, sample, dataset_name, actor_response)
-    result = engine.generate_single(prompt, max_tokens=max_tokens, temperature=temperature)
-    return result if isinstance(result, str) else str(result)

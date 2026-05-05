@@ -292,8 +292,6 @@ def society_alternating_train(
     for iteration in range(start_iteration, num_iterations):
         logger.info(f"=== Society Training Iteration {iteration + 1}/{num_iterations} ===")
 
-        model_name = registry.base_model_path or "Qwen/Qwen2.5-7B-Instruct"
-
         # ---- Phase A: Train all Critics (fix Actors) ----
         logger.info(
             f"Phase A: Training {len(critics)} Critics "
@@ -630,7 +628,7 @@ def society_alternating_train(
 # the interface expected by trajectory.py's generate_trajectories()
 # ============================================================
 
-class _LoRAModelAdapter:
+class LoRAModelAdapter:
     """Wraps a shared VLLMInference engine with an optional LoRA adapter.
 
     Provides the ``generate()`` and ``generate_single()`` interface that
@@ -679,8 +677,8 @@ class _LoRAModelAdapter:
 def _build_lora_adapters(
     engine: Any,
     agents: list[AgentConfig],
-) -> dict[str, _LoRAModelAdapter]:
-    """Create _LoRAModelAdapter for each agent.
+) -> dict[str, LoRAModelAdapter]:
+    """Create LoRAModelAdapter for each agent.
 
     Agents with ``lora_path`` must successfully load that adapter.  Falling
     back to the base model would invalidate multi-agent experiments because
@@ -689,7 +687,7 @@ def _build_lora_adapters(
     """
     from src.society.multi_deliberation import LoRAError, _load_lora_adapter
 
-    adapters: dict[str, _LoRAModelAdapter] = {}
+    adapters: dict[str, LoRAModelAdapter] = {}
     for agent in agents:
         lora_req = None
         if agent.lora_path:
@@ -705,7 +703,7 @@ def _build_lora_adapters(
                     f"Required LoRA adapter for agent '{agent.name}' at "
                     f"'{agent.lora_path}' produced no LoRARequest."
                 )
-        adapters[agent.name] = _LoRAModelAdapter(engine, lora_req)
+        adapters[agent.name] = LoRAModelAdapter(engine, lora_req)
     return adapters
 
 

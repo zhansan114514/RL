@@ -37,7 +37,7 @@ ACC-Collab 复现项目 -- 实现 ICLR 2025 论文《ACC-Collab: An Actor-Critic
 | `src.training` | DPO 训练(trl)、LoRA 配置(peft)、交替训练调度 | `dpo_trainer.py`, `_dpo_runner.py`, `trainer.py`, `scheduler.py`, `model_manager.py`, `lora_config.py` | trl, peft, transformers |
 | `src.inference` | vLLM 推理封装（懒加载） | `vllm_server.py` | vllm |
 | `src.evaluation` | 基准评估：逐轮准确率、改进率 | `benchmarks.py` | deliberation, reward |
-| `src.utils` | OmegaConf 配置合并、日志、WandB 集成、模型检测、随机种子 | `config.py`, `logging_utils.py`, `model_utils.py`, `seeding.py` | omegaconf, wandb |
+| `src.utils` | OmegaConf 配置合并、模型检测、随机种子 | `config.py`, `model_utils.py`, `seeding.py`, `runtime_env.py` | omegaconf |
 | `src.society` | Diverse Actor-Critic Society：多Agent注册、MoE路由、API分类、数据分化、多Agent审议、交替训练、推理投票 | `agent_registry.py`, `router.py`, `data_classifier.py`, `multi_deliberation.py`, `diversity_split.py`, `society_trainer.py`, `inference_pipeline.py` | algorithms, anthropic (API) |
 
 **注意**：`src.data.preprocessor` 和 `src.algorithms.reward` 都有各自的 `extract_answer` 实现，前者用于数据预处理阶段，后者用于奖励计算和评估阶段。两套实现的逻辑相似但返回格式不同（前者返回小写 "yes"/"no"，后者返回大写 "YES"/"NO"）。

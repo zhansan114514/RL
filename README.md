@@ -22,7 +22,7 @@ src/
 │   └── formatter.py     # format_prompt 变量注入
 ├── training/            # 训练管线
 │   ├── scheduler.py     # alternating_train 交替训练调度
-│   ├── trainer.py       # train_agent 单 agent 轨迹生成 + DPO
+│   ├── trainer.py       # generate_trajectory_data + train_dpo_from_pairs
 │   ├── dpo_trainer.py   # train_dpo (基于 trl)
 │   ├── model_manager.py # create_inference_model, create_model_pair, cleanup_models
 │   └── lora_config.py   # get_lora_config (rank=256, alpha=512)
@@ -35,7 +35,7 @@ src/
 └── utils/               # 工具
     ├── config.py        # ConfigManager 单例 + configs/default.yaml
     ├── seeding.py       # fix_seed (random/numpy/torch)
-    ├── logging_utils.py # ExperimentLogger + JSONL 持久化 + WandB
+    ├── runtime_env.py   # configure_runtime_libraries (conda libstdc++ 修复)
     └── model_utils.py   # detect_model_type
 ```
 
