@@ -1,7 +1,7 @@
 """
 Data classifier for categorizing reasoning styles and critic error profiles.
 
-Uses GLM-4-flash API for classification with local caching.
+Uses an OpenAI-compatible chat-completions API for classification with local caching.
 Raises ClassificationError when API is required but unavailable,
 instead of silently falling back to unreliable heuristics.
 
@@ -72,7 +72,11 @@ class ErrorProfileResult:
 # ============================================================
 
 DEFAULT_API_URL = "https://api.labforge.top/v1/chat/completions"
-DEFAULT_API_KEY = os.environ.get("GLM_API_KEY", "")
+DEFAULT_API_KEY = (
+    os.environ.get("GPT_API_KEY")
+    or os.environ.get("OPENAI_API_KEY")
+    or os.environ.get("GLM_API_KEY", "")
+)
 DEFAULT_API_MODEL = "gpt5.5"
 DEFAULT_REQUEST_TIMEOUT = 30
 DEFAULT_MAX_RETRIES = 5
@@ -173,19 +177,25 @@ FORMAT_STATUSES = {"valid", "answer_only", "empty_or_invalid"}
 # API availability check
 # ============================================================
 
+def _api_key_help() -> str:
+    return "api_key, GPT_API_KEY, OPENAI_API_KEY, or GLM_API_KEY"
+
+
 def check_api_available(
     api_url: str = DEFAULT_API_URL,
-    api_key: str = DEFAULT_API_KEY,
+    api_key: str | None = None,
 ) -> tuple[bool, str]:
-    """Check if the GLM API is reachable and the key is configured.
+    """Check if the configured chat-completions API is reachable.
 
     Returns:
         (available, reason) tuple.  `available` is True when the API
         can be used for classification.  `reason` describes the problem
         when unavailable.
     """
+    if api_key is None:
+        api_key = DEFAULT_API_KEY
     if not api_key:
-        return False, "GLM_API_KEY environment variable is not set"
+        return False, f"API key is not set ({_api_key_help()})"
     try:
         import requests
     except ImportError:
@@ -241,7 +251,7 @@ def _call_api(
     """
     if not api_key:
         raise ClassificationError(
-            "GLM_API_KEY not set. Set it via: export GLM_API_KEY=your_key"
+            f"API key not set. Configure {_api_key_help()}."
         )
     try:
         import requests

@@ -70,7 +70,11 @@ def parse_args():
     if cli_args.api_key:
         args.api_key = cli_args.api_key
     elif not args.api_key:
-        args.api_key = os.environ.get("GLM_API_KEY", "")
+        args.api_key = (
+            os.environ.get("GPT_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+            or os.environ.get("GLM_API_KEY", "")
+        )
     return args
 
 
@@ -458,13 +462,17 @@ def main() -> None:
     os.makedirs(args.output_dir, exist_ok=True)
 
     if not args.api_key:
-        logger.error("API key is required. Set --api_key or GLM_API_KEY.")
+        logger.error(
+            "API key is required. Set --api_key, GPT_API_KEY, "
+            "OPENAI_API_KEY, or GLM_API_KEY."
+        )
         sys.exit(1)
 
     logger.info("=" * 60)
     logger.info("Classify Bootstrap Data (schema v3)")
     logger.info("  Input dir: %s", args.input_dir)
     logger.info("  Output dir: %s", args.output_dir)
+    logger.info("  API provider: %s", getattr(args, "api_provider", ""))
     logger.info("  API model: %s", args.api_model)
     logger.info("=" * 60)
 

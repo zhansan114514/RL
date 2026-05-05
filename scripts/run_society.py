@@ -131,6 +131,42 @@ PHASES = [
 # 运行器
 # ============================================================
 
+def _phase_outputs(phase: dict, config_path: str) -> list[str]:
+    """Resolve phase output files from the effective config."""
+    cfg = ConfigManager.initialize(config_path=config_path)
+    cache_dir = cfg.get("common.cache_dir", "output/society")
+    step = cfg.step(phase["step_key"])
+
+    if phase["id"] == 1:
+        output_dir = step.get("output_dir") or os.path.join(cache_dir, "bootstrap")
+        return [os.path.join(output_dir, "trajectories.jsonl")]
+    if phase["id"] == 2:
+        output_dir = step.get("output_dir") or os.path.join(cache_dir, "classified")
+        return [os.path.join(output_dir, "classified_data.json")]
+    if phase["id"] == 3:
+        output_dir = step.get("output_dir") or os.path.join(cache_dir, "actors")
+        return [os.path.join(output_dir, "actor_registry.json")]
+    if phase["id"] == 4:
+        output_dir = step.get("output_dir") or os.path.join(cache_dir, "critics")
+        return [os.path.join(output_dir, "critic_registry.json")]
+    if phase["id"] == 5:
+        output_dir = step.get("output_dir") or os.path.join(cache_dir, "society")
+        return [os.path.join(output_dir, "final_agent_registry.json")]
+    if phase["id"] == 6:
+        output_dir = step.get("output_dir") or os.path.join(cache_dir, "eval")
+        return [os.path.join(output_dir, "results.json")]
+    return phase["outputs"]
+
+
+def _phase_log_path(phase: dict, config_path: str) -> str:
+    """Return the log path for a phase under the configured output directory."""
+    cfg = ConfigManager.initialize(config_path=config_path)
+    cache_dir = cfg.get("common.cache_dir", "output/society")
+    log_dir = os.path.join(cache_dir, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    phase_name = phase["name"].lower().replace(" ", "_")
+    return os.path.join(log_dir, f"phase{phase['id']}_{phase_name}.log")
+
 def get_python_path() -> str:
     """获取当前 Python 解释器路径（确保子进程使用同一环境）。"""
     return sys.executable
@@ -171,21 +207,41 @@ def run_phase(
 
     start = time.time()
     try:
-        result = subprocess.run(
-            cmd,
-            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            env=env,
-            capture_output=False,  # 直接输出到终端
-            text=True,
-        )
+        log_path = _phase_log_path(phase, config_path)
+        logger.info(f"  Phase 日志: {log_path}")
+        with open(log_path, "a", encoding="utf-8") as phase_log:
+            phase_log.write("\n" + "=" * 70 + "\n")
+            phase_log.write(
+                f"Phase {phase_id} {phase_name} started at "
+                f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+            )
+            phase_log.write(f"Command: {' '.join(cmd)}\n")
+            phase_log.write("=" * 70 + "\n")
+            phase_log.flush()
+
+            result = subprocess.Popen(
+                cmd,
+                cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            assert result.stdout is not None
+            for line in result.stdout:
+                print(line, end="")
+                phase_log.write(line)
+                phase_log.flush()
+            returncode = result.wait()
         elapsed = time.time() - start
 
-        if result.returncode != 0:
-            logger.error(f"[Phase {phase_id}] {phase_name} 失败 (exit code {result.returncode}), 耗时 {elapsed:.1f}s")
+        if returncode != 0:
+            logger.error(f"[Phase {phase_id}] {phase_name} 失败 (exit code {returncode}), 耗时 {elapsed:.1f}s")
             return False
 
         # 验证产出文件
-        for out_path in phase["outputs"]:
+        for out_path in _phase_outputs(phase, config_path):
             if not os.path.exists(out_path):
                 logger.error(f"[Phase {phase_id}] 产出文件缺失: {out_path}")
                 return False
@@ -203,6 +259,7 @@ def print_final_summary(
     results: dict,
     total_time: float,
     logger: logging.Logger,
+    config_path: str,
 ):
     """打印最终汇总。"""
     logger.info("")
@@ -220,7 +277,11 @@ def print_final_summary(
     logger.info(f"\n  成功: {success}/6  总耗时: {total_time:.1f}s ({total_time / 60:.1f}min)")
 
     # 如果评估完成，打印结果
-    eval_file = "output/society/eval/results.json"
+    cfg = ConfigManager.initialize(config_path=config_path)
+    cache_dir = cfg.get("common.cache_dir", "output/society")
+    eval_step = cfg.step("step06_evaluate")
+    eval_dir = eval_step.get("output_dir") or os.path.join(cache_dir, "eval")
+    eval_file = os.path.join(eval_dir, "results.json")
     if os.path.exists(eval_file):
         with open(eval_file) as f:
             eval_data = json.load(f)
@@ -335,7 +396,7 @@ def main():
     total_time = time.time() - total_start
 
     # 打印汇总
-    print_final_summary(results, total_time, logger)
+    print_final_summary(results, total_time, logger, args.config)
 
     # 保存运行结果摘要
     summary_file = os.path.join(log_dir, "run_summary.json")
