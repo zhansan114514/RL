@@ -2,7 +2,7 @@
 Agent Registry for managing diverse Actor-Critic Society.
 
 Defines agent types with specialized roles:
-- 4 Actors with MMLU-aware reasoning styles (DIRECT, EVIDENCE, COMPARATIVE, RULE_BASED)
+- 3 Actors with reasoning styles (ALGEBRAIC, DIRECT, BACKTRACKING)
 - 5 Critics with critic-skill specialties (COMPUTATION, REASONING, KNOWLEDGE, GROUNDING, VERIFICATION)
 
 Each Agent has its own LoRA adapter on top of a shared base model (Qwen2.5-7B-Instruct).
@@ -34,12 +34,11 @@ class AgentRole(Enum):
 
 class ReasoningStyle(Enum):
     """
-    Actor reasoning styles for diverse MMLU-compatible thinking chains.
+    Actor reasoning styles for distinct problem-solving chains.
     """
-    DIRECT = "direct"              # Final answer first with one concise reason
-    EVIDENCE = "evidence"          # Facts, concepts, and question wording
-    COMPARATIVE = "comparative"    # Option comparison and elimination
-    RULE_BASED = "rule_based"      # Definitions, formulas, rules, constraints
+    ALGEBRAIC = "algebraic"        # Variables, equations, symbolic derivation
+    DIRECT = "direct"              # Concise direct solution
+    BACKTRACKING = "backtracking"  # Try, verify constraints, revise if needed
 
 
 class CriticSkill(Enum):
@@ -64,8 +63,8 @@ def resolve_reasoning_style(value: str) -> ReasoningStyle:
     """Resolve a string to ReasoningStyle with robust case-insensitive matching.
 
     Matching priority:
-      1. Exact value match  (e.g. "evidence")
-      2. Exact name match   (e.g. "EVIDENCE")
+      1. Exact value match  (e.g. "algebraic")
+      2. Exact name match   (e.g. "ALGEBRAIC")
       3. Case-insensitive value match (e.g. "Evidence")
 
     Raises ValueError (never silently falls back to a default).
@@ -148,24 +147,19 @@ def resolve_critic_skill(value: str) -> CriticSkill:
 # ============================================================
 
 ACTOR_STYLE_PROMPTS = {
+    ReasoningStyle.ALGEBRAIC: (
+        "You are an algebraic reasoner. Prefer variables, equations, symbolic "
+        "derivations, formulas, and structured mathematical modeling before "
+        "choosing the answer."
+    ),
     ReasoningStyle.DIRECT: (
-        "You are a direct answer-focused reasoner. "
-        "Give the final answer first, then provide one concise reason."
+        "You are a direct reasoner. Solve concisely and directly, using only "
+        "the short reasoning steps needed to support the final answer."
     ),
-    ReasoningStyle.EVIDENCE: (
-        "You are an evidence-based reasoner. "
-        "Use relevant facts, concepts, question wording, and domain evidence "
-        "to justify your answer."
-    ),
-    ReasoningStyle.COMPARATIVE: (
-        "You are a comparative elimination reasoner. "
-        "Compare the options, eliminate implausible choices, and explain why "
-        "the selected option is best."
-    ),
-    ReasoningStyle.RULE_BASED: (
-        "You are a rule-based reasoner. "
-        "Apply definitions, formulas, formal rules, or constraints step by step "
-        "before choosing the answer."
+    ReasoningStyle.BACKTRACKING: (
+        "You are a backtracking reasoner. First try a plausible solution, then "
+        "check it against the constraints or answer options. If the check fails, "
+        "identify the issue and revise."
     ),
 }
 
@@ -284,7 +278,7 @@ class AgentRegistry:
     """
     Registry for managing the Actor-Critic Society's agents.
 
-    Tracks 4 Actors (DIRECT, EVIDENCE, COMPARATIVE, RULE_BASED) and
+    Tracks 3 Actors (ALGEBRAIC, DIRECT, BACKTRACKING) and
     5 Critics (COMPUTATION, REASONING, KNOWLEDGE, GROUNDING, VERIFICATION),
     each with their own LoRA adapter path.
     """
@@ -367,10 +361,10 @@ class AgentRegistry:
         base_model_path: str = "Qwen/Qwen2.5-7B-Instruct",
         cache_dir: str = "cache/society",
     ) -> "AgentRegistry":
-        """Create a registry with the default 4-Actor + 5-Critic setup."""
+        """Create a registry with the default 3-Actor + 5-Critic setup."""
         registry = cls(base_model_path=base_model_path)
 
-        # 4 Actors with distinct reasoning styles
+        # 3 Actors with distinct reasoning styles
         for style in ReasoningStyle:
             agent_name = f"actor_{style.value}"
             lora_path = f"{cache_dir}/actors/{agent_name}/adapter"

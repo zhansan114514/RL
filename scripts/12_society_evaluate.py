@@ -615,13 +615,13 @@ def run_all_evaluations(
       A0: Base model only (no LoRA, no training) — zero-training reference
       A1: 1 Actor + 1 Critic from PHASE 3/4 diversification (pre-society-training)
           → Isolates basic diversification effect vs base model
-      A2: 4 diverse Actors (phase 3) + 1 Critic (phase 4) — Actor diversity only
+      A2: diverse Actors (phase 3) + 1 Critic (phase 4) — Actor diversity only
           → Isolates Actor diversity contribution vs A1
       A3: 1 Actor (phase 3) + 5 Critics (phase 4) + Router — Critic specialization only
           → Isolates Critic specialization contribution vs A1
-      A4: 4 Actors + 5 Critics from FINAL registry, uniform weights — full agents, no routing
+      A4: Actors + 5 Critics from FINAL registry, uniform weights — full agents, no routing
           → Shows society training + diversity effect without Router
-      A5: 4 Actors + 5 Critics from FINAL registry + Router — complete system
+      A5: Actors + 5 Critics from FINAL registry + Router — complete system
           → Full system with all components
 
     Key: A1-A3 use pre-society-training LoRA (phase 3/4 registries),
@@ -715,10 +715,10 @@ def run_all_evaluations(
             if results_file:
                 _save_results(results_file, results)
 
-            # A2: 4 diverse Actors (phase 3) + 1 Critic (phase 4) — Actor diversity only
+            # A2: diverse Actors (phase 3) + 1 Critic (phase 4) — Actor diversity only
             # Uses PRE-society-training LoRA from phase 3/4 diversification.
-            # Causal question: does having 4 diverse Actors improve over 1 Actor?
-            logger.info("[A2] 4 phase-diversified Actors + 1 phase-diversified Critic (Actor diversity)...")
+            # Causal question: do diverse Actors improve over 1 Actor?
+            logger.info("[A2] Phase-diversified Actors + 1 phase-diversified Critic (Actor diversity)...")
             if phase_actors and phase_critics:
                 a2_lora = dict(phase_lora)
                 # Keep only the first critic's lora
@@ -726,7 +726,7 @@ def run_all_evaluations(
                     a2_lora.pop(cn, None)
                 results["A2_actor_diversity"] = _run_deliberation_on_samples(
                     engine,
-                    phase_actors[:4],
+                    phase_actors,
                     [phase_critics[0]],
                     samples, dataset_name,
                     a2_lora, num_rounds, max_tokens, temperature,
@@ -737,7 +737,7 @@ def run_all_evaluations(
             else:
                 logger.warning("  Phase registries empty, falling back to final registry subset")
                 a_configs, _, a_lora = _build_agent_configs(
-                    registry, actor_names=all_actor_names[:4],
+                    registry, actor_names=all_actor_names,
                 )
                 _, c_configs, c_lora = _build_agent_configs(
                     registry, critic_names=[all_critic_names[0]],
@@ -791,14 +791,14 @@ def run_all_evaluations(
             if results_file:
                 _save_results(results_file, results)
 
-            # A4: 4 Actors + 5 Critics from FINAL registry, uniform weights (no routing)
+            # A4: Actors + 5 Critics from FINAL registry, uniform weights (no routing)
             # Uses POST-society-training LoRA — shows joint training + diversity effect.
             # Key difference from A5: uniform_weights=True means all critics
             # contribute equally (no softmax confidence gating)
-            logger.info("[A4] 4 Actors + 5 Critics from final registry (no routing, uniform weights)...")
+            logger.info("[A4] Actors + 5 Critics from final registry (no routing, uniform weights)...")
             a_configs, c_configs, lora = _build_agent_configs(
                 registry,
-                actor_names=all_actor_names[:4],
+                actor_names=all_actor_names,
                 critic_names=all_critic_names,
             )
             results["A4_no_routing"] = _run_deliberation_on_samples(
@@ -813,11 +813,11 @@ def run_all_evaluations(
             if results_file:
                 _save_results(results_file, results)
 
-            # A5: 4 Actors + 5 Critics from FINAL registry + Router (full system)
-            logger.info("[A5] 4 Actors + 5 Critics + Router (full system)...")
+            # A5: Actors + 5 Critics from FINAL registry + Router (full system)
+            logger.info("[A5] Actors + 5 Critics + Router (full system)...")
             a_configs, c_configs, lora = _build_agent_configs(
                 registry,
-                actor_names=all_actor_names[:4],
+                actor_names=all_actor_names,
                 critic_names=all_critic_names,
             )
             results["A5_full_system"] = _run_deliberation_on_samples(

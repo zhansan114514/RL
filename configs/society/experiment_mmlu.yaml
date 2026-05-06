@@ -34,13 +34,14 @@ sampling:
     max_samples: null
     seed_offset: 2
 
-# Phase 1: Bootstrap data generation
+# Phase 1: Style-prompted Actor data generation
 step01_bootstrap:
   output_dir: "output/society_mmlu/bootstrap"
-  num_agents: 5
-  num_debate_rounds: 2
+  reasoning_styles: ["algebraic", "direct", "backtracking"]
+  generations_per_style: 4
   temperature: 0.8
-  max_tokens: 192
+  top_p: 0.9
+  max_tokens: 256
   batch_size: 8
 
 # Phase 2: Data classification (GLM API)
@@ -59,16 +60,16 @@ step02_classify:
   use_batch_api: true
   batch_api_max_responses: 20
   max_workers: 4
-  reasoning_styles: ["direct", "evidence", "comparative", "rule_based"]
+  reasoning_styles: ["algebraic", "direct", "backtracking"]
   error_dimensions: ["computation", "reasoning", "knowledge", "grounding", "verification"]
-  min_style_confidence: 0.5
+  min_style_confidence: 0.65
   min_error_confidence: 0.5
 
 # Phase 3: Actor diversification
 step03_diversify_actors:
   input_dir: "output/society_mmlu/classified"
   output_dir: "output/society_mmlu/actors"
-  reasoning_styles: ["direct", "evidence", "comparative", "rule_based"]
+  reasoning_styles: ["algebraic", "direct", "backtracking"]
   min_pairs_per_actor: 256
   target_pairs_per_actor: 512
   max_pairs_per_actor: 1024
@@ -76,8 +77,8 @@ step03_diversify_actors:
   augment_when_below: 256
   max_synthetic_ratio: 0.7
   pair_mix:
-    correctness: 0.7
-    style: 0.2
+    correctness: 0.6
+    style: 0.3
     format: 0.1
   lora_r: 256
   lora_alpha: 512

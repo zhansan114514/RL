@@ -4,10 +4,10 @@ Diverse Actor-Critic Society 全流程统一脚本。
 依次执行 6 个 Phase，日志和中间数据全部输出到 output/ 目录。
 每个 Phase 完成后自动验证产出文件，失败则停止并报告。
 
-Phase 1: Bootstrap   — 多 Agent 轨迹生成
+Phase 1: Style Prompted Bootstrap — 风格引导 Actor 数据生成
 Phase 2: Classify    — 推理风格 + 错误类型分类 (GLM API)
 Phase 3: Diversify Actors  — 3 个 Actor LoRA DPO 训练
-Phase 4: Diversify Critics — 4 个 Critic LoRA DPO 训练
+Phase 4: Diversify Critics — 5 个 Critic LoRA DPO 训练
 Phase 5: Society Train     — N×M 交替训练
 Phase 6: Evaluate          — A1-A5 消融实验
 
@@ -78,11 +78,11 @@ def setup_pipeline_logging(log_dir: str) -> logging.Logger:
 PHASES = [
     {
         "id": 1,
-        "name": "Bootstrap",
+        "name": "Style Prompted Bootstrap",
         "script": "scripts/07_bootstrap_actors.py",
         "step_key": "step01_bootstrap",
         "outputs": ["output/society/bootstrap/trajectories.jsonl"],
-        "desc": "多 Agent 轨迹生成",
+        "desc": "风格引导 Actor 数据生成",
     },
     {
         "id": 2,
@@ -106,7 +106,7 @@ PHASES = [
         "script": "scripts/10_diversify_critics.py",
         "step_key": "step04_diversify_critics",
         "outputs": ["output/society/critics/critic_registry.json"],
-        "desc": "4 个 Critic LoRA DPO 训练",
+        "desc": "5 个 Critic LoRA DPO 训练",
     },
     {
         "id": 5,

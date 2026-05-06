@@ -8,7 +8,7 @@
 ## 架构
 
 ```
-3 Actors (推理风格分化)                    4 Critics (错误类型专长)
+3 Actors (推理风格分化)                    5 Critics (错误类型专长)
 ├── actor_algebraic  (代数推理)            ├── critic_arithmetic     (算术错误)
 ├── actor_direct     (直接计算)            ├── critic_logic         (逻辑错误)
 └── actor_backtracking (反推验证)          ├── critic_hallucination (幻觉错误)
@@ -57,7 +57,7 @@
 | `configs/model/qwen2.5_7b.yaml` | Qwen2.5-7B-Instruct 模型配置 |
 | `configs/society/base.yaml` | Society 基础配置（3A+4C, LoRA r=256, 审议5轮） |
 | `configs/society/actors.yaml` | 3 个 Actor 定义（algebraic, direct, backtracking） |
-| `configs/society/critics.yaml` | 4 个 Critic 定义（arithmetic, logic, hallucination, verification） |
+| `configs/society/critics.yaml` | 5 个 Critic 定义（computation, reasoning, knowledge, grounding, verification） |
 | `configs/society/router.yaml` | MoE Router 配置（top_k=2, temperature=1.0） |
 | `configs/society/experiment_h100.yaml` | 单 H100 完整实验配置（6 个 step） |
 
@@ -65,10 +65,10 @@
 
 | 脚本 | Phase | 说明 |
 |------|-------|------|
-| `scripts/07_bootstrap_actors.py` | Phase 1 | Bootstrap 数据生成：N=5 独立响应 + M=2 轮辩论 |
+| `scripts/07_bootstrap_actors.py` | Phase 1 | 三风格 prompt 引导 Actor 数据生成 |
 | `scripts/08_classify_data.py` | Phase 2 | 数据分类：GLM4.5 API 推理风格 + 错误类型 |
 | `scripts/09_diversify_actors.py` | Phase 3 | Actor 分化训练：按风格子集 DPO 训练 3 个 Actor |
-| `scripts/10_diversify_critics.py` | Phase 4 | Critic 分化训练：按错误类型子集 DPO 训练 4 个 Critic |
+| `scripts/10_diversify_critics.py` | Phase 4 | Critic 分化训练：按错误类型子集 DPO 训练 5 个 Critic |
 | `scripts/11_society_train.py` | Phase 5 | Society 交替训练：N×M 交替 DPO |
 | `scripts/12_society_evaluate.py` | Phase 6 | 评估 + 消融实验：A1-A5 + Wilson 95% CI |
 

@@ -127,14 +127,14 @@ configs/society/
 
 ### Phase 1: Bootstrap 数据生成 (2-3天)
 
-**核心思想**: 沿用 Multiagent FT 的方法——用同一基座模型的高温采样模拟多Agent辩论，生成多样化初始轨迹。
+**核心思想**: 用显式 actor 风格 prompt 引导同一基座模型生成 algebraic/direct/backtracking 三类训练候选，再由分类器验收。
 
 **新建脚本: `scripts/07_bootstrap_actors.py`**
 
 执行流程:
 1. 加载 Qwen2.5-7B-Instruct 基座模型（单 VLLMInference，无 LoRA）
-2. 对每个训练样本，用 temperature=0.8 + 不同 seed 生成 N=5 条独立响应
-3. 模拟 M=2 轮辩论：每轮每个 Agent 看到其他 Agent 的响应后生成新响应
+2. 对每个训练样本，按 algebraic/direct/backtracking 三种风格各生成多条响应
+3. 保存 prompted_style、generation_index、agent_name 等字段供分类验收和 actor 训练过滤
 4. 多数投票确定共识答案
 5. 保存所有轨迹（含每轮每Agent的响应、共识答案、正确性标记）
 
@@ -260,7 +260,7 @@ num_epochs: 1
 
 **新建脚本: `scripts/10_diversify_critics.py`**
 
-对 4 个 Critic 中的每一个:
+对 5 个 Critic 中的每一个:
 1. 加载第一个已分化的 Actor + 基座模型作为 VLLMInference
 2. 运行审议（复用 `deliberate()`）生成轨迹
 3. 对错误响应分类错误类型
@@ -488,7 +488,7 @@ configs/data/gsm.yaml                # 新建
 | Phase 1 | `cache/society/bootstrap/` 有数据，3 种风格均有样本 |
 | Phase 2 | 分类后每个子集 > 20 个样本，分布不过度偏斜 |
 | Phase 3 | 3 个 Actor LoRA 存在，对同一 prompt 生成不同风格响应 |
-| Phase 4 | 4 个 Critic LoRA 存在，反馈聚焦于各自专长领域 |
+| Phase 4 | 5 个 Critic LoRA 存在，反馈聚焦于各自专长领域 |
 | Phase 5 | 训练 loss 下降，Registry YAML 更新 |
 | Phase 6 | A5 > A1 (完整系统优于单 Agent 基线) |
 

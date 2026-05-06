@@ -6,7 +6,7 @@ Raises ClassificationError when API is required but unavailable,
 instead of silently falling back to unreliable heuristics.
 
 From experiment plan:
-- Reasoning styles (for correct responses): direct/evidence/comparative/rule_based
+- Reasoning styles (for correct responses): algebraic/direct/backtracking
 - Error profiles (for incorrect responses): computation/reasoning/knowledge/grounding/verification
   plus format_failure/ambiguous routing labels
 """
@@ -104,15 +104,14 @@ Response:
 Ignore any leading FINAL_ANSWER line. Classify the reasoning body.
 
 Definitions:
-- direct: final answer with one short reason and little decomposition
-- evidence: uses relevant facts, concepts, question wording, or domain evidence
-- comparative: compares options or eliminates alternatives
-- rule_based: applies definitions, formulas, formal rules, or constraints step by step
+- algebraic: uses variables, equations, symbolic operations, formulas, or algebraic structure
+- direct: solves concisely and directly with short reasoning steps
+- backtracking: tries a solution, checks constraints or options, and verifies or revises
 
 Return JSON only:
 {{
-  "primary_style": "direct|evidence|comparative|rule_based",
-  "secondary_styles": ["direct|evidence|comparative|rule_based"],
+  "primary_style": "algebraic|direct|backtracking",
+  "secondary_styles": ["algebraic|direct|backtracking"],
   "format_status": "valid|answer_only|empty_or_invalid",
   "confidence": 0.0,
   "evidence": "short reason"
@@ -352,14 +351,18 @@ def _parse_style_response(response: str) -> Optional[ReasoningStyle]:
             return style
 
     variants = {
+        "algebra": ReasoningStyle.ALGEBRAIC,
+        "algebraic_reasoning": ReasoningStyle.ALGEBRAIC,
+        "symbolic": ReasoningStyle.ALGEBRAIC,
+        "equational": ReasoningStyle.ALGEBRAIC,
+        "equation": ReasoningStyle.ALGEBRAIC,
         "directly": ReasoningStyle.DIRECT,
-        "evidential": ReasoningStyle.EVIDENCE,
-        "evidence_based": ReasoningStyle.EVIDENCE,
-        "comparison": ReasoningStyle.COMPARATIVE,
-        "comparative_elimination": ReasoningStyle.COMPARATIVE,
-        "elimination": ReasoningStyle.COMPARATIVE,
-        "rule": ReasoningStyle.RULE_BASED,
-        "rulebased": ReasoningStyle.RULE_BASED,
+        "concise": ReasoningStyle.DIRECT,
+        "backtrack": ReasoningStyle.BACKTRACKING,
+        "backtracking_reasoning": ReasoningStyle.BACKTRACKING,
+        "try_verify": ReasoningStyle.BACKTRACKING,
+        "trial_and_error": ReasoningStyle.BACKTRACKING,
+        "verification": ReasoningStyle.BACKTRACKING,
     }
     words = re.findall(r'\b[a-z_]+\b', clean)
     for word in words:
@@ -611,7 +614,7 @@ def classify_reasoning_style(
     and no cached result exists.
     """
     sample_hash = _compute_sample_hash(question, response)
-    cache_path = Path(cache_dir) / f"style_{sample_hash}.json"
+    cache_path = Path(cache_dir) / f"style_v3_actor3_{sample_hash}.json"
 
     # Check cache first (always succeeds regardless of API)
     cached = _load_cache(cache_path)

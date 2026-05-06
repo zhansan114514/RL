@@ -1,8 +1,9 @@
-"""Tests for batched bootstrap trajectory generation."""
+"""Tests for style-prompted bootstrap trajectory generation."""
 
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -32,113 +33,162 @@ class FakeModel:
         return [f"response-{i}" for i in range(len(prompts))]
 
 
-def test_initial_responses_are_batched_across_samples_and_agents():
+def test_style_prompt_contains_style_guidance_and_contract():
+    bootstrap = _load_bootstrap_module()
+    sample = {
+        "question": "What is 2+2?",
+        "choices": ["3", "4", "5", "6"],
+        "task_type": "multiple_choice",
+    }
+
+    prompt = bootstrap.build_style_prompt(
+        sample,
+        "mmlu",
+        bootstrap.ReasoningStyle.ALGEBRAIC,
+        generation_index=2,
+    )
+
+    assert "Actor-algebraic" in prompt
+    assert "variables, equations" in prompt
+    assert "independent generation attempt 3" in prompt
+    assert "FINAL_ANSWER: A or B or C or D" in prompt
+
+
+def test_style_prompted_generation_batches_samples_styles_and_attempts():
     bootstrap = _load_bootstrap_module()
     model = FakeModel()
-    samples = [
-        {"question": "Q0", "task_type": "math"},
-        {"question": "Q1", "task_type": "math"},
+    args = type("Args", (), {
+        "dataset": "mmlu",
+        "generations_per_style": 2,
+        "seed": 42,
+        "max_tokens": 32,
+        "temperature": 0.5,
+        "top_p": 0.9,
+    })()
+    styles = [
+        bootstrap.ReasoningStyle.ALGEBRAIC,
+        bootstrap.ReasoningStyle.DIRECT,
+        bootstrap.ReasoningStyle.BACKTRACKING,
+    ]
+    batch_entries = [
+        (0, {"question": "Q0", "choices": ["A", "B", "C", "D"], "task_type": "multiple_choice"}),
+        (1, {"question": "Q1", "choices": ["A", "B", "C", "D"], "task_type": "multiple_choice"}),
     ]
 
-    with (
-        patch("src.prompts.formatter.format_prompt", side_effect=lambda *args, **kwargs: args[2]["question"]),
-        patch("src.algorithms.reward.extract_answer", side_effect=lambda response, task_type: response),
+    with patch(
+        "src.algorithms.reward.extract_answer",
+        side_effect=lambda response, task_type: response,
     ):
-        responses = bootstrap.generate_initial_responses_batch(
-            model,
-            samples,
-            "math",
-            num_agents=3,
-            temperature=0.0,
-            max_tokens=32,
-            base_seed=123,
-        )
+        records = bootstrap.generate_batch(model, batch_entries, args, styles)
 
     assert len(model.calls) == 1
     prompts, kwargs = model.calls[0]
-    assert len(prompts) == 6
-    assert kwargs["seed"] == 123
+    assert len(prompts) == 12
+    assert kwargs["seed"] == 42
+    assert kwargs["max_tokens"] == 32
+    assert kwargs["temperature"] == 0.5
+    assert kwargs["top_p"] == 0.9
     assert all("FINAL_ANSWER:" in prompt for prompt in prompts)
-    assert all(
-        prompt.rfind("Produce an independent solution.")
-        < prompt.rfind("Output format requirements:")
-        for prompt in prompts
-    )
 
-    assert [r.agent_id for r in responses[0]] == [0, 1, 2]
-    assert [r.response for r in responses[0]] == ["response-0", "response-1", "response-2"]
-    assert [r.response_id for r in responses[0]] == [
-        "sample_0_round_0_agent_0",
-        "sample_0_round_0_agent_1",
-        "sample_0_round_0_agent_2",
+    assert len(records) == 2
+    first = records[0]
+    assert first["sample_id"] == "mmlu_0"
+    assert first["debate_rounds"] == []
+    assert first["metadata"]["generation_mode"] == "style_prompted"
+    assert first["metadata"]["reasoning_styles"] == [
+        "algebraic",
+        "direct",
+        "backtracking",
     ]
-    assert [r.agent_id for r in responses[1]] == [0, 1, 2]
-    assert [r.response for r in responses[1]] == ["response-3", "response-4", "response-5"]
-    assert [r.response_id for r in responses[1]] == [
-        "sample_1_round_0_agent_0",
-        "sample_1_round_0_agent_1",
-        "sample_1_round_0_agent_2",
+    assert len(first["initial_responses"]) == 6
+
+    response_ids = [r["response_id"] for r in first["initial_responses"]]
+    assert response_ids == [
+        "mmlu_0_algebraic_0",
+        "mmlu_0_algebraic_1",
+        "mmlu_0_direct_0",
+        "mmlu_0_direct_1",
+        "mmlu_0_backtracking_0",
+        "mmlu_0_backtracking_1",
+    ]
+    assert [r["prompted_style"] for r in first["initial_responses"]] == [
+        "algebraic",
+        "algebraic",
+        "direct",
+        "direct",
+        "backtracking",
+        "backtracking",
+    ]
+    assert [r["agent_name"] for r in first["initial_responses"]] == [
+        "actor_algebraic",
+        "actor_algebraic",
+        "actor_direct",
+        "actor_direct",
+        "actor_backtracking",
+        "actor_backtracking",
     ]
 
 
-def test_debate_round_batch_keeps_sample_contexts_separate():
+def test_generation_result_count_mismatch_fails_fast():
     bootstrap = _load_bootstrap_module()
-    model = FakeModel()
-    samples = [
-        {"question": "Q0", "task_type": "math"},
-        {"question": "Q1", "task_type": "math"},
-    ]
-    previous = [
-        [
-            bootstrap.AgentResponse(agent_id=0, round=0, response="s0-a0", answer=""),
-            bootstrap.AgentResponse(agent_id=1, round=0, response="s0-a1", answer=""),
-        ],
-        [
-            bootstrap.AgentResponse(agent_id=0, round=0, response="s1-a0", answer=""),
-            bootstrap.AgentResponse(agent_id=1, round=0, response="s1-a1", answer=""),
-        ],
+
+    try:
+        bootstrap.coerce_generation_results(["one"], expected=2)
+    except ValueError as exc:
+        assert "Generated 1 responses for 2 prompts" in str(exc)
+    else:
+        raise AssertionError("Expected ValueError")
+
+
+def test_existing_bootstrap_rejects_stale_natural_generation(tmp_path):
+    bootstrap = _load_bootstrap_module()
+    output_file = tmp_path / "trajectories.jsonl"
+    output_file.write_text(json.dumps({
+        "sample_id": "mmlu_0",
+        "metadata": {
+            "schema_version": 3,
+            "generation_mode": "natural",
+        },
+    }) + "\n")
+    args = type("Args", (), {
+        "dataset": "mmlu",
+        "generations_per_style": 4,
+        "temperature": 0.8,
+        "top_p": 0.9,
+        "max_tokens": 256,
+    })()
+    styles = [
+        bootstrap.ReasoningStyle.ALGEBRAIC,
+        bootstrap.ReasoningStyle.DIRECT,
+        bootstrap.ReasoningStyle.BACKTRACKING,
     ]
 
-    def fake_format_prompt(dataset_name, prompt_type, sample, **kwargs):
-        return f"{sample['question']}|{kwargs['responses']}"
+    try:
+        bootstrap.existing_sample_ids(output_file, args, styles)
+    except RuntimeError as exc:
+        assert "does not match the current style-prompted" in str(exc)
+    else:
+        raise AssertionError("Expected stale bootstrap output to fail fast")
 
-    with (
-        patch("src.prompts.formatter.format_prompt", side_effect=fake_format_prompt),
-        patch("src.algorithms.reward.extract_answer", side_effect=lambda response, task_type: response),
-    ):
-        responses = bootstrap.simulate_debate_round_batch(
-            model,
-            samples,
-            "math",
-            previous,
-            round_num=1,
-            temperature=0.0,
-            max_tokens=32,
-            base_seed=123,
-        )
 
-    prompts, kwargs = model.calls[0]
-    assert len(prompts) == 4
-    assert kwargs["seed"] == 223
-    assert all("s1-a" not in prompt for prompt in prompts[:2])
-    assert all("s0-a" not in prompt for prompt in prompts[2:])
-    assert all("FINAL_ANSWER:" in prompt for prompt in prompts)
-    assert all(
-        prompt.rfind("Revise independently after reading the debate.")
-        < prompt.rfind("Output format requirements:")
-        for prompt in prompts
-    )
-
-    assert [r.agent_id for r in responses[0]] == [0, 1]
-    assert [r.round for r in responses[0]] == [1, 1]
-    assert [r.response for r in responses[0]] == ["response-0", "response-1"]
-    assert [r.response_id for r in responses[0]] == [
-        "sample_0_round_1_agent_0",
-        "sample_0_round_1_agent_1",
+def test_existing_bootstrap_resumes_matching_style_prompted_output(tmp_path):
+    bootstrap = _load_bootstrap_module()
+    args = type("Args", (), {
+        "dataset": "mmlu",
+        "generations_per_style": 4,
+        "temperature": 0.8,
+        "top_p": 0.9,
+        "max_tokens": 256,
+    })()
+    styles = [
+        bootstrap.ReasoningStyle.ALGEBRAIC,
+        bootstrap.ReasoningStyle.DIRECT,
+        bootstrap.ReasoningStyle.BACKTRACKING,
     ]
-    assert [r.agent_id for r in responses[1]] == [0, 1]
-    assert [r.response for r in responses[1]] == ["response-2", "response-3"]
-    assert [r.response_id for r in responses[1]] == [
-        "sample_1_round_1_agent_0",
-        "sample_1_round_1_agent_1",
-    ]
+    output_file = tmp_path / "trajectories.jsonl"
+    output_file.write_text(json.dumps({
+        "sample_id": "mmlu_0",
+        "metadata": bootstrap.expected_bootstrap_metadata(args, styles),
+    }) + "\n")
+
+    assert bootstrap.existing_sample_ids(output_file, args, styles) == {"mmlu_0"}

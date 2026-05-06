@@ -102,10 +102,10 @@ def society_inference(
 
     Supports ablation experiments:
     - A1: num_actors=1, num_critics=1 (baseline ACC-Collab)
-    - A2: num_actors=4, num_critics=1 (Actor diversity only)
+    - A2: num_actors=3, num_critics=1 (Actor diversity only)
     - A3: num_actors=1, num_critics=5, router_top_k=2 (Critic specialization only)
-    - A4: num_actors=4, num_critics=5, router_top_k=5, router_uniform=True (no routing)
-    - A5: num_actors=4, num_critics=5, router_top_k=2, router_uniform=False (full system)
+    - A4: num_actors=3, num_critics=5, router_top_k=5, router_uniform=True (no routing)
+    - A5: num_actors=3, num_critics=5, router_top_k=2, router_uniform=False (full system)
 
     Args:
         registry: AgentRegistry with all agents.
@@ -429,14 +429,14 @@ ABLATION_CONFIGS = {
             "description": "Base model baseline (no LoRA, no training)"},
     "A1": {"num_actors": 1, "num_critics": 1, "router_top_k": 1, "router_uniform": False,
             "description": "1 trained Actor + 1 trained Critic (ACC-Collab baseline)"},
-    "A2": {"num_actors": 4, "num_critics": 1, "router_top_k": 1, "router_uniform": False,
-            "description": "4 trained Actors + 1 trained Critic (Actor diversity only)"},
+    "A2": {"num_actors": 3, "num_critics": 1, "router_top_k": 1, "router_uniform": False,
+            "description": "3 trained Actors + 1 trained Critic (Actor diversity only)"},
     "A3": {"num_actors": 1, "num_critics": 5, "router_top_k": 2, "router_uniform": False,
             "description": "1 trained Actor + 5 trained Critics + Router (Critic specialization only)"},
-    "A4": {"num_actors": 4, "num_critics": 5, "router_top_k": 5, "router_uniform": True,
-            "description": "4 trained Actors + 5 trained Critics, uniform weights (no routing)"},
-    "A5": {"num_actors": 4, "num_critics": 5, "router_top_k": 2, "router_uniform": False,
-            "description": "4 trained Actors + 5 trained Critics + Router (full system)"},
+    "A4": {"num_actors": 3, "num_critics": 5, "router_top_k": 5, "router_uniform": True,
+            "description": "3 trained Actors + 5 trained Critics, uniform weights (no routing)"},
+    "A5": {"num_actors": 3, "num_critics": 5, "router_top_k": 2, "router_uniform": False,
+            "description": "3 trained Actors + 5 trained Critics + Router (full system)"},
 }
 
 

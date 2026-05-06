@@ -103,9 +103,9 @@ class TestConfigManagerStep:
         experiment.write_text("""
 common:
   model_name: Qwen/Qwen2.5-7B-Instruct
-  num_agents: 3
+  generations_per_style: 2
 step01_bootstrap:
-  num_agents: 5
+  generations_per_style: 4
   temperature: 0.8
 """)
 
@@ -114,10 +114,10 @@ step01_bootstrap:
             load_local=False,
         )
         step = cfg.step("step01_bootstrap", defaults={
-            "num_agents": True,
+            "generations_per_style": True,
             "temperature": True,
         })
-        assert step.get("num_agents") == 5       # from step section
+        assert step.get("generations_per_style") == 4  # from step section
         assert step.get("temperature") == 0.8     # from step section
         assert step.get("model_name") == "Qwen/Qwen2.5-7B-Instruct"  # from common
 

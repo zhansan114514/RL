@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import sys
+import hashlib
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -46,6 +47,7 @@ STEP_DEFAULTS = {
     "strict_classification": True,
     "max_classification_failure_rate": 0.0,
     "max_workers": 4,
+    "min_style_confidence": 0.65,
 }
 
 VALID_STYLES = {style.value for style in ReasoningStyle}
@@ -78,7 +80,7 @@ def parse_args():
     return args
 
 
-def load_trajectories(input_dir: str) -> list[dict]:
+def resolve_trajectory_file(input_dir: str) -> Path:
     import glob
 
     pattern = os.path.join(input_dir, "trajectories.jsonl")
@@ -87,7 +89,24 @@ def load_trajectories(input_dir: str) -> list[dict]:
         if not files:
             raise FileNotFoundError(f"No trajectories found in {input_dir}")
         pattern = files[0]
+    return Path(pattern)
 
+
+def fingerprint_file(path: Path) -> dict[str, Any]:
+    stat = path.stat()
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "path": str(path),
+        "size": stat.st_size,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def load_trajectories(input_dir: str) -> list[dict]:
+    pattern = resolve_trajectory_file(input_dir)
     trajectories = []
     with open(pattern) as f:
         for line in f:
@@ -97,17 +116,35 @@ def load_trajectories(input_dir: str) -> list[dict]:
     return trajectories
 
 
-def load_checkpoint(output_dir: str) -> dict[str, Any]:
+def checkpoint_metadata(args: Any) -> dict[str, Any]:
+    trajectory_file = resolve_trajectory_file(str(getattr(args, "input_dir", "")))
+    return {
+        "input_dir": str(getattr(args, "input_dir", "")),
+        "input_file": fingerprint_file(trajectory_file),
+        "reasoning_styles": sorted(VALID_STYLES),
+        "min_style_confidence": float(getattr(args, "min_style_confidence", 0.65)),
+    }
+
+
+def load_checkpoint(output_dir: str, args: Any) -> dict[str, Any]:
     path = Path(output_dir) / "classification_checkpoint.json"
     if path.exists():
         with open(path) as f:
-            return json.load(f)
+            checkpoint = json.load(f)
+        if checkpoint.get("metadata") == checkpoint_metadata(args):
+            return checkpoint
+        logger.warning(
+            "Ignoring stale classification checkpoint at %s: metadata mismatch",
+            path,
+        )
     return {"schema_version": 3, "completed": [], "results": []}
 
 
-def save_checkpoint(output_dir: str, checkpoint: dict[str, Any]) -> None:
+def save_checkpoint(output_dir: str, checkpoint: dict[str, Any], args: Any) -> None:
     path = Path(output_dir) / "classification_checkpoint.json"
     path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint = dict(checkpoint)
+    checkpoint["metadata"] = checkpoint_metadata(args)
     tmp = path.with_suffix(".tmp")
     with open(tmp, "w") as f:
         json.dump(checkpoint, f, indent=2, ensure_ascii=False)
@@ -174,6 +211,8 @@ def build_per_response_labels(traj: dict[str, Any]) -> list[dict[str, Any]]:
             "round": resp.get("round", 0),
             "agent_id": resp.get("agent_id", 0),
             "agent_name": resp.get("agent_name", ""),
+            "prompted_style": resp.get("prompted_style", ""),
+            "generation_index": resp.get("generation_index"),
             "response": resp.get("response", ""),
             "answer": answer,
             "is_correct": _is_correct(answer, correct_answer, task_type),
@@ -184,8 +223,25 @@ def build_per_response_labels(traj: dict[str, Any]) -> list[dict[str, Any]]:
             "format_status": None,
             "error_profile": None,
             "classification_source": None,
+            "style_match": False,
+            "accepted_for_actor": False,
         })
     return labels
+
+
+def update_actor_acceptance(label: dict[str, Any], args: Any) -> None:
+    """Populate actor-training gate fields for one classified label."""
+    prompted_style = str(label.get("prompted_style") or "")
+    primary_style = str(label.get("primary_style") or "")
+    style_match = bool(prompted_style and primary_style == prompted_style)
+    label["style_match"] = style_match
+    label["accepted_for_actor"] = (
+        bool(label.get("is_correct"))
+        and label.get("format_status") == "valid"
+        and style_match
+        and float(label.get("reasoning_style_confidence", 0.0) or 0.0)
+        >= float(getattr(args, "min_style_confidence", 0.65))
+    )
 
 
 def _choices_text(sample: dict[str, Any]) -> str:
@@ -218,6 +274,7 @@ def classify_label(label: dict[str, Any], sample: dict[str, Any], args: Any) -> 
             label["reasoning_style_confidence"] = result.confidence
             label["format_status"] = result.format_status
             label["classification_source"] = "shared_classifier"
+            update_actor_acceptance(label, args)
             return True
 
         result = classify_error_profile(
@@ -248,9 +305,11 @@ def classify_label(label: dict[str, Any], sample: dict[str, Any], args: Any) -> 
             "evidence": result.evidence,
         }
         label["classification_source"] = "shared_classifier"
+        update_actor_acceptance(label, args)
         return True
     except ClassificationError as e:
         logger.warning("Classification failed for %s: %s", label.get("response_id", ""), e)
+        update_actor_acceptance(label, args)
         return False
 
 
@@ -308,6 +367,10 @@ def aggregate_result(
             or (label.get("error_profile") or {}).get("primary") == "format_failure"
         ),
         "num_responses": len(labels),
+        "num_style_match": sum(1 for label in labels if label.get("style_match")),
+        "num_accepted_for_actor": sum(
+            1 for label in labels if label.get("accepted_for_actor")
+        ),
         "classification_sources": dict(Counter(
             label.get("classification_source") or "unclassified"
             for label in labels
@@ -349,7 +412,10 @@ def classify_trajectory(traj: dict[str, Any], idx: int, args: Any) -> dict[str, 
     }
 
 
-def build_reports(results: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[str, Any]]:
+def build_reports(
+    results: list[dict[str, Any]],
+    min_style_confidence: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     style_splits: dict[str, list[str]] = defaultdict(list)
     profile_splits: dict[str, list[str]] = defaultdict(list)
     per_response_style_splits: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -365,6 +431,8 @@ def build_reports(results: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[s
     })
 
     total_labels = 0
+    style_match_dist: Counter[str] = Counter()
+    accepted_style_dist: Counter[str] = Counter()
     warnings: list[str] = []
 
     for result in results:
@@ -387,12 +455,19 @@ def build_reports(results: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[s
                 style = label["primary_style"]
                 style_dist[style] += 1
                 per_subject[subject]["styles"][style] += 1
+                if label.get("style_match"):
+                    style_match_dist[style] += 1
+                if label.get("accepted_for_actor"):
+                    accepted_style_dist[style] += 1
                 per_response_style_splits[style].append({
                     "sample_id": sample_id,
                     "response_id": label.get("response_id", ""),
                     "round": label.get("round", 0),
                     "agent_id": label.get("agent_id", 0),
                     "agent_name": label.get("agent_name", ""),
+                    "prompted_style": label.get("prompted_style", ""),
+                    "style_match": label.get("style_match", False),
+                    "accepted_for_actor": label.get("accepted_for_actor", False),
                     "is_correct": label.get("is_correct", False),
                 })
             profile = label.get("error_profile")
@@ -442,8 +517,11 @@ def build_reports(results: list[dict[str, Any]]) -> tuple[dict[str, Any], dict[s
     report = {
         "schema_version": 3,
         "style_distribution": dict(style_dist),
+        "style_match_distribution": dict(style_match_dist),
+        "accepted_for_actor_distribution": dict(accepted_style_dist),
         "error_profile_distribution": dict(profile_dist),
         "format_status_distribution": dict(format_dist),
+        "min_style_confidence": min_style_confidence,
         "per_subject_distribution": {
             subject: {
                 "styles": dict(counters["styles"]),
@@ -477,7 +555,7 @@ def main() -> None:
     logger.info("=" * 60)
 
     trajectories = load_trajectories(args.input_dir)
-    checkpoint = load_checkpoint(args.output_dir)
+    checkpoint = load_checkpoint(args.output_dir, args)
     completed_ids = set(checkpoint.get("completed", []))
     results = checkpoint.get("results", [])
 
@@ -517,7 +595,7 @@ def main() -> None:
                 "schema_version": 3,
                 "completed": sorted(completed_ids),
                 "results": list(existing_by_id.values()),
-            })
+            }, args)
             logger.info(
                 "Progress: %s/%s, failures=%s",
                 len(completed_ids),
@@ -530,7 +608,7 @@ def main() -> None:
         "schema_version": 3,
         "completed": sorted(completed_ids),
         "results": results,
-    })
+    }, args)
 
     failure_rate = (
         classification_failures / classification_attempts
@@ -544,7 +622,10 @@ def main() -> None:
             f"{max_failure_rate:.3f} ({classification_failures}/{classification_attempts})"
         )
 
-    splits, report = build_reports(results)
+    splits, report = build_reports(
+        results,
+        min_style_confidence=float(getattr(args, "min_style_confidence", 0.65)),
+    )
 
     output_file = Path(args.output_dir) / "classified_data.json"
     with open(output_file, "w") as f:
@@ -560,6 +641,7 @@ def main() -> None:
                 "classification_failure_rate": failure_rate,
                 "max_classification_failure_rate": max_failure_rate,
                 "max_workers": max_workers,
+                "min_style_confidence": float(getattr(args, "min_style_confidence", 0.65)),
             },
         }, f, indent=2, ensure_ascii=False)
 

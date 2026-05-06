@@ -15,7 +15,6 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from _utils import setup_logging
-from src.algorithms.reward import extract_answer, math_answers_equal, normalize_answer
 from src.prompts.formatter import format_prompt
 from src.prompts.templates import PromptType
 from src.society.agent_registry import ReasoningStyle
@@ -34,14 +33,14 @@ STEP_DEFAULTS = {
     "cache_dir": "output/society",
     "input_dir": "output/society/classified",
     "output_dir": "output/society/actors",
-    "reasoning_styles": ["direct", "evidence", "comparative", "rule_based"],
+    "reasoning_styles": ["algebraic", "direct", "backtracking"],
     "min_pairs_per_actor": 256,
     "target_pairs_per_actor": 512,
     "max_pairs_per_actor": 1024,
     "max_pairs_per_sample": 4,
     "augment_when_below": 256,
     "max_synthetic_ratio": 0.7,
-    "pair_mix": {"correctness": 0.7, "style": 0.2, "format": 0.1},
+    "pair_mix": {"correctness": 0.6, "style": 0.3, "format": 0.1},
     "lora_r": 256,
     "lora_alpha": 512,
     "learning_rate": 5e-5,
@@ -81,43 +80,6 @@ def load_classified_data(input_dir: str) -> dict[str, Any]:
     return data
 
 
-def load_bootstrap_trajectories(cache_dir: str) -> dict[str, Any]:
-    path = Path(cache_dir) / "bootstrap" / "trajectories.jsonl"
-    if not path.exists():
-        raise FileNotFoundError(f"Trajectories not found: {path}")
-    trajectories = {}
-    with open(path) as f:
-        for line in f:
-            if line.strip():
-                traj = json.loads(line)
-                trajectories[traj["sample_id"]] = traj
-    logger.info("Loaded %s trajectories", len(trajectories))
-    return trajectories
-
-
-def flatten_trajectory_responses(sample_id: str, traj: dict[str, Any]) -> list[dict[str, Any]]:
-    responses: list[dict[str, Any]] = []
-    groups = [traj.get("initial_responses", [])]
-    groups.extend(traj.get("debate_rounds", []))
-    for group in groups:
-        for resp in group:
-            item = dict(resp)
-            round_num = int(item.get("round", 0))
-            agent_id = int(item.get("agent_id", 0))
-            item["response_id"] = item.get("response_id") or f"{sample_id}_round_{round_num}_agent_{agent_id}"
-            responses.append(item)
-    return responses
-
-
-def _is_correct(response: str, sample: dict[str, Any]) -> bool:
-    task_type = sample.get("task_type", "multiple_choice")
-    correct_answer = sample.get("answer", "")
-    extracted = extract_answer(response, task_type)
-    if task_type == "math":
-        return math_answers_equal(extracted or "", correct_answer)
-    return normalize_answer(extracted or "", task_type) == normalize_answer(correct_answer, task_type)
-
-
 def _format_valid(response: str) -> bool:
     lines = [line.strip() for line in (response or "").splitlines() if line.strip()]
     return bool(lines and lines[0].startswith("FINAL_ANSWER:") and "RATIONALE:" in lines[:4])
@@ -125,34 +87,28 @@ def _format_valid(response: str) -> bool:
 
 def build_response_index(
     classified_results: list[dict[str, Any]],
-    trajectories: dict[str, Any],
 ) -> dict[str, list[dict[str, Any]]]:
     by_sample: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    label_by_id: dict[str, dict[str, Any]] = {}
-
     for result in classified_results:
+        sample_id = result.get("sample_id", "")
+        sample = result.get("sample", {})
         for label in result.get("per_response_labels", []):
-            rid = label.get("response_id")
-            if rid:
-                label_by_id[rid] = label
-
-    for sample_id, traj in trajectories.items():
-        sample = traj.get("sample", {})
-        for resp in flatten_trajectory_responses(sample_id, traj):
-            response_id = resp.get("response_id", "")
-            label = label_by_id.get(response_id, {})
-            response_text = resp.get("response", "")
-            is_correct = bool(label.get("is_correct")) if label else _is_correct(response_text, sample)
+            response_text = label.get("response", "")
             by_sample[sample_id].append({
                 "sample_id": sample_id,
-                "response_id": response_id,
+                "response_id": label.get("response_id", ""),
                 "sample": sample,
                 "response": response_text,
-                "is_correct": is_correct,
+                "is_correct": bool(label.get("is_correct")),
                 "primary_style": label.get("primary_style") or label.get("reasoning_style"),
                 "secondary_styles": label.get("secondary_styles", []),
                 "style_confidence": label.get("reasoning_style_confidence", 0.0),
                 "format_status": label.get("format_status") or ("valid" if _format_valid(response_text) else "answer_only"),
+                "prompted_style": label.get("prompted_style", ""),
+                "style_match": bool(label.get("style_match")),
+                "accepted_for_actor": bool(label.get("accepted_for_actor")),
+                "generation_index": label.get("generation_index"),
+                "agent_name": label.get("agent_name", ""),
                 "synthetic": False,
             })
     return by_sample
@@ -162,9 +118,12 @@ def _take_limited(
     items: list[dict[str, Any]],
     limit_by_sample: Counter[str],
     max_pairs_per_sample: int,
+    quota: int | None = None,
 ) -> list[dict[str, Any]]:
     selected = []
     for item in items:
+        if quota is not None and len(selected) >= quota:
+            break
         sid = item.get("sample_id", "")
         if limit_by_sample[sid] >= max_pairs_per_sample:
             continue
@@ -191,11 +150,26 @@ def build_preference_pairs_for_style(
     for sample_id, responses in by_sample.items():
         style_correct = [
             r for r in responses
-            if r["is_correct"] and r.get("primary_style") == target_style
+            if (
+                r["is_correct"]
+                and r.get("accepted_for_actor")
+                and r.get("prompted_style") == target_style
+                and r.get("primary_style") == target_style
+            )
         ]
+        style_correct_ids = {r.get("response_id", "") for r in style_correct}
         other_style_correct = [
             r for r in responses
-            if r["is_correct"] and r.get("primary_style") and r.get("primary_style") != target_style
+            if (
+                r["is_correct"]
+                and r.get("response_id")
+                and r.get("response_id") not in style_correct_ids
+                and (
+                    r.get("prompted_style") != target_style
+                    or r.get("primary_style") != target_style
+                    or not r.get("accepted_for_actor")
+                )
+            )
         ]
         incorrect = [r for r in responses if not r["is_correct"]]
         malformed = [
@@ -206,8 +180,12 @@ def build_preference_pairs_for_style(
 
         for chosen in style_correct:
             for rejected in incorrect:
+                if rejected["response_id"] == chosen["response_id"]:
+                    continue
                 correctness_candidates.append(_make_pair(chosen, rejected, "correctness"))
             for rejected in other_style_correct:
+                if rejected["response_id"] == chosen["response_id"]:
+                    continue
                 style_candidates.append(_make_pair(chosen, rejected, "style"))
             for rejected in malformed:
                 if rejected["response_id"] != chosen["response_id"]:
@@ -220,8 +198,13 @@ def build_preference_pairs_for_style(
         ("style", style_candidates),
         ("format", format_candidates),
     ):
-        selected = _take_limited(pool, per_sample_counter, max_pairs_per_sample)
-        pairs.extend(selected[:quotas[kind]])
+        selected = _take_limited(
+            pool,
+            per_sample_counter,
+            max_pairs_per_sample,
+            quota=quotas[kind],
+        )
+        pairs.extend(selected)
 
     if len(pairs) < target_pairs:
         filler = correctness_candidates + style_candidates + format_candidates
@@ -294,6 +277,7 @@ def augment_pairs_if_needed(
         api_base=getattr(args, "api_base", "https://api.labforge.top"),
         api_model=getattr(args, "api_model", "gpt5.5"),
         cache_dir=args.input_dir,
+        style_confidence_threshold=float(getattr(args, "min_style_confidence", 0.65)),
         request_timeout=getattr(args, "request_timeout", 60),
         max_retries=getattr(args, "max_retries", 5),
         retry_delay=getattr(args, "retry_delay", 5),
@@ -314,6 +298,9 @@ def augment_pairs_if_needed(
                 "rejected_response_id": f"synthetic_rejected_{target_style}_{idx}",
                 "pair_type": "synthetic_correctness",
                 "synthetic": True,
+                "chosen_prompted_style": target_style,
+                "chosen_primary_style": target_style,
+                "chosen_accepted_for_actor": True,
                 "style_confidence": item.get("style_confidence", 0.0),
             },
         })
@@ -327,7 +314,7 @@ def augment_pairs_if_needed(
 
 
 def _pair_quotas(target_pairs: int, mix: dict[str, float]) -> dict[str, int]:
-    defaults = {"correctness": 0.7, "style": 0.2, "format": 0.1}
+    defaults = {"correctness": 0.6, "style": 0.3, "format": 0.1}
     ratios = {k: float(mix.get(k, defaults[k])) for k in defaults}
     total = sum(ratios.values()) or 1.0
     quotas = {k: int(round(target_pairs * ratios[k] / total)) for k in ratios}
@@ -348,6 +335,12 @@ def _make_pair(chosen: dict[str, Any], rejected: dict[str, Any], pair_type: str)
             "rejected_response_id": rejected.get("response_id", ""),
             "pair_type": pair_type,
             "synthetic": bool(chosen.get("synthetic") or rejected.get("synthetic")),
+            "chosen_prompted_style": chosen.get("prompted_style", ""),
+            "chosen_primary_style": chosen.get("primary_style", ""),
+            "chosen_style_confidence": chosen.get("style_confidence", 0.0),
+            "rejected_prompted_style": rejected.get("prompted_style", ""),
+            "rejected_primary_style": rejected.get("primary_style", ""),
+            "rejected_format_status": rejected.get("format_status", ""),
         },
     }
 
@@ -432,8 +425,7 @@ def main() -> None:
     logger.info("=" * 60)
 
     classified = load_classified_data(args.input_dir)
-    trajectories = load_bootstrap_trajectories(args.cache_dir)
-    by_sample = build_response_index(classified["results"], trajectories)
+    by_sample = build_response_index(classified["results"])
 
     actor_paths: dict[str, str] = {}
     actor_metrics: dict[str, Any] = {}
@@ -441,23 +433,18 @@ def main() -> None:
     for thinking_style in args.reasoning_styles:
         ReasoningStyle(thinking_style)
         logger.info("--- Building Actor pairs: %s ---", thinking_style)
-        cache_path = Path(args.output_dir) / f"pairs_{thinking_style}.json"
-        metrics_path = Path(args.output_dir) / f"pairs_{thinking_style}_metrics.json"
+        cache_path = Path(args.output_dir) / f"pairs_actor3_prompted_{thinking_style}.json"
+        metrics_path = Path(args.output_dir) / f"pairs_actor3_prompted_{thinking_style}_metrics.json"
 
-        if cache_path.exists():
-            with open(cache_path) as f:
-                pairs = json.load(f)
-            metrics = _pair_metrics(pairs)
-        else:
-            pairs, metrics = build_preference_pairs_for_style(by_sample, thinking_style, args)
-            pairs, synth_metrics = augment_pairs_if_needed(pairs, by_sample, thinking_style, args)
-            metrics.update(synth_metrics)
-            metrics["real_pair_count"] = len(pairs) - metrics.get("synthetic_pair_count", 0)
-            metrics["trained_low_data"] = len(pairs) < int(args.min_pairs_per_actor)
-            with open(cache_path, "w") as f:
-                json.dump(pairs, f, indent=2, ensure_ascii=False)
-            with open(metrics_path, "w") as f:
-                json.dump(metrics, f, indent=2, ensure_ascii=False)
+        pairs, metrics = build_preference_pairs_for_style(by_sample, thinking_style, args)
+        pairs, synth_metrics = augment_pairs_if_needed(pairs, by_sample, thinking_style, args)
+        metrics.update(synth_metrics)
+        metrics["real_pair_count"] = len(pairs) - metrics.get("synthetic_pair_count", 0)
+        metrics["trained_low_data"] = len(pairs) < int(args.min_pairs_per_actor)
+        with open(cache_path, "w") as f:
+            json.dump(pairs, f, indent=2, ensure_ascii=False)
+        with open(metrics_path, "w") as f:
+            json.dump(metrics, f, indent=2, ensure_ascii=False)
 
         actor_metrics[thinking_style] = metrics
         if len(pairs) < int(args.min_pairs_per_actor):

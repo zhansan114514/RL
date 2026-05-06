@@ -85,14 +85,14 @@ class TestAgentConfig:
     def test_create_actor_config(self):
         """Should create Actor config with reasoning style."""
         config = AgentConfig(
-            name="actor_evidence",
+            name="actor_algebraic",
             role=AgentRole.ACTOR,
             model_path="/models/base",
-            reasoning_style=ReasoningStyle.EVIDENCE,
+            reasoning_style=ReasoningStyle.ALGEBRAIC,
         )
-        assert config.name == "actor_evidence"
+        assert config.name == "actor_algebraic"
         assert config.role == AgentRole.ACTOR
-        assert config.reasoning_style == ReasoningStyle.EVIDENCE
+        assert config.reasoning_style == ReasoningStyle.ALGEBRAIC
         assert config.error_specialty is None
 
     def test_create_critic_config(self):
@@ -113,9 +113,9 @@ class TestAgentConfig:
             name="actor_1",
             role=AgentRole.ACTOR,
             model_path="/models/base",
-            reasoning_style=ReasoningStyle.EVIDENCE,
+            reasoning_style=ReasoningStyle.ALGEBRAIC,
         )
-        assert config.display_name == "Actor-evidence"
+        assert config.display_name == "Actor-algebraic"
 
     def test_display_name_critic(self):
         """Critic display_name should include error specialty."""
@@ -135,7 +135,7 @@ class TestAgentConfig:
             model_path="/models/base",
             reasoning_style=ReasoningStyle.DIRECT,
         )
-        assert "direct answer-focused reasoner" in config.system_prompt.lower()
+        assert "direct reasoner" in config.system_prompt.lower()
 
     def test_system_prompt_critic(self):
         """Critic system prompt should include confidence suffix."""
@@ -156,14 +156,14 @@ class TestAgentConfig:
             name="test_actor",
             role=AgentRole.ACTOR,
             model_path="/models/base",
-            reasoning_style=ReasoningStyle.COMPARATIVE,
+            reasoning_style=ReasoningStyle.BACKTRACKING,
             temperature=0.5,
             max_tokens=256,
         )
         d = config.to_dict()
         assert d["name"] == "test_actor"
         assert d["role"] == "actor"
-        assert d["reasoning_style"] == "comparative"
+        assert d["reasoning_style"] == "backtracking"
         assert d["temperature"] == 0.5
         assert d["max_tokens"] == 256
 
@@ -206,7 +206,7 @@ class TestAgentRegistry:
         registry = AgentRegistry()
         registry.register(AgentConfig(
             name="actor_1", role=AgentRole.ACTOR, model_path="/models/base",
-            reasoning_style=ReasoningStyle.EVIDENCE,
+            reasoning_style=ReasoningStyle.ALGEBRAIC,
         ))
         registry.register(AgentConfig(
             name="critic_1", role=AgentRole.CRITIC, model_path="/models/base",
@@ -221,7 +221,7 @@ class TestAgentRegistry:
         registry = AgentRegistry()
         registry.register(AgentConfig(
             name="actor_1", role=AgentRole.ACTOR, model_path="/models/base",
-            reasoning_style=ReasoningStyle.EVIDENCE,
+            reasoning_style=ReasoningStyle.ALGEBRAIC,
         ))
         registry.register(AgentConfig(
             name="critic_1", role=AgentRole.CRITIC, model_path="/models/base",
@@ -245,7 +245,7 @@ class TestAgentRegistry:
     def test_get_actor_by_style_not_found(self):
         """Should return None if style not found."""
         registry = AgentRegistry()
-        actor = registry.get_actor_by_style(ReasoningStyle.EVIDENCE)
+        actor = registry.get_actor_by_style(ReasoningStyle.ALGEBRAIC)
         assert actor is None
 
     def test_get_critic_by_specialty(self):
@@ -264,7 +264,7 @@ class TestAgentRegistry:
         registry = AgentRegistry()
         registry.register(AgentConfig(
             name="actor_1", role=AgentRole.ACTOR, model_path="/models/base",
-            reasoning_style=ReasoningStyle.EVIDENCE,
+            reasoning_style=ReasoningStyle.ALGEBRAIC,
         ))
         registry.register(AgentConfig(
             name="actor_2", role=AgentRole.ACTOR, model_path="/models/base",
@@ -288,7 +288,7 @@ class TestAgentRegistry:
             name="actor_1",
             role=AgentRole.ACTOR,
             model_path="/models/qwen",
-            reasoning_style=ReasoningStyle.EVIDENCE,
+            reasoning_style=ReasoningStyle.ALGEBRAIC,
         ))
         registry.register(AgentConfig(
             name="critic_1",
@@ -312,12 +312,12 @@ class TestAgentRegistry:
             Path(temp_path).unlink(missing_ok=True)
 
     def test_create_default(self):
-        """Should create default 4-actor + 5-critic setup."""
+        """Should create default 3-actor + 5-critic setup."""
         registry = AgentRegistry.create_default(base_model_path="/models/qwen")
 
-        assert len(registry.list_actors()) == 4
+        assert len(registry.list_actors()) == 3
         assert len(registry.list_critics()) == 5
-        assert len(registry) == 9
+        assert len(registry) == 8
 
         # Check all reasoning styles are present
         actors = registry.list_actors()
@@ -345,7 +345,7 @@ class TestAgentRegistry:
         registry = AgentRegistry()
         registry.register(AgentConfig(
             name="actor_1", role=AgentRole.ACTOR, model_path="/models/base",
-            reasoning_style=ReasoningStyle.EVIDENCE,
+            reasoning_style=ReasoningStyle.ALGEBRAIC,
         ))
         registry.register(AgentConfig(
             name="critic_1", role=AgentRole.CRITIC, model_path="/models/base",
@@ -360,9 +360,9 @@ class TestEnums:
 
     def test_reasoning_style_values(self):
         """ReasoningStyle should have correct values."""
-        assert ReasoningStyle.EVIDENCE.value == "evidence"
+        assert ReasoningStyle.ALGEBRAIC.value == "algebraic"
         assert ReasoningStyle.DIRECT.value == "direct"
-        assert ReasoningStyle.COMPARATIVE.value == "comparative"
+        assert ReasoningStyle.BACKTRACKING.value == "backtracking"
 
     def test_critic_skill_values(self):
         """CriticSkill should have correct values."""
@@ -810,7 +810,7 @@ class TestMultiAgentCriticRouting:
                 name="actor_b",
                 role=AgentRole.ACTOR,
                 model_path="/models/base",
-                reasoning_style=ReasoningStyle.EVIDENCE,
+                reasoning_style=ReasoningStyle.ALGEBRAIC,
             ),
         ]
         critics = [
@@ -1038,7 +1038,7 @@ class TestClassificationError:
         response = MagicMock()
         response.raise_for_status.return_value = None
         response.json.return_value = {
-            "choices": [{"message": {"content": "EVIDENCE"}}],
+            "choices": [{"message": {"content": "ALGEBRAIC"}}],
         }
 
         with patch("requests.post", side_effect=[first, response]) as mock_post:
@@ -1051,7 +1051,7 @@ class TestClassificationError:
                     retry_delay=0,
                 )
 
-        assert result == "EVIDENCE"
+        assert result == "ALGEBRAIC"
         assert mock_post.call_count == 2
         mock_sleep.assert_not_called()
 
@@ -1103,14 +1103,14 @@ class TestAPIConfig:
 class TestParseStyleResponse:
     """Test parsing API response to ReasoningStyle."""
 
-    def test_parse_evidence(self):
-        assert _parse_style_response("EVIDENCE") == ReasoningStyle.EVIDENCE
-        assert _parse_style_response("evidence") == ReasoningStyle.EVIDENCE
-        assert _parse_style_response("The style is EVIDENCE") == ReasoningStyle.EVIDENCE
+    def test_parse_algebraic(self):
+        assert _parse_style_response("ALGEBRAIC") == ReasoningStyle.ALGEBRAIC
+        assert _parse_style_response("algebraic") == ReasoningStyle.ALGEBRAIC
+        assert _parse_style_response("The style is ALGEBRAIC") == ReasoningStyle.ALGEBRAIC
 
-    def test_parse_comparative(self):
-        assert _parse_style_response("COMPARATIVE") == ReasoningStyle.COMPARATIVE
-        assert _parse_style_response("comparative") == ReasoningStyle.COMPARATIVE
+    def test_parse_backtracking(self):
+        assert _parse_style_response("BACKTRACKING") == ReasoningStyle.BACKTRACKING
+        assert _parse_style_response("backtracking") == ReasoningStyle.BACKTRACKING
 
     def test_parse_direct(self):
         assert _parse_style_response("DIRECT") == ReasoningStyle.DIRECT
@@ -1204,7 +1204,7 @@ class TestDataClassifier:
     def test_classify_reasoning_style_with_api_mock(self):
         """Should use API response when available."""
         with patch("src.society.data_classifier._call_api") as mock_api:
-            mock_api.return_value = "EVIDENCE"
+            mock_api.return_value = "ALGEBRAIC"
             with tempfile.TemporaryDirectory() as tmpdir:
                 classifier = DataClassifier()
                 result = classifier.classify_reasoning_style(
@@ -1213,7 +1213,7 @@ class TestDataClassifier:
                     use_api=True,
                     cache_dir=tmpdir,
                 )
-                assert result.style == ReasoningStyle.EVIDENCE
+                assert result.style == ReasoningStyle.ALGEBRAIC
                 assert result.confidence == 0.9
 
     def test_classify_error_profile_with_api_mock(self):
@@ -1247,11 +1247,11 @@ class TestDataClassifier:
         """Should load from cache when available."""
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create cache file
-            cache_file = Path(tmpdir) / "style_abc123.json"
+            cache_file = Path(tmpdir) / "style_v3_actor3_abc123.json"
             cache_file.parent.mkdir(parents=True, exist_ok=True)
             with open(cache_file, "w") as f:
                 json.dump({
-                    "style": "comparative",
+                    "style": "backtracking",
                     "confidence": 0.85,
                     "raw_response": "CACHED",
                 }, f)
@@ -1264,7 +1264,7 @@ class TestDataClassifier:
                     use_api=True,
                     cache_dir=tmpdir,
                 )
-                assert result.style == ReasoningStyle.COMPARATIVE
+                assert result.style == ReasoningStyle.BACKTRACKING
                 assert result.confidence == 0.85
 
     def test_classify_api_failure_raises(self):
@@ -1289,42 +1289,42 @@ class TestDataClassifier:
 class TestDiversitySplit:
     """Test data splitting by reasoning style and error profile."""
 
-    def test_split_by_reasoning_style(self):
+    def test_split_by_reasoning_style(self, tmp_path):
         """Should split samples by reasoning style."""
-        splitter = DiversitySplit()
+        splitter = DiversitySplit(cache_dir=str(tmp_path / "style_cache"))
         samples = [
             {"question": f"Q{i}", "answer": "A"}
             for i in range(10)
         ]
         responses = [
-            "Let x = 5",  # EVIDENCE
-            "Let me verify",  # COMPARATIVE
+            "Let x = 5",  # ALGEBRAIC
+            "Let me verify",  # BACKTRACKING
             "Direct calculation",  # DIRECT
-            "Let y = 10",  # EVIDENCE
-            "Check the answer",  # COMPARATIVE
+            "Let y = 10",  # ALGEBRAIC
+            "Check the answer",  # BACKTRACKING
             "Step by step",  # DIRECT
-            "Use equation",  # EVIDENCE
-            "Verify result",  # COMPARATIVE
+            "Use equation",  # ALGEBRAIC
+            "Verify result",  # BACKTRACKING
             "Simple math",  # DIRECT
-            "Let z = 2",  # EVIDENCE
+            "Let z = 2",  # ALGEBRAIC
         ]
 
         # Mock API to return deterministic classifications
         api_responses = [
-            "EVIDENCE", "COMPARATIVE", "DIRECT", "EVIDENCE",
-            "COMPARATIVE", "DIRECT", "EVIDENCE", "COMPARATIVE",
-            "DIRECT", "EVIDENCE",
+            "ALGEBRAIC", "BACKTRACKING", "DIRECT", "ALGEBRAIC",
+            "BACKTRACKING", "DIRECT", "ALGEBRAIC", "BACKTRACKING",
+            "DIRECT", "ALGEBRAIC",
         ]
         with patch("src.society.data_classifier._call_api", side_effect=api_responses):
             splits = splitter.split_by_reasoning_style(samples, responses)
 
-        assert ReasoningStyle.EVIDENCE in splits
+        assert ReasoningStyle.ALGEBRAIC in splits
         assert ReasoningStyle.DIRECT in splits
-        assert ReasoningStyle.COMPARATIVE in splits
+        assert ReasoningStyle.BACKTRACKING in splits
 
         # Default split no longer destructively down-samples majority styles.
-        assert len(splits[ReasoningStyle.EVIDENCE]) == 4
-        assert len(splits[ReasoningStyle.COMPARATIVE]) == 3
+        assert len(splits[ReasoningStyle.ALGEBRAIC]) == 4
+        assert len(splits[ReasoningStyle.BACKTRACKING]) == 3
         assert len(splits[ReasoningStyle.DIRECT]) == 3
 
     def test_split_by_error_profile(self):
@@ -1378,19 +1378,19 @@ class TestDiversitySplit:
             CriticSkill.VERIFICATION,
         } - {CriticSkill.GROUNDING}
 
-    def test_split_balancing(self):
+    def test_split_balancing(self, tmp_path):
         """Should balance splits when enabled."""
-        splitter = DiversitySplit(balance=True)
+        splitter = DiversitySplit(balance=True, cache_dir=str(tmp_path / "style_cache"))
         samples = [{"question": f"Q{i}", "answer": "A"} for i in range(100)]
         responses = ["Let x = 5"] * 80 + ["Verify this"] * 20
 
-        # 80 EVIDENCE + 20 COMPARATIVE -> balanced to 20 each
-        api_responses = ["EVIDENCE"] * 80 + ["COMPARATIVE"] * 20
+        # 80 ALGEBRAIC + 20 BACKTRACKING -> balanced to 20 each
+        api_responses = ["ALGEBRAIC"] * 80 + ["BACKTRACKING"] * 20
         with patch("src.society.data_classifier._call_api", side_effect=api_responses):
             splits = splitter.split_by_reasoning_style(samples, responses)
 
-        # With balancing, should downsample EVIDENCE to 20
-        assert len(splits[ReasoningStyle.EVIDENCE]) <= 80
+        # With balancing, should downsample ALGEBRAIC to 20
+        assert len(splits[ReasoningStyle.ALGEBRAIC]) <= 80
 
     def test_split_no_responses(self):
         """Should leave samples unclassified when no responses are available."""
@@ -1602,9 +1602,9 @@ class TestAblationConfigs:
         assert config["router_top_k"] == 1
 
     def test_a2_actor_diversity(self):
-        """A2 should have 4 actors + 1 critic."""
+        """A2 should have 3 actors + 1 critic."""
         config = ABLATION_CONFIGS["A2"]
-        assert config["num_actors"] == 4
+        assert config["num_actors"] == 3
         assert config["num_critics"] == 1
 
     def test_a3_critic_specialization(self):
@@ -1617,14 +1617,14 @@ class TestAblationConfigs:
     def test_a4_no_routing(self):
         """A4 should have all agents with uniform weights."""
         config = ABLATION_CONFIGS["A4"]
-        assert config["num_actors"] == 4
+        assert config["num_actors"] == 3
         assert config["num_critics"] == 5
         assert config["router_top_k"] == 5
 
     def test_a5_full_system(self):
         """A5 should be full system with routing."""
         config = ABLATION_CONFIGS["A5"]
-        assert config["num_actors"] == 4
+        assert config["num_actors"] == 3
         assert config["num_critics"] == 5
         assert config["router_top_k"] == 2
 
@@ -1737,7 +1737,7 @@ class TestSocietyIntegration:
         registry = AgentRegistry.create_default()
 
         # Verify agents
-        assert len(registry.list_actors()) == 4
+        assert len(registry.list_actors()) == 3
         assert len(registry.list_critics()) == 5
 
         # Create mock feedbacks
@@ -1758,9 +1758,9 @@ class TestSocietyIntegration:
         assert len(result.selected_critics) == 2
         assert result.feedback_text
 
-    def test_classification_and_splitting_pipeline(self):
+    def test_classification_and_splitting_pipeline(self, tmp_path):
         """Test classify then split pipeline."""
-        splitter = DiversitySplit()
+        splitter = DiversitySplit(cache_dir=str(tmp_path / "style_cache"))
 
         samples = [
             {"question": "Solve x + 5 = 10", "answer": "5"},
@@ -1775,10 +1775,10 @@ class TestSocietyIntegration:
         ]
 
         # Mock API to return deterministic styles
-        with patch("src.society.data_classifier._call_api", side_effect=["EVIDENCE", "DIRECT", "COMPARATIVE"]):
+        with patch("src.society.data_classifier._call_api", side_effect=["ALGEBRAIC", "DIRECT", "BACKTRACKING"]):
             splits = splitter.split_by_reasoning_style(samples, responses)
 
         # Verify all styles have samples
-        assert len(splits[ReasoningStyle.EVIDENCE]) >= 1
+        assert len(splits[ReasoningStyle.ALGEBRAIC]) >= 1
         assert len(splits[ReasoningStyle.DIRECT]) >= 1
-        assert len(splits[ReasoningStyle.COMPARATIVE]) >= 1
+        assert len(splits[ReasoningStyle.BACKTRACKING]) >= 1

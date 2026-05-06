@@ -10,7 +10,7 @@ Usage:
 
     # Get step-specific config. The ``defaults`` keys are required; values are
     # not used to fill missing experiment config.
-    step_cfg = cfg.step("step01_bootstrap", defaults={"num_agents": None})
+    step_cfg = cfg.step("step01_bootstrap", defaults={"generations_per_style": None})
     args = step_cfg.to_namespace()  # argparse.Namespace for backward compat
 """
 

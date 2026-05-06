@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 # 每个阶段的 (脚本文件名, 阶段描述)
 PHASES = [
-    ("07_bootstrap_actors.py", "Phase 1: Bootstrap 数据生成"),
+    ("07_bootstrap_actors.py", "Phase 1: 风格引导 Actor 数据生成"),
     ("08_classify_data.py",    "Phase 2: 数据分类 (GLM API)"),
     ("09_diversify_actors.py", "Phase 3: Actor 分化训练"),
     ("10_diversify_critics.py","Phase 4: Critic 分化训练"),

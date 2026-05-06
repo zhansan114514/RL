@@ -5,10 +5,10 @@
 通过统一脚本 `scripts/run_society.py` 一键运行完整的 6 Phase 管线：
 
 ```
-Phase 1: Bootstrap   → 多 Agent 轨迹生成
+Phase 1: Bootstrap   → 三风格 prompt 引导 Actor 数据生成
 Phase 2: Classify    → 推理风格 + 错误类型分类 (GLM API)
 Phase 3: Actor DPO   → 3 个 Actor LoRA 分化训练
-Phase 4: Critic DPO  → 4 个 Critic LoRA 分化训练
+Phase 4: Critic DPO  → 5 个 Critic LoRA 分化训练
 Phase 5: Society     → N×M 交替训练
 Phase 6: Evaluate    → A1-A5 消融实验
 ```
@@ -138,9 +138,9 @@ Phase 6 评估会自动运行 5 组消融实验：
 |------|------|
 | A1: 1 Actor + 1 Critic | 原始 ACC-Collab 基线 |
 | A2: 3 Actors + 1 Critic | Actor 多样性贡献 |
-| A3: 1 Actor + 4 Critics + Router | Critic 专长化贡献 |
-| A4: 3 Actors + 4 Critics（无路由） | 完整系统但无路由 |
-| A5: 3 Actors + 4 Critics + Router | **完整系统** |
+| A3: 1 Actor + 5 Critics + Router | Critic 专长化贡献 |
+| A4: 3 Actors + 5 Critics（无路由） | 完整系统但无路由 |
+| A5: 3 Actors + 5 Critics + Router | **完整系统** |
 
 结果示例（5 样本验证）：
 
