@@ -433,6 +433,10 @@ def build_reports(
     total_labels = 0
     style_match_dist: Counter[str] = Counter()
     accepted_style_dist: Counter[str] = Counter()
+    # Confusion matrix: prompted_style -> classified_style -> count
+    confusion: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    # prompted_style -> total classified (for match rate denominator)
+    prompted_classified: Counter[str] = Counter()
     warnings: list[str] = []
 
     for result in results:
@@ -459,6 +463,10 @@ def build_reports(
                     style_match_dist[style] += 1
                 if label.get("accepted_for_actor"):
                     accepted_style_dist[style] += 1
+                prompted = label.get("prompted_style", "")
+                if prompted:
+                    confusion[prompted][style] += 1
+                    prompted_classified[prompted] += 1
                 per_response_style_splits[style].append({
                     "sample_id": sample_id,
                     "response_id": label.get("response_id", ""),
@@ -508,6 +516,18 @@ def build_reports(
         if ambiguous_ratio > 0.20:
             warnings.append(f"ambiguous error ratio {ambiguous_ratio:.3f} exceeds 0.20")
 
+    # Build confusion matrix (prompted_style -> classified_style -> count)
+    confusion_matrix: dict[str, dict[str, int]] = {}
+    for prompted in sorted(confusion):
+        confusion_matrix[prompted] = dict(confusion[prompted])
+
+    # Build style match rate by prompted style
+    style_match_rate_by_prompted: dict[str, float] = {}
+    for prompted in sorted(confusion):
+        total = prompted_classified[prompted]
+        matched = confusion[prompted].get(prompted, 0)
+        style_match_rate_by_prompted[prompted] = round(matched / total, 4) if total else 0.0
+
     splits = {
         "reasoning_styles": dict(style_splits),
         "error_profiles": dict(profile_splits),
@@ -522,6 +542,8 @@ def build_reports(
         "error_profile_distribution": dict(profile_dist),
         "format_status_distribution": dict(format_dist),
         "min_style_confidence": min_style_confidence,
+        "prompted_vs_classified_confusion": confusion_matrix,
+        "style_match_rate_by_prompted_style": style_match_rate_by_prompted,
         "per_subject_distribution": {
             subject: {
                 "styles": dict(counters["styles"]),

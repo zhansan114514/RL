@@ -68,12 +68,16 @@ def expected_bootstrap_metadata(args: Any, styles: list[ReasoningStyle]) -> dict
     return {
         "schema_version": 3,
         "generation_mode": "style_prompted",
+        "model_name": str(args.model_name),
         "dataset": args.dataset,
+        "seed": int(args.seed),
         "reasoning_styles": [style.value for style in styles],
         "generations_per_style": int(args.generations_per_style),
         "temperature": float(args.temperature),
         "top_p": float(getattr(args, "top_p", 0.9)),
         "max_tokens": int(args.max_tokens),
+        "sampling": getattr(args, "sampling", None),
+        "mmlu_load_mode": getattr(args, "mmlu_load_mode", "by_subject"),
     }
 
 

@@ -12,7 +12,7 @@ common:
   dataset: "mmlu"
   cache_dir: "output/society_mmlu_large_n1000"
   seed: 42
-  device: 4
+  device: 6
   dtype: "bfloat16"
   gpu_memory_utilization: 0.80
   max_model_len: 4096
@@ -169,11 +169,11 @@ step06_evaluate:
   evaluation_mode: "single_gpu"  # "single_gpu" or "dual_gpu"
   evaluation_modes:
     single_gpu:
-      devices: [4]
+      devices: [6]
       tensor_parallel_size: 1
       gpu_memory_utilization: 0.65
     dual_gpu:
-      devices: [4, 5]
+      devices: [6, 7]
       tensor_parallel_size: 2
       gpu_memory_utilization: 0.80
   max_samples: 1000

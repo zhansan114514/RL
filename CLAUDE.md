@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ACC-Collab 复现项目 -- 实现 ICLR 2025 论文《ACC-Collab: An Actor-Critic Approach to Multi-Agent LLM Collaboration》。核心思想：联合训练 Actor 和 Critic 两个 LLM 智能体，通过迭代审议（Deliberation）协作解决推理任务，使用 Guided Collaborative Trajectories 生成偏好数据，再用 DPO 进行优化。
 
-**扩展实验**: 在 ACC-Collab 基础上结合 Multiagent FT 论文的多样化思维链思想，构建 "Diverse Actor-Critic Society"——3 个推理风格各异的 Actor + 4 个错误类型专长的 Critic + MoE 置信度路由，训练出既保持多样化思维链、又具备精细协作能力的社会。详见 `glimmering-greeting-yeti.md` 和 `finish.md`。
+**扩展实验**: 在 ACC-Collab 基础上结合 Multiagent FT 论文的多样化思维链思想，构建 "Diverse Actor-Critic Society"——3 个推理风格各异的 Actor + 5 个错误类型专长的 Critic + MoE 置信度路由，训练出既保持多样化思维链、又具备精细协作能力的社会。详见 `glimmering-greeting-yeti.md` 和 `finish.md`。
 
 ## 架构与数据流
 
@@ -155,7 +155,7 @@ python scripts/08_classify_data.py --config configs/society/experiment_h100.yaml
 # Phase 3: Actor 分化训练（3个 Actor 各自 DPO）
 python scripts/09_diversify_actors.py --config configs/society/experiment_h100.yaml
 
-# Phase 4: Critic 分化训练（4个 Critic 各自 DPO）
+# Phase 4: Critic 分化训练（5个 Critic 各自 DPO）
 python scripts/10_diversify_critics.py --config configs/society/experiment_h100.yaml
 
 # Phase 5: Society 交替训练（N×M 交替 DPO）
@@ -177,9 +177,9 @@ python scripts/12_society_evaluate.py --config configs/society/experiment_h100.y
 消融实验配置（A1-A5 自动运行，除非指定 `--no_ablations`）：
 - **A1**: 1 Actor + 1 Critic（原始 ACC-Collab 基线）
 - **A2**: 3 Actor + 1 Critic（Actor 多样性单独贡献）
-- **A3**: 1 Actor + 4 Critic + Router（Critic 专长化单独贡献）
-- **A4**: 3 Actor + 4 Critic，均匀权重（完整系统但无路由）
-- **A5**: 3 Actor + 4 Critic + Router（完整系统）
+- **A3**: 1 Actor + 5 Critic + Router（Critic 专长化单独贡献）
+- **A4**: 3 Actor + 5 Critic，均匀权重（完整系统但无路由）
+- **A5**: 3 Actor + 5 Critic + Router（完整系统）
 
 预期：A5 > A1（完整系统优于单 Agent 基线）
 
