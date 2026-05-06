@@ -39,7 +39,7 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 STEP_DEFAULTS = {
-    "model_name": "Qwen/Qwen2.5-7B-Instruct",
+    "model_name": "Qwen/Qwen3-14B",
     "dataset": "math",
     "cache_dir": "output/society",
     "society_dir": "output/society/society",
@@ -260,7 +260,7 @@ def _build_agent_configs(
 
     actors_info = registry.get("actors", {})
     critics_info = registry.get("critics", {})
-    base_model = registry.get("training_config", {}).get("base_model", "Qwen/Qwen2.5-7B-Instruct")
+    base_model = registry.get("training_config", {}).get("base_model", "Qwen/Qwen3-14B")
 
     # Filter by names if specified
     if actor_names is not None:
@@ -629,7 +629,7 @@ def run_all_evaluations(
     """
     from src.inference.vllm_server import VLLMInference
 
-    base_model = registry.get("training_config", {}).get("base_model", "Qwen/Qwen2.5-7B-Instruct")
+    base_model = registry.get("training_config", {}).get("base_model", "Qwen/Qwen3-14B")
     all_actor_names = list(registry.get("actors", {}).keys())
     all_critic_names = list(registry.get("critics", {}).keys())
 

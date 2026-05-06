@@ -57,10 +57,10 @@ def test_actor_pairs_use_only_accepted_target_style_chosen():
                 "response": "FINAL_ANSWER: A\nRATIONALE:\nLet x = 1.",
                 "answer": "A",
                 "is_correct": True,
-                "primary_style": "algebraic",
+                "primary_style": "evidence",
                 "reasoning_style_confidence": 0.9,
                 "format_status": "valid",
-                "prompted_style": "algebraic",
+                "prompted_style": "evidence",
                 "style_match": True,
                 "accepted_for_actor": True,
             },
@@ -70,7 +70,7 @@ def test_actor_pairs_use_only_accepted_target_style_chosen():
                 "answer": "B",
                 "is_correct": False,
                 "format_status": "valid",
-                "prompted_style": "algebraic",
+                "prompted_style": "evidence",
                 "accepted_for_actor": False,
             },
             {
@@ -90,10 +90,10 @@ def test_actor_pairs_use_only_accepted_target_style_chosen():
                 "response": "FINAL_ANSWER: A",
                 "answer": "A",
                 "is_correct": True,
-                "primary_style": "algebraic",
+                "primary_style": "evidence",
                 "reasoning_style_confidence": 0.95,
                 "format_status": "answer_only",
-                "prompted_style": "algebraic",
+                "prompted_style": "evidence",
                 "style_match": True,
                 "accepted_for_actor": False,
             },
@@ -109,7 +109,7 @@ def test_actor_pairs_use_only_accepted_target_style_chosen():
     by_sample = diversify.build_response_index(classified_results)
     pairs, metrics = diversify.build_preference_pairs_for_style(
         by_sample,
-        "algebraic",
+        "evidence",
         args,
     )
 
@@ -139,12 +139,12 @@ def test_society_actor_style_prompt_wrapper_conditions_generation():
             return ["ok" for _ in prompts]
 
     model = FakeModel()
-    adapter = StyleConditionedActorAdapter(model, ReasoningStyle.BACKTRACKING)
+    adapter = StyleConditionedActorAdapter(model, ReasoningStyle.ELIMINATION)
 
     adapter.generate(["Solve Q"], max_tokens=8, temperature=0.3)
 
-    assert "You are Actor-backtracking" in model.prompts[0]
-    assert "try a plausible answer" in model.prompts[0]
+    assert "You are Actor-elimination" in model.prompts[0]
+    assert "Option analysis:" in model.prompts[0]
     assert model.prompts[0].endswith("Solve Q")
 
 
@@ -190,8 +190,9 @@ def test_society_actor_dpo_prompt_is_style_conditioned(monkeypatch, tmp_path):
     prompt = captured["dataset"][0]["prompt"]
     assert checkpoint == str(tmp_path / "adapter")
     assert "You are Actor-direct" in prompt
-    assert "Solve concisely and directly" in prompt
-    assert "FINAL_ANSWER: A or B or C or D" in prompt
+    assert "Solve the question concisely" in prompt
+    assert "Direct reason:" in prompt
+    assert "FINAL_ANSWER: <A/B/C/D>" in prompt
 
 
 def test_society_actor_acceptance_requires_style_format_confidence_and_correctness(monkeypatch):
@@ -214,7 +215,7 @@ def test_society_actor_acceptance_requires_style_format_confidence_and_correctne
     raw_pairs = [
         {
             "sample": sample,
-            "positive": "FINAL_ANSWER: A\nRATIONALE:\nAlgebra.",
+            "positive": "FINAL_ANSWER: A\nRATIONALE:\nEvidence.",
             "negative": "FINAL_ANSWER: B\nRATIONALE:\nWrong.",
             "delta": 1.0,
             "direction": "towards",
@@ -235,7 +236,7 @@ def test_society_actor_acceptance_requires_style_format_confidence_and_correctne
         },
         {
             "sample": sample,
-            "positive": "FINAL_ANSWER: B\nRATIONALE:\nAlgebra but wrong.",
+            "positive": "FINAL_ANSWER: B\nRATIONALE:\nEvidence but wrong.",
             "negative": "FINAL_ANSWER: C\nRATIONALE:\nWrong.",
             "delta": 1.0,
             "direction": "towards",
@@ -263,7 +264,7 @@ def test_society_actor_acceptance_requires_style_format_confidence_and_correctne
 
     def fake_build_lora_adapters(engine, agents):
         return {
-            "actor_algebraic": FakeActorAdapter(),
+            "actor_evidence": FakeActorAdapter(),
             "critic_computation": FakeCriticAdapter(),
         }
 
@@ -295,20 +296,20 @@ def test_society_actor_acceptance_requires_style_format_confidence_and_correctne
             )
         if response.strip() == "FINAL_ANSWER: A":
             return ReasoningStyleResult(
-                primary_style=ReasoningStyle.ALGEBRAIC,
+                primary_style=ReasoningStyle.EVIDENCE,
                 secondary_styles=[],
                 format_status="answer_only",
                 confidence=0.95,
             )
         if "Low confidence" in response:
             return ReasoningStyleResult(
-                primary_style=ReasoningStyle.ALGEBRAIC,
+                primary_style=ReasoningStyle.EVIDENCE,
                 secondary_styles=[],
                 format_status="valid",
                 confidence=0.4,
             )
         return ReasoningStyleResult(
-            primary_style=ReasoningStyle.ALGEBRAIC,
+            primary_style=ReasoningStyle.EVIDENCE,
             secondary_styles=[],
             format_status="valid",
             confidence=0.9,
@@ -340,10 +341,10 @@ def test_society_actor_acceptance_requires_style_format_confidence_and_correctne
 
     registry = AgentRegistry(base_model_path="/models/base")
     actor = AgentConfig(
-        name="actor_algebraic",
+        name="actor_evidence",
         role=AgentRole.ACTOR,
         model_path="/models/base",
-        reasoning_style=ReasoningStyle.ALGEBRAIC,
+        reasoning_style=ReasoningStyle.EVIDENCE,
     )
     critic = AgentConfig(
         name="critic_computation",
@@ -373,9 +374,9 @@ def test_society_actor_acceptance_requires_style_format_confidence_and_correctne
     )
 
     assert len(pairs) == 1
-    assert pairs[0]["chosen"] == "FINAL_ANSWER: A\nRATIONALE:\nAlgebra."
-    assert pairs[0]["metadata"]["prompted_style"] == "algebraic"
-    assert pairs[0]["metadata"]["classified_style"] == "algebraic"
+    assert pairs[0]["chosen"] == "FINAL_ANSWER: A\nRATIONALE:\nEvidence."
+    assert pairs[0]["metadata"]["prompted_style"] == "evidence"
+    assert pairs[0]["metadata"]["classified_style"] == "evidence"
     assert pairs[0]["metadata"]["format_status"] == "valid"
     assert pairs[0]["metadata"]["style_confidence"] == 0.9
     assert pairs[0]["metadata"]["is_correct"] is True

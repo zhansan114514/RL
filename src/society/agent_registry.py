@@ -2,10 +2,10 @@
 Agent Registry for managing diverse Actor-Critic Society.
 
 Defines agent types with specialized roles:
-- 3 Actors with reasoning styles (ALGEBRAIC, DIRECT, BACKTRACKING)
+- 3 Actors with MMLU-native reasoning styles (DIRECT, EVIDENCE, ELIMINATION)
 - 5 Critics with critic-skill specialties (COMPUTATION, REASONING, KNOWLEDGE, GROUNDING, VERIFICATION)
 
-Each Agent has its own LoRA adapter on top of a shared base model (Qwen2.5-7B-Instruct).
+Each Agent has its own LoRA adapter on top of a shared base model.
 """
 
 from __future__ import annotations
@@ -34,11 +34,11 @@ class AgentRole(Enum):
 
 class ReasoningStyle(Enum):
     """
-    Actor reasoning styles for distinct problem-solving chains.
+    Actor reasoning styles for MMLU-style multiple-choice tasks.
     """
-    ALGEBRAIC = "algebraic"        # Variables, equations, symbolic derivation
-    DIRECT = "direct"              # Concise direct solution
-    BACKTRACKING = "backtracking"  # Try, verify constraints, revise if needed
+    DIRECT = "direct"              # Concise answer with minimal explanation
+    EVIDENCE = "evidence"          # Explicit facts, concepts, definitions, wording
+    ELIMINATION = "elimination"    # Compare options and rule out alternatives
 
 
 class CriticSkill(Enum):
@@ -63,8 +63,8 @@ def resolve_reasoning_style(value: str) -> ReasoningStyle:
     """Resolve a string to ReasoningStyle with robust case-insensitive matching.
 
     Matching priority:
-      1. Exact value match  (e.g. "algebraic")
-      2. Exact name match   (e.g. "ALGEBRAIC")
+      1. Exact value match  (e.g. "evidence")
+      2. Exact name match   (e.g. "EVIDENCE")
       3. Case-insensitive value match (e.g. "Evidence")
 
     Raises ValueError (never silently falls back to a default).
@@ -147,19 +147,19 @@ def resolve_critic_skill(value: str) -> CriticSkill:
 # ============================================================
 
 ACTOR_STYLE_PROMPTS = {
-    ReasoningStyle.ALGEBRAIC: (
-        "You are an algebraic reasoner. Prefer variables, equations, symbolic "
-        "derivations, formulas, and structured mathematical modeling before "
-        "choosing the answer."
-    ),
     ReasoningStyle.DIRECT: (
-        "You are a direct reasoner. Solve concisely and directly, using only "
-        "the short reasoning steps needed to support the final answer."
+        "You are a direct reasoner. Solve the question concisely. "
+        "Use only the minimum reasoning needed to justify the final answer."
     ),
-    ReasoningStyle.BACKTRACKING: (
-        "You are a backtracking reasoner. First try a plausible solution, then "
-        "check it against the constraints or answer options. If the check fails, "
-        "identify the issue and revise."
+    ReasoningStyle.EVIDENCE: (
+        "You are an evidence-based reasoner. Identify the key facts, "
+        "concepts, definitions, or wording in the question, then use them "
+        "as evidence to justify the answer."
+    ),
+    ReasoningStyle.ELIMINATION: (
+        "You are an option-elimination reasoner. Compare the answer choices, "
+        "eliminate incorrect or less plausible options, and explain why the "
+        "selected option is best."
     ),
 }
 
@@ -278,7 +278,7 @@ class AgentRegistry:
     """
     Registry for managing the Actor-Critic Society's agents.
 
-    Tracks 3 Actors (ALGEBRAIC, DIRECT, BACKTRACKING) and
+    Tracks 3 Actors (DIRECT, EVIDENCE, ELIMINATION) and
     5 Critics (COMPUTATION, REASONING, KNOWLEDGE, GROUNDING, VERIFICATION),
     each with their own LoRA adapter path.
     """
@@ -358,7 +358,7 @@ class AgentRegistry:
     @classmethod
     def create_default(
         cls,
-        base_model_path: str = "Qwen/Qwen2.5-7B-Instruct",
+        base_model_path: str = "Qwen/Qwen3-14B",
         cache_dir: str = "cache/society",
     ) -> "AgentRegistry":
         """Create a registry with the default 3-Actor + 5-Critic setup."""

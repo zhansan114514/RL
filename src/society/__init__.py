@@ -6,7 +6,7 @@ combining ACC-Collab (Actor-Critic collaboration) with Multiagent FT
 (diverse thinking chains for complex reasoning).
 
 Architecture:
-- 3 Actors: ALGEBRAIC, DIRECT, BACKTRACKING reasoning styles
+- 3 Actors: DIRECT, EVIDENCE, ELIMINATION reasoning styles
 - 5 Critics: COMPUTATION, REASONING, KNOWLEDGE, GROUNDING, VERIFICATION skill specialties
 - MoE Router: Confidence-based softmax routing (no trainable params)
 - Single GPU: Sequential LoRA load/unload with disk-based crash recovery

@@ -44,14 +44,15 @@ def test_style_prompt_contains_style_guidance_and_contract():
     prompt = bootstrap.build_style_prompt(
         sample,
         "mmlu",
-        bootstrap.ReasoningStyle.ALGEBRAIC,
+        bootstrap.ReasoningStyle.EVIDENCE,
         generation_index=2,
     )
 
-    assert "Actor-algebraic" in prompt
-    assert "variables, equations" in prompt
+    assert "Actor-evidence" in prompt
+    assert "Key evidence:" in prompt
+    assert "Application:" in prompt
     assert "independent generation attempt 3" in prompt
-    assert "FINAL_ANSWER: A or B or C or D" in prompt
+    assert "FINAL_ANSWER: <A/B/C/D>" in prompt
 
 
 def test_style_prompted_generation_batches_samples_styles_and_attempts():
@@ -66,9 +67,9 @@ def test_style_prompted_generation_batches_samples_styles_and_attempts():
         "top_p": 0.9,
     })()
     styles = [
-        bootstrap.ReasoningStyle.ALGEBRAIC,
+        bootstrap.ReasoningStyle.EVIDENCE,
         bootstrap.ReasoningStyle.DIRECT,
-        bootstrap.ReasoningStyle.BACKTRACKING,
+        bootstrap.ReasoningStyle.ELIMINATION,
     ]
     batch_entries = [
         (0, {"question": "Q0", "choices": ["A", "B", "C", "D"], "task_type": "multiple_choice"}),
@@ -96,36 +97,36 @@ def test_style_prompted_generation_batches_samples_styles_and_attempts():
     assert first["debate_rounds"] == []
     assert first["metadata"]["generation_mode"] == "style_prompted"
     assert first["metadata"]["reasoning_styles"] == [
-        "algebraic",
+        "evidence",
         "direct",
-        "backtracking",
+        "elimination",
     ]
     assert len(first["initial_responses"]) == 6
 
     response_ids = [r["response_id"] for r in first["initial_responses"]]
     assert response_ids == [
-        "mmlu_0_algebraic_0",
-        "mmlu_0_algebraic_1",
+        "mmlu_0_evidence_0",
+        "mmlu_0_evidence_1",
         "mmlu_0_direct_0",
         "mmlu_0_direct_1",
-        "mmlu_0_backtracking_0",
-        "mmlu_0_backtracking_1",
+        "mmlu_0_elimination_0",
+        "mmlu_0_elimination_1",
     ]
     assert [r["prompted_style"] for r in first["initial_responses"]] == [
-        "algebraic",
-        "algebraic",
+        "evidence",
+        "evidence",
         "direct",
         "direct",
-        "backtracking",
-        "backtracking",
+        "elimination",
+        "elimination",
     ]
     assert [r["agent_name"] for r in first["initial_responses"]] == [
-        "actor_algebraic",
-        "actor_algebraic",
+        "actor_evidence",
+        "actor_evidence",
         "actor_direct",
         "actor_direct",
-        "actor_backtracking",
-        "actor_backtracking",
+        "actor_elimination",
+        "actor_elimination",
     ]
 
 
@@ -158,9 +159,9 @@ def test_existing_bootstrap_rejects_stale_natural_generation(tmp_path):
         "max_tokens": 256,
     })()
     styles = [
-        bootstrap.ReasoningStyle.ALGEBRAIC,
+        bootstrap.ReasoningStyle.EVIDENCE,
         bootstrap.ReasoningStyle.DIRECT,
-        bootstrap.ReasoningStyle.BACKTRACKING,
+        bootstrap.ReasoningStyle.ELIMINATION,
     ]
 
     try:
@@ -181,9 +182,9 @@ def test_existing_bootstrap_resumes_matching_style_prompted_output(tmp_path):
         "max_tokens": 256,
     })()
     styles = [
-        bootstrap.ReasoningStyle.ALGEBRAIC,
+        bootstrap.ReasoningStyle.EVIDENCE,
         bootstrap.ReasoningStyle.DIRECT,
-        bootstrap.ReasoningStyle.BACKTRACKING,
+        bootstrap.ReasoningStyle.ELIMINATION,
     ]
     output_file = tmp_path / "trajectories.jsonl"
     output_file.write_text(json.dumps({

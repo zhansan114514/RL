@@ -44,7 +44,7 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 STEP_DEFAULTS = {
-    "model_name": "Qwen/Qwen2.5-7B-Instruct",
+    "model_name": "Qwen/Qwen3-14B",
     "dataset": "math",
     "cache_dir": "output/society",
     "input_dir": "output/society/classified",
@@ -194,7 +194,7 @@ def fingerprint_lora_paths(lora_paths: Dict[str, str]) -> Dict[str, Dict[str, An
 def build_critic_raw_pairs(
     samples: List[Dict],
     actor_lora_paths: Dict[str, str],
-    model_name: str = "Qwen/Qwen2.5-7B-Instruct",
+    model_name: str = "Qwen/Qwen3-14B",
     dataset_name: str = "math",
     num_rounds: int = 5,
     num_simulations: int = 5,

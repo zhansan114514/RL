@@ -145,6 +145,7 @@ def _build_style_generation_prompt(
         target_answer=sample.get("answer", ""),
     )
     return (
+        "/no_think\n"
         f"{ACTOR_STYLE_PROMPTS[style]}\n\n"
         "Generate one correct response for training an Actor with this style.\n"
         "Use the required FINAL_ANSWER and RATIONALE format exactly.\n"

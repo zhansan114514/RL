@@ -31,7 +31,7 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 STEP_DEFAULTS = {
-    "model_name": "Qwen/Qwen2.5-7B-Instruct",
+    "model_name": "Qwen/Qwen3-14B",
     "dataset": "math",
     "cache_dir": "output/society",
     "actor_base_dir": "output/society/actors",

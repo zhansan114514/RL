@@ -48,17 +48,29 @@ logger = logging.getLogger(__name__)
 
 
 ACTOR_STYLE_TRAINING_GUIDANCE = {
-    ReasoningStyle.ALGEBRAIC: (
-        "In the RATIONALE, use variables, equations, formulas, symbolic "
-        "operations, or a structured algebraic model when applicable."
-    ),
     ReasoningStyle.DIRECT: (
-        "In the RATIONALE, solve concisely and directly. Use only the short "
-        "steps needed to justify the answer."
+        "Your RATIONALE must contain exactly this subsection:\n"
+        "Direct reason:\n"
+        "<1-3 concise sentences explaining why the answer is correct.>\n"
+        "Do not compare all options unless necessary."
     ),
-    ReasoningStyle.BACKTRACKING: (
-        "In the RATIONALE, try a plausible answer or approach, check it against "
-        "the constraints or options, and revise if the check fails."
+    ReasoningStyle.EVIDENCE: (
+        "Your RATIONALE must contain exactly these subsections:\n"
+        "Key evidence:\n"
+        "- State the key fact, definition, concept, or wording from the question.\n"
+        "Application:\n"
+        "- Explain how that evidence supports the selected answer.\n"
+        "Conclusion:\n"
+        "- Confirm the answer."
+    ),
+    ReasoningStyle.ELIMINATION: (
+        "Your RATIONALE must contain exactly these subsections:\n"
+        "Option analysis:\n"
+        "- Briefly evaluate each option or each plausible option.\n"
+        "Elimination:\n"
+        "- Explain which options are ruled out and why.\n"
+        "Conclusion:\n"
+        "- State why the remaining option is best."
     ),
 }
 
@@ -67,11 +79,72 @@ def _style_condition_actor_prompt(prompt: str, style: ReasoningStyle) -> str:
     """Prefix an Actor prompt with the requested reasoning style."""
 
     return (
+        "/no_think\n"
         f"You are Actor-{style.value}.\n"
         "You must solve using this exact reasoning style.\n"
         f"{ACTOR_STYLE_PROMPTS[style]}\n"
         f"{ACTOR_STYLE_TRAINING_GUIDANCE[style]}\n\n"
         f"{prompt}"
+    )
+
+
+def _style_output_format(style: ReasoningStyle) -> str:
+    if style == ReasoningStyle.DIRECT:
+        return (
+            "Output format:\n"
+            "FINAL_ANSWER: <A/B/C/D>\n"
+            "RATIONALE:\n"
+            "Direct reason:\n"
+            "<1-3 concise sentences explaining why the answer is correct.>"
+        )
+    if style == ReasoningStyle.EVIDENCE:
+        return (
+            "Output format:\n"
+            "FINAL_ANSWER: <A/B/C/D>\n"
+            "RATIONALE:\n"
+            "Key evidence:\n"
+            "- <key fact / concept / definition / wording>\n\n"
+            "Application:\n"
+            "- <how the evidence supports the selected answer>\n\n"
+            "Conclusion:\n"
+            "- <why this leads to the final answer>"
+        )
+    if style == ReasoningStyle.ELIMINATION:
+        return (
+            "Output format:\n"
+            "FINAL_ANSWER: <A/B/C/D>\n"
+            "RATIONALE:\n"
+            "Option analysis:\n"
+            "- A: <brief evaluation>\n"
+            "- B: <brief evaluation>\n"
+            "- C: <brief evaluation>\n"
+            "- D: <brief evaluation>\n\n"
+            "Elimination:\n"
+            "- <which options are ruled out and why>\n\n"
+            "Conclusion:\n"
+            "- <why the selected option is best>"
+        )
+    raise ValueError(f"Unsupported reasoning style: {style}")
+
+
+def _style_condition_actor_single_shot_prompt(
+    dataset_name: str,
+    sample: dict[str, Any],
+    style: ReasoningStyle,
+) -> str:
+    from src.prompts.formatter import format_prompt
+    from src.prompts.templates import PromptType
+
+    base_prompt = format_prompt(
+        dataset_name,
+        PromptType.SINGLE_SHOT,
+        sample,
+        include_answer_contract=False,
+    )
+    return (
+        _style_condition_actor_prompt(base_prompt, style)
+        + "\n\n"
+        + _style_output_format(style)
     )
 
 
@@ -459,7 +532,7 @@ def society_alternating_train(
             # Run DPO training
             logger.info(f"  Training with {len(preference_pairs)} preference pairs")
             checkpoint_path = _run_dpo_training(
-                model_name=registry.base_model_path or "Qwen/Qwen2.5-7B-Instruct",
+                model_name=registry.base_model_path or "Qwen/Qwen3-14B",
                 preference_pairs=preference_pairs,
                 output_dir=critic_iter_dir,
                 agent_type="critic",
@@ -601,7 +674,7 @@ def society_alternating_train(
             # Run DPO training
             logger.info(f"  Training with {len(preference_pairs)} preference pairs")
             checkpoint_path = _run_dpo_training(
-                model_name=registry.base_model_path or "Qwen/Qwen2.5-7B-Instruct",
+                model_name=registry.base_model_path or "Qwen/Qwen3-14B",
                 preference_pairs=preference_pairs,
                 output_dir=actor_iter_dir,
                 agent_type="actor",
@@ -831,7 +904,7 @@ def _generate_critic_pairs_algorithm1(
     from src.algorithms.deliberation import deliberate_batch
     from src.algorithms.trajectory import _generate_guided_pairs_for_batch, generate_wrong_answer
 
-    model_name = registry.base_model_path or "Qwen/Qwen2.5-7B-Instruct"
+    model_name = registry.base_model_path or "Qwen/Qwen3-14B"
     specialty = critic.error_specialty
 
     all_agents = list(actors) + [critic]
@@ -1139,7 +1212,7 @@ def _generate_actor_pairs_algorithm1(
     from src.algorithms.deliberation import deliberate_batch
     from src.algorithms.trajectory import _generate_guided_pairs_for_batch, generate_wrong_answer
 
-    model_name = registry.base_model_path or "Qwen/Qwen2.5-7B-Instruct"
+    model_name = registry.base_model_path or "Qwen/Qwen3-14B"
 
     all_agents = [actor] + list(critics)
 
@@ -1455,12 +1528,6 @@ def _run_dpo_training(
                     f"{CRITIC_JUDGEMENT_CONTRACT}\n\n{prompt}"
                 )
             else:
-                prompt = format_prompt(
-                    dataset_name,
-                    PromptType.SINGLE_SHOT,
-                    sample,
-                    include_answer_contract=(agent_type == "actor"),
-                )
                 if agent_type == "actor":
                     style = actor_style
                     if style is None:
@@ -1471,7 +1538,25 @@ def _run_dpo_training(
                         if style_label:
                             style = ReasoningStyle(style_label)
                     if style is not None:
-                        prompt = _style_condition_actor_prompt(prompt, style)
+                        prompt = _style_condition_actor_single_shot_prompt(
+                            dataset_name,
+                            sample,
+                            style,
+                        )
+                    else:
+                        prompt = format_prompt(
+                            dataset_name,
+                            PromptType.SINGLE_SHOT,
+                            sample,
+                            include_answer_contract=True,
+                        )
+                else:
+                    prompt = format_prompt(
+                        dataset_name,
+                        PromptType.SINGLE_SHOT,
+                        sample,
+                        include_answer_contract=False,
+                    )
             prompts.append(prompt)
 
         # Convert preference_pairs to HuggingFace Dataset

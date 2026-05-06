@@ -28,12 +28,12 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 STEP_DEFAULTS = {
-    "model_name": "Qwen/Qwen2.5-7B-Instruct",
+    "model_name": "Qwen/Qwen3-14B",
     "dataset": "mmlu",
     "cache_dir": "output/society",
     "input_dir": "output/society/classified",
     "output_dir": "output/society/actors",
-    "reasoning_styles": ["algebraic", "direct", "backtracking"],
+    "reasoning_styles": ["direct", "evidence", "elimination"],
     "min_pairs_per_actor": 256,
     "target_pairs_per_actor": 512,
     "max_pairs_per_actor": 1024,
@@ -51,6 +51,33 @@ STEP_DEFAULTS = {
     "beta": 0.1,
     "seed": 42,
     "device": 0,
+}
+
+ACTOR_TRAINING_STYLE_GUIDANCE = {
+    ReasoningStyle.DIRECT: (
+        "Your RATIONALE must contain exactly this subsection:\n"
+        "Direct reason:\n"
+        "<1-3 concise sentences explaining why the answer is correct.>\n"
+        "Do not compare all options unless necessary."
+    ),
+    ReasoningStyle.EVIDENCE: (
+        "Your RATIONALE must contain exactly these subsections:\n"
+        "Key evidence:\n"
+        "- State the key fact, definition, concept, or wording from the question.\n"
+        "Application:\n"
+        "- Explain how that evidence supports the selected answer.\n"
+        "Conclusion:\n"
+        "- Confirm the answer."
+    ),
+    ReasoningStyle.ELIMINATION: (
+        "Your RATIONALE must contain exactly these subsections:\n"
+        "Option analysis:\n"
+        "- Briefly evaluate each option or each plausible option.\n"
+        "Elimination:\n"
+        "- Explain which options are ruled out and why.\n"
+        "Conclusion:\n"
+        "- State why the remaining option is best."
+    ),
 }
 
 
@@ -406,12 +433,60 @@ def _actor_training_prompt(dataset_name: str, thinking_style: str, sample: dict[
     from src.society.agent_registry import ACTOR_STYLE_PROMPTS
 
     style = ReasoningStyle(thinking_style)
-    base_prompt = format_prompt(dataset_name, PromptType.SINGLE_SHOT, sample)
+    base_prompt = format_prompt(
+        dataset_name,
+        PromptType.SINGLE_SHOT,
+        sample,
+        include_answer_contract=False,
+    )
     return (
+        "/no_think\n"
         f"You are Actor-{thinking_style}.\n"
         "You must solve using this reasoning style.\n"
-        f"{ACTOR_STYLE_PROMPTS[style]}\n\n{base_prompt}"
+        f"{ACTOR_STYLE_PROMPTS[style]}\n"
+        f"{ACTOR_TRAINING_STYLE_GUIDANCE[style]}\n\n"
+        f"{base_prompt}\n\n"
+        f"{_style_output_format(style)}"
     )
+
+
+def _style_output_format(style: ReasoningStyle) -> str:
+    if style == ReasoningStyle.DIRECT:
+        return (
+            "Output format:\n"
+            "FINAL_ANSWER: <A/B/C/D>\n"
+            "RATIONALE:\n"
+            "Direct reason:\n"
+            "<1-3 concise sentences explaining why the answer is correct.>"
+        )
+    if style == ReasoningStyle.EVIDENCE:
+        return (
+            "Output format:\n"
+            "FINAL_ANSWER: <A/B/C/D>\n"
+            "RATIONALE:\n"
+            "Key evidence:\n"
+            "- <key fact / concept / definition / wording>\n\n"
+            "Application:\n"
+            "- <how the evidence supports the selected answer>\n\n"
+            "Conclusion:\n"
+            "- <why this leads to the final answer>"
+        )
+    if style == ReasoningStyle.ELIMINATION:
+        return (
+            "Output format:\n"
+            "FINAL_ANSWER: <A/B/C/D>\n"
+            "RATIONALE:\n"
+            "Option analysis:\n"
+            "- A: <brief evaluation>\n"
+            "- B: <brief evaluation>\n"
+            "- C: <brief evaluation>\n"
+            "- D: <brief evaluation>\n\n"
+            "Elimination:\n"
+            "- <which options are ruled out and why>\n\n"
+            "Conclusion:\n"
+            "- <why the selected option is best>"
+        )
+    raise ValueError(f"Unsupported reasoning style: {style}")
 
 
 def main() -> None:

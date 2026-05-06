@@ -1,4 +1,4 @@
-# Qwen2.5-7B-Instruct + MMLU + 300 samples, GPU 4
+# Qwen3-14B + MMLU + 300 samples, GPU 4
 # Diverse Actor-Critic Society 全流程 (07-12)
 
 api:
@@ -6,10 +6,10 @@ api:
 
 common:
   schema_version: 3
-  model_name: "Qwen/Qwen2.5-7B-Instruct"
-  base_model: "Qwen/Qwen2.5-7B-Instruct"
+  model_name: "Qwen/Qwen3-14B"
+  base_model: "Qwen/Qwen3-14B"
   dataset: "mmlu"
-  cache_dir: "output/society_mmlu"
+  cache_dir: "output/society_mmlu_style3_qwen3"
   seed: 42
   device: 6
   dtype: "bfloat16"
@@ -36,18 +36,18 @@ sampling:
 
 # Phase 1: Style-prompted Actor data generation
 step01_bootstrap:
-  output_dir: "output/society_mmlu/bootstrap"
-  reasoning_styles: ["algebraic", "direct", "backtracking"]
+  output_dir: "output/society_mmlu_style3_qwen3/bootstrap"
+  reasoning_styles: ["direct", "evidence", "elimination"]
   generations_per_style: 4
-  temperature: 0.8
-  top_p: 0.9
-  max_tokens: 256
-  batch_size: 8
+  temperature: 0.7
+  top_p: 0.8
+  max_tokens: 384
+  batch_size: 4
 
 # Phase 2: Data classification (GLM API)
 step02_classify:
-  input_dir: "output/society_mmlu/bootstrap"
-  output_dir: "output/society_mmlu/classified"
+  input_dir: "output/society_mmlu_style3_qwen3/bootstrap"
+  output_dir: "output/society_mmlu_style3_qwen3/classified"
   api_base: "https://api.labforge.top"
   api_model: "gpt5.5"
   request_timeout: 60
@@ -60,16 +60,16 @@ step02_classify:
   use_batch_api: true
   batch_api_max_responses: 20
   max_workers: 4
-  reasoning_styles: ["algebraic", "direct", "backtracking"]
+  reasoning_styles: ["direct", "evidence", "elimination"]
   error_dimensions: ["computation", "reasoning", "knowledge", "grounding", "verification"]
-  min_style_confidence: 0.65
+  min_style_confidence: 0.60
   min_error_confidence: 0.5
 
 # Phase 3: Actor diversification
 step03_diversify_actors:
-  input_dir: "output/society_mmlu/classified"
-  output_dir: "output/society_mmlu/actors"
-  reasoning_styles: ["algebraic", "direct", "backtracking"]
+  input_dir: "output/society_mmlu_style3_qwen3/classified"
+  output_dir: "output/society_mmlu_style3_qwen3/actors"
+  reasoning_styles: ["direct", "evidence", "elimination"]
   min_pairs_per_actor: 256
   target_pairs_per_actor: 512
   max_pairs_per_actor: 1024
@@ -91,9 +91,9 @@ step03_diversify_actors:
 
 # Phase 4: Critic diversification
 step04_diversify_critics:
-  input_dir: "output/society_mmlu/classified"
-  actor_base_dir: "output/society_mmlu/actors"
-  output_dir: "output/society_mmlu/critics"
+  input_dir: "output/society_mmlu_style3_qwen3/classified"
+  actor_base_dir: "output/society_mmlu_style3_qwen3/actors"
+  output_dir: "output/society_mmlu_style3_qwen3/critics"
   api_base: "https://api.labforge.top"
   api_model: "gpt5.5"
   request_timeout: 60
@@ -130,9 +130,9 @@ step04_diversify_critics:
 
 # Phase 5: Society alternating training
 step05_train_society:
-  actor_base_dir: "output/society_mmlu/actors"
-  critic_base_dir: "output/society_mmlu/critics"
-  output_dir: "output/society_mmlu/society"
+  actor_base_dir: "output/society_mmlu_style3_qwen3/actors"
+  critic_base_dir: "output/society_mmlu_style3_qwen3/critics"
+  output_dir: "output/society_mmlu_style3_qwen3/society"
   api_base: "https://api.labforge.top"
   api_model: "gpt5.5"
   request_timeout: 60
@@ -149,7 +149,7 @@ step05_train_society:
   actor_max_tokens: 192
   critic_max_tokens: 192
   min_pairs_per_critic: 64
-  min_style_confidence: 0.65
+  min_style_confidence: 0.60
   min_specialty_items: 32
   min_specialty_ratio: 0.08
   specialty_ratio: 0.7
@@ -162,14 +162,14 @@ step05_train_society:
   batch_size: 4
   num_epochs: 1
   max_length: 2048
-  checkpoint_dir: "output/society_mmlu/checkpoints"
+  checkpoint_dir: "output/society_mmlu_style3_qwen3/checkpoints"
   strict_classification: true
   max_classification_failure_rate: 0.0
 
 # Phase 6: Evaluation + ablation
 step06_evaluate:
-  society_dir: "output/society_mmlu/society"
-  output_dir: "output/society_mmlu/eval"
+  society_dir: "output/society_mmlu_style3_qwen3/society"
+  output_dir: "output/society_mmlu_style3_qwen3/eval"
   evaluation_mode: "single_gpu"  # "single_gpu" or "dual_gpu"
   evaluation_modes:
     single_gpu:

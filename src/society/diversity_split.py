@@ -2,7 +2,7 @@
 Diversity split: Data-level diversification for Multiagent FT.
 
 Partitions training data by:
-1. Reasoning style (ALGEBRAIC, DIRECT, BACKTRACKING) → for Actor diversification
+1. Reasoning style (DIRECT, EVIDENCE, ELIMINATION) → for Actor diversification
 2. Error profile dimensions → weighted Critic-skill routing
 
 Each Actor trains only on its style subset.  Critics receive a mixture of

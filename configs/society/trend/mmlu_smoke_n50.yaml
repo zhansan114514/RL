@@ -1,4 +1,4 @@
-# Qwen2.5-7B-Instruct + MMLU smoke test, n=50
+# Qwen3-14B + MMLU smoke test, n=50
 # Select the API provider here. Provider credentials/endpoints live in configs/local.yaml.
 
 api:
@@ -6,10 +6,10 @@ api:
 
 common:
   schema_version: 3
-  model_name: "Qwen/Qwen2.5-7B-Instruct"
-  base_model: "Qwen/Qwen2.5-7B-Instruct"
+  model_name: "Qwen/Qwen3-14B"
+  base_model: "Qwen/Qwen3-14B"
   dataset: "mmlu"
-  cache_dir: "output/society_mmlu_smoke_n50"
+  cache_dir: "output/society_mmlu_smoke_n50_style3_qwen3"
   seed: 42
   device: 6
   dtype: "bfloat16"
@@ -36,18 +36,18 @@ sampling:
 
 # Phase 1: Style-prompted Actor data generation
 step01_bootstrap:
-  output_dir: "output/society_mmlu_smoke_n50/bootstrap"
-  reasoning_styles: ["algebraic", "direct", "backtracking"]
+  output_dir: "output/society_mmlu_smoke_n50_style3_qwen3/bootstrap"
+  reasoning_styles: ["direct", "evidence", "elimination"]
   generations_per_style: 4
-  temperature: 0.8
-  top_p: 0.9
-  max_tokens: 192
-  batch_size: 8
+  temperature: 0.7
+  top_p: 0.8
+  max_tokens: 384
+  batch_size: 4
 
 # Phase 2: Data classification
 step02_classify:
-  input_dir: "output/society_mmlu_smoke_n50/bootstrap"
-  output_dir: "output/society_mmlu_smoke_n50/classified"
+  input_dir: "output/society_mmlu_smoke_n50_style3_qwen3/bootstrap"
+  output_dir: "output/society_mmlu_smoke_n50_style3_qwen3/classified"
   batch_size: 10
   request_timeout: 60
   retry_delay: 5
@@ -58,16 +58,16 @@ step02_classify:
   use_batch_api: false
   batch_api_max_responses: 1
   max_workers: 8
-  reasoning_styles: ["algebraic", "direct", "backtracking"]
+  reasoning_styles: ["direct", "evidence", "elimination"]
   error_dimensions: ["computation", "reasoning", "knowledge", "grounding", "verification"]
-  min_style_confidence: 0.65
+  min_style_confidence: 0.60
   min_error_confidence: 0.5
 
 # Phase 3: Actor diversification
 step03_diversify_actors:
-  input_dir: "output/society_mmlu_smoke_n50/classified"
-  output_dir: "output/society_mmlu_smoke_n50/actors"
-  reasoning_styles: ["algebraic", "direct", "backtracking"]
+  input_dir: "output/society_mmlu_smoke_n50_style3_qwen3/classified"
+  output_dir: "output/society_mmlu_smoke_n50_style3_qwen3/actors"
+  reasoning_styles: ["direct", "evidence", "elimination"]
   min_pairs_per_actor: 8
   target_pairs_per_actor: 16
   max_pairs_per_actor: 64
@@ -89,9 +89,9 @@ step03_diversify_actors:
 
 # Phase 4: Critic diversification
 step04_diversify_critics:
-  input_dir: "output/society_mmlu_smoke_n50/classified"
-  actor_base_dir: "output/society_mmlu_smoke_n50/actors"
-  output_dir: "output/society_mmlu_smoke_n50/critics"
+  input_dir: "output/society_mmlu_smoke_n50_style3_qwen3/classified"
+  actor_base_dir: "output/society_mmlu_smoke_n50_style3_qwen3/actors"
+  output_dir: "output/society_mmlu_smoke_n50_style3_qwen3/critics"
   critic_skills: ["computation", "reasoning", "knowledge", "grounding", "verification"]
   max_delib_samples: 30
   num_rounds: 2
@@ -126,9 +126,9 @@ step04_diversify_critics:
 
 # Phase 5: Society alternating training
 step05_train_society:
-  actor_base_dir: "output/society_mmlu_smoke_n50/actors"
-  critic_base_dir: "output/society_mmlu_smoke_n50/critics"
-  output_dir: "output/society_mmlu_smoke_n50/society"
+  actor_base_dir: "output/society_mmlu_smoke_n50_style3_qwen3/actors"
+  critic_base_dir: "output/society_mmlu_smoke_n50_style3_qwen3/critics"
+  output_dir: "output/society_mmlu_smoke_n50_style3_qwen3/society"
   num_iterations: 1
   num_rounds: 1
   num_simulations: 1
@@ -148,11 +148,11 @@ step05_train_society:
   specialty_ratio: 0.5
   general_ratio: 0.35
   calibration_ratio: 0.15
-  checkpoint_dir: "output/society_mmlu_smoke_n50/checkpoints"
+  checkpoint_dir: "output/society_mmlu_smoke_n50_style3_qwen3/checkpoints"
   actor_temperature: 0.7
   actor_max_tokens: 192
   critic_max_tokens: 192
-  min_style_confidence: 0.65
+  min_style_confidence: 0.60
   strict_classification: true
   max_classification_failure_rate: 0.0
   max_classification_workers: 4
@@ -163,8 +163,8 @@ step05_train_society:
 
 # Phase 6: Evaluation + ablation
 step06_evaluate:
-  society_dir: "output/society_mmlu_smoke_n50/society"
-  output_dir: "output/society_mmlu_smoke_n50/eval"
+  society_dir: "output/society_mmlu_smoke_n50_style3_qwen3/society"
+  output_dir: "output/society_mmlu_smoke_n50_style3_qwen3/eval"
   evaluation_mode: "single_gpu"  # "single_gpu" or "dual_gpu"
   evaluation_modes:
     single_gpu:

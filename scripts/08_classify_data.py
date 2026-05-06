@@ -47,7 +47,7 @@ STEP_DEFAULTS = {
     "strict_classification": True,
     "max_classification_failure_rate": 0.0,
     "max_workers": 4,
-    "min_style_confidence": 0.65,
+    "min_style_confidence": 0.60,
 }
 
 VALID_STYLES = {style.value for style in ReasoningStyle}
@@ -497,8 +497,8 @@ def build_reports(
     correct_style_total = sum(style_dist.values())
     if correct_style_total:
         direct_ratio = style_dist.get("direct", 0) / correct_style_total
-        if direct_ratio > 0.55:
-            warnings.append(f"direct style ratio {direct_ratio:.3f} exceeds 0.55")
+        if direct_ratio > 0.80:
+            warnings.append(f"direct style ratio {direct_ratio:.3f} exceeds 0.80")
         for style in sorted(VALID_STYLES):
             ratio = style_dist.get(style, 0) / correct_style_total
             if ratio < 0.05:

@@ -27,11 +27,11 @@ setup_logging()
 logger = logging.getLogger(__name__)
 
 STEP_DEFAULTS = {
-    "model_name": "Qwen/Qwen2.5-7B-Instruct",
+    "model_name": "Qwen/Qwen3-14B",
     "dataset": "mmlu",
     "cache_dir": "output/society",
     "output_dir": "output/society/bootstrap",
-    "reasoning_styles": ["algebraic", "direct", "backtracking"],
+    "reasoning_styles": ["direct", "evidence", "elimination"],
     "generations_per_style": 4,
     "temperature": 0.8,
     "top_p": 0.9,
@@ -47,17 +47,29 @@ STEP_DEFAULTS = {
 }
 
 STYLE_BOOTSTRAP_GUIDANCE = {
-    ReasoningStyle.ALGEBRAIC: (
-        "In the RATIONALE, use variables, equations, formulas, symbolic "
-        "operations, or a structured algebraic model when applicable."
-    ),
     ReasoningStyle.DIRECT: (
-        "In the RATIONALE, solve concisely and directly. Use only the short "
-        "steps needed to justify the answer."
+        "Your RATIONALE must contain exactly this subsection:\n"
+        "Direct reason:\n"
+        "<1-3 concise sentences explaining why the answer is correct.>\n"
+        "Do not compare all options unless necessary."
     ),
-    ReasoningStyle.BACKTRACKING: (
-        "In the RATIONALE, try a plausible answer or approach, check it against "
-        "the constraints or options, and revise if the check fails."
+    ReasoningStyle.EVIDENCE: (
+        "Your RATIONALE must contain exactly these subsections:\n"
+        "Key evidence:\n"
+        "- State the key fact, definition, concept, or wording from the question.\n"
+        "Application:\n"
+        "- Explain how that evidence supports the selected answer.\n"
+        "Conclusion:\n"
+        "- Confirm the answer."
+    ),
+    ReasoningStyle.ELIMINATION: (
+        "Your RATIONALE must contain exactly these subsections:\n"
+        "Option analysis:\n"
+        "- Briefly evaluate each option or each plausible option.\n"
+        "Elimination:\n"
+        "- Explain which options are ruled out and why.\n"
+        "Conclusion:\n"
+        "- State why the remaining option is best."
     ),
 }
 
@@ -112,7 +124,7 @@ def build_style_prompt(
     generation_index: int,
 ) -> str:
     from src.prompts.formatter import format_prompt
-    from src.prompts.templates import PromptType, append_answer_contract
+    from src.prompts.templates import PromptType
 
     base_prompt = format_prompt(
         dataset_name,
@@ -121,15 +133,56 @@ def build_style_prompt(
         include_answer_contract=False,
     )
     prompt = (
+        "/no_think\n"
         f"You are Actor-{style.value}.\n"
         "You must solve using this exact reasoning style.\n"
         f"{ACTOR_STYLE_PROMPTS[style]}\n"
         f"{STYLE_BOOTSTRAP_GUIDANCE[style]}\n\n"
         f"This is independent generation attempt {generation_index + 1}. "
         "Produce a complete response in the requested style.\n\n"
-        f"{base_prompt}"
+        f"{base_prompt}\n\n"
+        f"{style_output_format(style)}"
     )
-    return append_answer_contract(prompt, sample)
+    return prompt
+
+
+def style_output_format(style: ReasoningStyle) -> str:
+    if style == ReasoningStyle.DIRECT:
+        return (
+            "Output format:\n"
+            "FINAL_ANSWER: <A/B/C/D>\n"
+            "RATIONALE:\n"
+            "Direct reason:\n"
+            "<1-3 concise sentences explaining why the answer is correct.>"
+        )
+    if style == ReasoningStyle.EVIDENCE:
+        return (
+            "Output format:\n"
+            "FINAL_ANSWER: <A/B/C/D>\n"
+            "RATIONALE:\n"
+            "Key evidence:\n"
+            "- <key fact / concept / definition / wording>\n\n"
+            "Application:\n"
+            "- <how the evidence supports the selected answer>\n\n"
+            "Conclusion:\n"
+            "- <why this leads to the final answer>"
+        )
+    if style == ReasoningStyle.ELIMINATION:
+        return (
+            "Output format:\n"
+            "FINAL_ANSWER: <A/B/C/D>\n"
+            "RATIONALE:\n"
+            "Option analysis:\n"
+            "- A: <brief evaluation>\n"
+            "- B: <brief evaluation>\n"
+            "- C: <brief evaluation>\n"
+            "- D: <brief evaluation>\n\n"
+            "Elimination:\n"
+            "- <which options are ruled out and why>\n\n"
+            "Conclusion:\n"
+            "- <why the selected option is best>"
+        )
+    raise ValueError(f"Unsupported reasoning style: {style}")
 
 
 def coerce_generation_results(results: Any, expected: int) -> list[str]:
