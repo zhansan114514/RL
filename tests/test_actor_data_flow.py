@@ -124,3 +124,258 @@ def test_actor_pairs_use_only_accepted_target_style_chosen():
         "style": 2,
         "format": 1,
     }
+
+
+def test_society_actor_style_prompt_wrapper_conditions_generation():
+    from src.society.agent_registry import ReasoningStyle
+    from src.society.society_trainer import StyleConditionedActorAdapter
+
+    class FakeModel:
+        def __init__(self):
+            self.prompts = []
+
+        def generate(self, prompts, **kwargs):
+            self.prompts.extend(prompts)
+            return ["ok" for _ in prompts]
+
+    model = FakeModel()
+    adapter = StyleConditionedActorAdapter(model, ReasoningStyle.BACKTRACKING)
+
+    adapter.generate(["Solve Q"], max_tokens=8, temperature=0.3)
+
+    assert "You are Actor-backtracking" in model.prompts[0]
+    assert "try a plausible answer" in model.prompts[0]
+    assert model.prompts[0].endswith("Solve Q")
+
+
+def test_society_actor_dpo_prompt_is_style_conditioned(monkeypatch, tmp_path):
+    from src.society import society_trainer
+    from src.society.agent_registry import ReasoningStyle
+
+    captured = {}
+
+    def fake_detect_model_type(model_name):
+        return "qwen2.5"
+
+    def fake_train_dpo(**kwargs):
+        captured["dataset"] = kwargs["preference_dataset"]
+        return str(tmp_path / "adapter")
+
+    monkeypatch.setattr(
+        "src.utils.model_utils.detect_model_type",
+        fake_detect_model_type,
+    )
+    monkeypatch.setattr("src.training.dpo_trainer.train_dpo", fake_train_dpo)
+
+    checkpoint = society_trainer._run_dpo_training(
+        model_name="/models/base",
+        preference_pairs=[{
+            "sample": {
+                "question": "Q",
+                "choices": ["A", "B", "C", "D"],
+                "answer": "A",
+                "task_type": "multiple_choice",
+            },
+            "chosen": "FINAL_ANSWER: A\nRATIONALE:\nDirect.",
+            "rejected": "FINAL_ANSWER: B\nRATIONALE:\nWrong.",
+            "metadata": {"prompted_style": "direct"},
+        }],
+        output_dir=str(tmp_path),
+        agent_type="actor",
+        agent_name="actor_direct",
+        dataset_name="mmlu",
+        actor_style=ReasoningStyle.DIRECT,
+    )
+
+    prompt = captured["dataset"][0]["prompt"]
+    assert checkpoint == str(tmp_path / "adapter")
+    assert "You are Actor-direct" in prompt
+    assert "Solve concisely and directly" in prompt
+    assert "FINAL_ANSWER: A or B or C or D" in prompt
+
+
+def test_society_actor_acceptance_requires_style_format_confidence_and_correctness(monkeypatch):
+    from src.society import society_trainer
+    from src.society.agent_registry import (
+        AgentConfig,
+        AgentRegistry,
+        AgentRole,
+        CriticSkill,
+        ReasoningStyle,
+    )
+    from src.society.data_classifier import ReasoningStyleResult
+
+    sample = {
+        "question": "Q",
+        "choices": ["correct", "wrong", "wrong", "wrong"],
+        "answer": "A",
+        "task_type": "multiple_choice",
+    }
+    raw_pairs = [
+        {
+            "sample": sample,
+            "positive": "FINAL_ANSWER: A\nRATIONALE:\nAlgebra.",
+            "negative": "FINAL_ANSWER: B\nRATIONALE:\nWrong.",
+            "delta": 1.0,
+            "direction": "towards",
+        },
+        {
+            "sample": sample,
+            "positive": "FINAL_ANSWER: A\nRATIONALE:\nLow confidence.",
+            "negative": "FINAL_ANSWER: B\nRATIONALE:\nWrong.",
+            "delta": 1.0,
+            "direction": "towards",
+        },
+        {
+            "sample": sample,
+            "positive": "FINAL_ANSWER: A",
+            "negative": "FINAL_ANSWER: B\nRATIONALE:\nWrong.",
+            "delta": 1.0,
+            "direction": "towards",
+        },
+        {
+            "sample": sample,
+            "positive": "FINAL_ANSWER: B\nRATIONALE:\nAlgebra but wrong.",
+            "negative": "FINAL_ANSWER: C\nRATIONALE:\nWrong.",
+            "delta": 1.0,
+            "direction": "towards",
+        },
+        {
+            "sample": sample,
+            "positive": "FINAL_ANSWER: A\nRATIONALE:\nDirect.",
+            "negative": "FINAL_ANSWER: B\nRATIONALE:\nWrong.",
+            "delta": 1.0,
+            "direction": "towards",
+        },
+    ]
+
+    class FakeActorAdapter:
+        def generate(self, prompts, **kwargs):
+            return ["actor"] * len(prompts)
+
+    class FakeCriticAdapter:
+        def generate(self, prompts, **kwargs):
+            return ["critic"] * len(prompts)
+
+    class FakeEngine:
+        def cleanup(self):
+            pass
+
+    def fake_build_lora_adapters(engine, agents):
+        return {
+            "actor_algebraic": FakeActorAdapter(),
+            "critic_computation": FakeCriticAdapter(),
+        }
+
+    def fake_deliberate_batch(*args, **kwargs):
+        return [[{
+            "round": 0,
+            "actor_prompt": "prompt",
+            "actor_response": "FINAL_ANSWER: A\nRATIONALE:\nNatural.",
+            "critic_prompt": "critic prompt",
+            "critic_response": "critic",
+        }, {
+            "round": 1,
+            "actor_prompt": "prompt",
+            "actor_response": "FINAL_ANSWER: A\nRATIONALE:\nNatural.",
+            "critic_prompt": "critic prompt",
+            "critic_response": "critic",
+        }]]
+
+    def fake_guided_pairs(*args, **kwargs):
+        return raw_pairs
+
+    def fake_classify_reasoning_style(response, **kwargs):
+        if "Direct" in response:
+            return ReasoningStyleResult(
+                primary_style=ReasoningStyle.DIRECT,
+                secondary_styles=[],
+                format_status="valid",
+                confidence=0.9,
+            )
+        if response.strip() == "FINAL_ANSWER: A":
+            return ReasoningStyleResult(
+                primary_style=ReasoningStyle.ALGEBRAIC,
+                secondary_styles=[],
+                format_status="answer_only",
+                confidence=0.95,
+            )
+        if "Low confidence" in response:
+            return ReasoningStyleResult(
+                primary_style=ReasoningStyle.ALGEBRAIC,
+                secondary_styles=[],
+                format_status="valid",
+                confidence=0.4,
+            )
+        return ReasoningStyleResult(
+            primary_style=ReasoningStyle.ALGEBRAIC,
+            secondary_styles=[],
+            format_status="valid",
+            confidence=0.9,
+        )
+
+    monkeypatch.setattr(
+        "src.inference.vllm_server.VLLMInference",
+        lambda *args, **kwargs: FakeEngine(),
+    )
+    monkeypatch.setattr(
+        society_trainer,
+        "_build_lora_adapters",
+        fake_build_lora_adapters,
+    )
+    monkeypatch.setattr(
+        "src.algorithms.deliberation.deliberate_batch",
+        fake_deliberate_batch,
+    )
+    monkeypatch.setattr(
+        "src.algorithms.trajectory._generate_guided_pairs_for_batch",
+        fake_guided_pairs,
+    )
+    monkeypatch.setattr(
+        society_trainer,
+        "classify_reasoning_style",
+        fake_classify_reasoning_style,
+    )
+    monkeypatch.setattr(society_trainer, "_cleanup_gpu", lambda: None)
+
+    registry = AgentRegistry(base_model_path="/models/base")
+    actor = AgentConfig(
+        name="actor_algebraic",
+        role=AgentRole.ACTOR,
+        model_path="/models/base",
+        reasoning_style=ReasoningStyle.ALGEBRAIC,
+    )
+    critic = AgentConfig(
+        name="critic_computation",
+        role=AgentRole.CRITIC,
+        model_path="/models/base",
+        error_specialty=CriticSkill.COMPUTATION,
+    )
+
+    pairs = society_trainer._generate_actor_pairs_algorithm1(
+        actor=actor,
+        critics=[critic],
+        dataset=[sample],
+        dataset_name="mmlu",
+        registry=registry,
+        num_rounds=2,
+        num_simulations=1,
+        max_tokens=64,
+        reward_threshold=0.0,
+        max_samples=1,
+        seed=42,
+        device=0,
+        dtype="bfloat16",
+        gpu_memory_utilization=0.1,
+        max_model_len=512,
+        strict_classification=True,
+        min_style_confidence=0.65,
+    )
+
+    assert len(pairs) == 1
+    assert pairs[0]["chosen"] == "FINAL_ANSWER: A\nRATIONALE:\nAlgebra."
+    assert pairs[0]["metadata"]["prompted_style"] == "algebraic"
+    assert pairs[0]["metadata"]["classified_style"] == "algebraic"
+    assert pairs[0]["metadata"]["format_status"] == "valid"
+    assert pairs[0]["metadata"]["style_confidence"] == 0.9
+    assert pairs[0]["metadata"]["is_correct"] is True

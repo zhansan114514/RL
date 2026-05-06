@@ -149,6 +149,7 @@ step05_train_society:
   actor_max_tokens: 192
   critic_max_tokens: 192
   min_pairs_per_critic: 64
+  min_style_confidence: 0.65
   min_specialty_items: 32
   min_specialty_ratio: 0.08
   specialty_ratio: 0.7

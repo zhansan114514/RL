@@ -65,19 +65,22 @@ STYLE_BOOTSTRAP_GUIDANCE = {
 def expected_bootstrap_metadata(args: Any, styles: list[ReasoningStyle]) -> dict[str, Any]:
     """Metadata that must match before resuming a style-prompted bootstrap file."""
 
+    def arg(name: str) -> Any:
+        return getattr(args, name, STEP_DEFAULTS.get(name))
+
     return {
         "schema_version": 3,
         "generation_mode": "style_prompted",
-        "model_name": str(args.model_name),
-        "dataset": args.dataset,
-        "seed": int(args.seed),
+        "model_name": str(arg("model_name")),
+        "dataset": arg("dataset"),
+        "seed": int(arg("seed")),
         "reasoning_styles": [style.value for style in styles],
-        "generations_per_style": int(args.generations_per_style),
-        "temperature": float(args.temperature),
-        "top_p": float(getattr(args, "top_p", 0.9)),
-        "max_tokens": int(args.max_tokens),
-        "sampling": getattr(args, "sampling", None),
-        "mmlu_load_mode": getattr(args, "mmlu_load_mode", "by_subject"),
+        "generations_per_style": int(arg("generations_per_style")),
+        "temperature": float(arg("temperature")),
+        "top_p": float(arg("top_p")),
+        "max_tokens": int(arg("max_tokens")),
+        "sampling": arg("sampling"),
+        "mmlu_load_mode": arg("mmlu_load_mode"),
     }
 
 

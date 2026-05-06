@@ -31,7 +31,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from src.society.agent_registry import AgentRegistry, AgentConfig, ReasoningStyle
+from src.society.agent_registry import (
+    ACTOR_STYLE_PROMPTS,
+    AgentRegistry,
+    AgentConfig,
+    ReasoningStyle,
+)
 from src.society.critic_schema import CRITIC_JUDGEMENT_CONTRACT, render_critic_judgement
 from src.society.data_classifier import (
     classify_reasoning_style, ClassificationError,
@@ -40,6 +45,65 @@ from src.society.diversity_split import DiversitySplit, summarize_critic_trainin
 from src.algorithms.reward import extract_answer, math_answers_equal, normalize_answer
 
 logger = logging.getLogger(__name__)
+
+
+ACTOR_STYLE_TRAINING_GUIDANCE = {
+    ReasoningStyle.ALGEBRAIC: (
+        "In the RATIONALE, use variables, equations, formulas, symbolic "
+        "operations, or a structured algebraic model when applicable."
+    ),
+    ReasoningStyle.DIRECT: (
+        "In the RATIONALE, solve concisely and directly. Use only the short "
+        "steps needed to justify the answer."
+    ),
+    ReasoningStyle.BACKTRACKING: (
+        "In the RATIONALE, try a plausible answer or approach, check it against "
+        "the constraints or options, and revise if the check fails."
+    ),
+}
+
+
+def _style_condition_actor_prompt(prompt: str, style: ReasoningStyle) -> str:
+    """Prefix an Actor prompt with the requested reasoning style."""
+
+    return (
+        f"You are Actor-{style.value}.\n"
+        "You must solve using this exact reasoning style.\n"
+        f"{ACTOR_STYLE_PROMPTS[style]}\n"
+        f"{ACTOR_STYLE_TRAINING_GUIDANCE[style]}\n\n"
+        f"{prompt}"
+    )
+
+
+class StyleConditionedActorAdapter:
+    """Wrap an actor model so every generated Actor prompt is style-conditioned."""
+
+    def __init__(self, model: Any, style: ReasoningStyle):
+        self._model = model
+        self._style = style
+
+    def generate(self, prompts, max_tokens=256, temperature=0.7, **kwargs):
+        if isinstance(prompts, str):
+            prompts = [prompts]
+        styled_prompts = [
+            _style_condition_actor_prompt(prompt, self._style)
+            for prompt in prompts
+        ]
+        return self._model.generate(
+            styled_prompts,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            **kwargs,
+        )
+
+    def generate_single(self, prompt, max_tokens=256, temperature=0.7, **kwargs):
+        results = self.generate(
+            [prompt],
+            max_tokens=max_tokens,
+            temperature=temperature,
+            **kwargs,
+        )
+        return results[0] if results else ""
 
 
 def _cleanup_gpu():
@@ -207,6 +271,7 @@ def society_alternating_train(
     strict_classification: bool = True,
     max_classification_failure_rate: float = 0.0,
     max_classification_workers: int = 4,
+    min_style_confidence: float = 0.65,
     request_timeout: int | float = 30,
     max_retries: int = 5,
     retry_delay: int | float = 5,
@@ -504,6 +569,7 @@ def society_alternating_train(
                 strict_classification=strict_classification,
                 max_classification_failure_rate=max_classification_failure_rate,
                 max_classification_workers=max_classification_workers,
+                min_style_confidence=min_style_confidence,
                 request_timeout=request_timeout,
                 max_retries=max_retries,
                 retry_delay=retry_delay,
@@ -541,6 +607,7 @@ def society_alternating_train(
                 agent_type="actor",
                 agent_name=actor.name,
                 dataset_name=dataset_name,
+                actor_style=actor.reasoning_style,
                 lora_r=lora_r,
                 lora_alpha=lora_alpha,
                 learning_rate=learning_rate,
@@ -1050,6 +1117,7 @@ def _generate_actor_pairs_algorithm1(
     strict_classification: bool = True,
     max_classification_failure_rate: float = 0.0,
     max_classification_workers: int = 4,
+    min_style_confidence: float = 0.65,
     request_timeout: int | float = 30,
     max_retries: int = 5,
     retry_delay: int | float = 5,
@@ -1096,7 +1164,13 @@ def _generate_actor_pairs_algorithm1(
             )
 
         adapters = _build_lora_adapters(engine, all_agents)
-        actor_adapter = adapters[actor.name]
+        if actor.reasoning_style is None:
+            raise ValueError(f"Actor '{actor.name}' has no reasoning_style set")
+
+        actor_adapter = StyleConditionedActorAdapter(
+            adapters[actor.name],
+            actor.reasoning_style,
+        )
 
         critics_with_lora = [c for c in critics if c.lora_path]
         critics_pool = critics_with_lora if critics_with_lora else critics
@@ -1176,8 +1250,8 @@ def _generate_actor_pairs_algorithm1(
             # Many raw_pairs share the same response (e.g. same actor output
             # across different rounds), so we classify each unique response
             # exactly once.
-            style_cache: dict[tuple[str, str], Optional[ReasoningStyle]] = {}
-            classify_keys: list[tuple[str, str, str, str]] = []  # (q, resp, ans, key)
+            style_cache: dict[tuple[str, str], Optional[dict[str, Any]]] = {}
+            classify_keys: list[tuple[str, str, str, tuple[str, str]]] = []
 
             for p in raw_pairs:
                 sample = p["sample"]
@@ -1211,7 +1285,11 @@ def _generate_actor_pairs_algorithm1(
                         max_retries=max_retries,
                         retry_delay=retry_delay,
                     )
-                    return key, result.style, None
+                    return key, {
+                        "style": result.style,
+                        "format_status": result.format_status,
+                        "confidence": result.confidence,
+                    }, None
                 except ClassificationError:
                     return key, None, "classification_error"
 
@@ -1222,9 +1300,9 @@ def _generate_actor_pairs_algorithm1(
                 with ThreadPoolExecutor(max_workers=max(1, max_classification_workers)) as executor:
                     classify_results = list(executor.map(classify_one, classify_keys))
 
-            for key, style, error in classify_results:
+            for key, result, error in classify_results:
                 if error is None:
-                    style_cache[key] = style
+                    style_cache[key] = result
                     n_ok += 1
                 else:
                     n_failed += 1
@@ -1245,20 +1323,52 @@ def _generate_actor_pairs_algorithm1(
 
             # Filter pairs by actor's reasoning style using cached results
             target_style = actor.reasoning_style
+            prompt_style = target_style.value
+            min_conf = float(min_style_confidence)
             for p in raw_pairs:
                 sample = p["sample"]
                 question = sample.get("question", "")
                 chosen = p["chosen"]
                 key = (question, chosen)
+                task_type = sample.get("task_type", "math")
+                correct_answer = sample.get("answer", "")
+                chosen_answer = extract_answer(chosen, task_type)
+                if task_type == "math":
+                    is_correct = math_answers_equal(
+                        chosen_answer or "",
+                        correct_answer,
+                    )
+                else:
+                    is_correct = (
+                        normalize_answer(chosen_answer or "", task_type)
+                        == normalize_answer(correct_answer, task_type)
+                    )
 
-                style = style_cache.get(key)
-                if style is not None and style == target_style:
+                result = style_cache.get(key)
+                classified_style = result.get("style") if result else None
+                format_status = result.get("format_status") if result else None
+                style_confidence = float(result.get("confidence", 0.0)) if result else 0.0
+                accepted_for_actor = (
+                    is_correct
+                    and prompt_style == target_style.value
+                    and classified_style == target_style
+                    and format_status == "valid"
+                    and style_confidence >= min_conf
+                )
+                if accepted_for_actor:
                     preference_pairs.append({
                         "sample": sample,
                         "chosen": chosen,
                         "rejected": p["rejected"],
                         "metadata": {
                             "style": target_style.value,
+                            "prompted_style": prompt_style,
+                            "classified_style": target_style.value,
+                            "style_confidence": style_confidence,
+                            "format_status": format_status,
+                            "is_correct": True,
+                            "chosen_answer": chosen_answer,
+                            "accepted_for_actor": True,
                             "delta": p["delta"],
                             "direction": p["direction"],
                         },
@@ -1295,6 +1405,7 @@ def _run_dpo_training(
     agent_type: str,
     agent_name: str,
     dataset_name: str = "math",
+    actor_style: ReasoningStyle | None = None,
     lora_r: int = 256,
     lora_alpha: int = 512,
     learning_rate: float = 5e-5,
@@ -1350,6 +1461,17 @@ def _run_dpo_training(
                     sample,
                     include_answer_contract=(agent_type == "actor"),
                 )
+                if agent_type == "actor":
+                    style = actor_style
+                    if style is None:
+                        style_label = (
+                            p.get("metadata", {}).get("prompted_style")
+                            or p.get("metadata", {}).get("style")
+                        )
+                        if style_label:
+                            style = ReasoningStyle(style_label)
+                    if style is not None:
+                        prompt = _style_condition_actor_prompt(prompt, style)
             prompts.append(prompt)
 
         # Convert preference_pairs to HuggingFace Dataset
