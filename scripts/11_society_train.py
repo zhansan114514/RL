@@ -74,6 +74,7 @@ STEP_DEFAULTS = {
     "request_timeout": 60,
     "retry_delay": 5,
     "max_retries": 5,
+    "tensor_parallel_size": 1,
     "sampling": None,
     "mmlu_load_mode": "by_subject",
 }
@@ -360,6 +361,7 @@ def main():
         request_timeout=getattr(args, "request_timeout", 60),
         max_retries=getattr(args, "max_retries", 5),
         retry_delay=getattr(args, "retry_delay", 5),
+        tensor_parallel_size=getattr(args, "tensor_parallel_size", 1),
     )
 
     # Save final registry

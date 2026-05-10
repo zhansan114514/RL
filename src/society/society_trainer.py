@@ -252,6 +252,7 @@ def _create_phase_engine(
     gpu_memory_utilization: float,
     max_model_len: int,
     max_concurrent_loras: int | None = None,
+    tensor_parallel_size: int = 1,
 ):
     """Create a shared VLLMInference engine for all agents in a training phase.
 
@@ -263,6 +264,8 @@ def _create_phase_engine(
             the number of agents that have a LoRA path (one slot per agent).
             Set this to a smaller number (e.g. 2) when only a subset of agents
             are active concurrently, to reduce GPU memory reservation.
+        tensor_parallel_size: Number of GPUs for tensor parallelism.  When > 1,
+            uses GPUs ``[device, device + tensor_parallel_size)``.
     """
     from src.inference.vllm_server import VLLMInference
 
@@ -273,9 +276,14 @@ def _create_phase_engine(
     else:
         max_loras = sum(1 for a in agents if a.lora_path) if enable_lora else 0
 
+    if tensor_parallel_size > 1:
+        cuda_device = list(range(device, device + tensor_parallel_size))
+    else:
+        cuda_device = device
+
     return VLLMInference(
         model_name,
-        cuda_device=device,
+        cuda_device=cuda_device,
         dtype=dtype,
         gpu_memory_utilization=gpu_memory_utilization,
         max_model_len=max_model_len,
@@ -285,7 +293,19 @@ def _create_phase_engine(
     )
 
 
-def _get_rng(seed: int):
+def _save_pairs_json(pairs: list[dict], path: str) -> None:
+    """Save preference pairs to a JSON file for checkpoint/resume."""
+    import json
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(pairs, f, ensure_ascii=False, indent=2)
+
+
+def _load_pairs_json(path: str) -> list[dict]:
+    """Load preference pairs from a JSON cache file."""
+    import json
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
     """Get a numpy random generator for sampling."""
     import numpy as np
     return np.random.default_rng(seed)
@@ -337,6 +357,7 @@ def society_alternating_train(
     specialty_ratio: float = 0.7,
     general_ratio: float = 0.2,
     calibration_ratio: float = 0.1,
+    tensor_parallel_size: int = 1,
     classifications_cache_dir: str = "output/society/classified",
     api_key: str = "",
     api_base: str = "",
@@ -436,15 +457,17 @@ def society_alternating_train(
             f"(Actors frozen, error-profile mixture routing)"
         )
 
-        # Per-critic engine: create a fresh engine for each critic to avoid
-        # GPU memory accumulation across agents.  Each engine is destroyed
+        # Shared engine for Phase A: reuse across critics to avoid
+        # repeated model loading (~1 min each).  The engine is destroyed
         # before DPO training (which loads its own model).
+        all_phase_a_agents = list(actors) + list(critics)
         phase_a_engine = None
 
         phase_a_done = set(phase_done.get("phase_A", []))
+        critic_pairs_cache: dict[str, list[dict]] = {}
 
+        # --- Pass 1: Generate all preference pairs with shared engine ---
         for critic in critics:
-            # Skip if this critic already completed in a resumed run
             if critic.name in phase_a_done:
                 logger.info(
                     f"  Skipping Critic {critic.display_name} (already completed)"
@@ -453,13 +476,36 @@ def society_alternating_train(
 
             critic_iter_dir = f"{output_base_dir}/critics/{critic.name}/iter_{iteration}"
             Path(critic_iter_dir).mkdir(parents=True, exist_ok=True)
+            pairs_file = os.path.join(critic_iter_dir, "preference_pairs.json")
+
+            # Check cached pairs from a previous interrupted run
+            if os.path.exists(pairs_file):
+                logger.info(
+                    f"  Loading cached pairs for {critic.display_name} "
+                    f"from {pairs_file}"
+                )
+                critic_pairs_cache[critic.name] = _load_pairs_json(pairs_file)
+                continue
+
+            # Create shared engine lazily (only when at least one critic
+            # actually needs pair generation)
+            if phase_a_engine is None:
+                logger.info("  Creating shared vLLM engine for Phase A")
+                phase_a_engine = _create_phase_engine(
+                    registry.base_model_path or "Qwen/Qwen3-14B",
+                    all_phase_a_agents,
+                    device=device,
+                    dtype=dtype,
+                    gpu_memory_utilization=gpu_memory_utilization,
+                    max_model_len=max_model_len,
+                    tensor_parallel_size=tensor_parallel_size,
+                )
 
             logger.info(
-                f"  Training Critic: {critic.display_name} "
+                f"  Generating pairs for Critic: {critic.display_name} "
                 f"(specialty: {critic.error_specialty.value})"
             )
 
-            # Generate preference pairs using Algorithm 1 from trajectory.py
             preference_pairs = _generate_critic_pairs_algorithm1(
                 actors=actors,
                 critic=critic,
@@ -476,7 +522,7 @@ def society_alternating_train(
                 dtype=dtype,
                 gpu_memory_utilization=gpu_memory_utilization,
                 max_model_len=max_model_len,
-                engine=None,
+                engine=phase_a_engine,
                 classifications_cache_dir=classifications_cache_dir,
                 api_key=api_key,
                 api_base=api_base,
@@ -493,6 +539,24 @@ def society_alternating_train(
                 general_ratio=general_ratio,
                 calibration_ratio=calibration_ratio,
             )
+
+            # Cache pairs for potential resume
+            if preference_pairs:
+                _save_pairs_json(preference_pairs, pairs_file)
+            critic_pairs_cache[critic.name] = preference_pairs
+
+        # Release shared engine before DPO training
+        if phase_a_engine is not None:
+            _release_vllm_engine(phase_a_engine)
+            phase_a_engine = None
+        _cleanup_gpu()
+
+        # --- Pass 2: Run DPO training for each critic ---
+        for critic in critics:
+            if critic.name in phase_a_done:
+                continue
+
+            preference_pairs = critic_pairs_cache.get(critic.name, [])
 
             if len(preference_pairs) < min_pairs_per_critic:
                 logger.warning(
@@ -520,14 +584,7 @@ def society_alternating_train(
                 })
                 continue
 
-            # Destroy vLLM engine before DPO to free GPU memory.
-            # The engine will be recreated on the next iteration if needed
-            # (when engine=None is passed, the generation function creates
-            # and manages its own engine).
-            if phase_a_engine is not None:
-                del phase_a_engine
-                phase_a_engine = None
-            _cleanup_gpu()
+            critic_iter_dir = f"{output_base_dir}/critics/{critic.name}/iter_{iteration}"
 
             # Run DPO training
             logger.info(f"  Training with {len(preference_pairs)} preference pairs")
@@ -569,8 +626,8 @@ def society_alternating_train(
                     "critic_training_metrics": summarize_critic_training_pairs(preference_pairs),
                 }
 
-            # Per-critic checkpoint: if we crash after this point, the next
-            # run will skip this critic and start from the next one.
+            # Per-critic checkpoint
+            phase_a_done.add(critic.name)
             _save_checkpoint(ckpt_file, {
                 "iteration": iteration,
                 "actor_paths": actor_paths,
@@ -585,9 +642,10 @@ def society_alternating_train(
                 },
             })
 
-        # Cleanup Phase A engine (may already be None if DPO was run)
+        # Cleanup Phase A engine (may already be None)
         if phase_a_engine is not None:
-            del phase_a_engine
+            _release_vllm_engine(phase_a_engine)
+            phase_a_engine = None
         _cleanup_gpu()
 
         _sync_lora_paths(critics, critic_paths)
@@ -595,14 +653,16 @@ def society_alternating_train(
         # ---- Phase B: Train all Actors (fix Critics) ----
         logger.info(f"Phase B: Training {len(actors)} Actors (Critics frozen)")
 
-        # Per-actor engine: create fresh engine for each actor to avoid
-        # GPU memory accumulation across agents.
+        # Shared engine for Phase B: reuse across actors to avoid
+        # repeated model loading.
+        all_phase_b_agents = list(actors) + list(critics)
         phase_b_engine = None
 
         phase_b_done = set(phase_done.get("phase_B", []))
+        actor_pairs_cache: dict[str, list[dict]] = {}
 
+        # --- Pass 1: Generate all preference pairs with shared engine ---
         for actor in actors:
-            # Skip if this actor already completed in a resumed run
             if actor.name in phase_b_done:
                 logger.info(
                     f"  Skipping Actor {actor.display_name} (already completed)"
@@ -611,13 +671,35 @@ def society_alternating_train(
 
             actor_iter_dir = f"{output_base_dir}/actors/{actor.name}/iter_{iteration}"
             Path(actor_iter_dir).mkdir(parents=True, exist_ok=True)
+            pairs_file = os.path.join(actor_iter_dir, "preference_pairs.json")
+
+            # Check cached pairs from a previous interrupted run
+            if os.path.exists(pairs_file):
+                logger.info(
+                    f"  Loading cached pairs for {actor.display_name} "
+                    f"from {pairs_file}"
+                )
+                actor_pairs_cache[actor.name] = _load_pairs_json(pairs_file)
+                continue
+
+            # Create shared engine lazily
+            if phase_b_engine is None:
+                logger.info("  Creating shared vLLM engine for Phase B")
+                phase_b_engine = _create_phase_engine(
+                    registry.base_model_path or "Qwen/Qwen3-14B",
+                    all_phase_b_agents,
+                    device=device,
+                    dtype=dtype,
+                    gpu_memory_utilization=gpu_memory_utilization,
+                    max_model_len=max_model_len,
+                    tensor_parallel_size=tensor_parallel_size,
+                )
 
             logger.info(
-                f"  Training Actor: {actor.display_name} "
+                f"  Generating pairs for Actor: {actor.display_name} "
                 f"(style: {actor.reasoning_style.value})"
             )
 
-            # Generate preference pairs using Algorithm 1 from trajectory.py
             preference_pairs = _generate_actor_pairs_algorithm1(
                 actor=actor,
                 critics=critics,
@@ -634,7 +716,7 @@ def society_alternating_train(
                 dtype=dtype,
                 gpu_memory_utilization=gpu_memory_utilization,
                 max_model_len=max_model_len,
-                engine=None,
+                engine=phase_b_engine,
                 classifications_cache_dir=classifications_cache_dir,
                 api_key=api_key,
                 api_base=api_base,
@@ -647,6 +729,24 @@ def society_alternating_train(
                 max_retries=max_retries,
                 retry_delay=retry_delay,
             )
+
+            # Cache pairs for potential resume
+            if preference_pairs:
+                _save_pairs_json(preference_pairs, pairs_file)
+            actor_pairs_cache[actor.name] = preference_pairs
+
+        # Release shared engine before DPO training
+        if phase_b_engine is not None:
+            _release_vllm_engine(phase_b_engine)
+            phase_b_engine = None
+        _cleanup_gpu()
+
+        # --- Pass 2: Run DPO training for each actor ---
+        for actor in actors:
+            if actor.name in phase_b_done:
+                continue
+
+            preference_pairs = actor_pairs_cache.get(actor.name, [])
 
             if not preference_pairs:
                 logger.warning(f"  No preference pairs for {actor.name}, skipping")
@@ -665,11 +765,7 @@ def society_alternating_train(
                 })
                 continue
 
-            # Destroy vLLM engine before DPO to free GPU memory.
-            if phase_b_engine is not None:
-                del phase_b_engine
-                phase_b_engine = None
-            _cleanup_gpu()
+            actor_iter_dir = f"{output_base_dir}/actors/{actor.name}/iter_{iteration}"
 
             # Run DPO training
             logger.info(f"  Training with {len(preference_pairs)} preference pairs")
@@ -711,6 +807,7 @@ def society_alternating_train(
                 }
 
             # Per-actor checkpoint
+            phase_b_done.add(actor.name)
             _save_checkpoint(ckpt_file, {
                 "iteration": iteration,
                 "actor_paths": actor_paths,
@@ -726,9 +823,10 @@ def society_alternating_train(
                 },
             })
 
-        # Cleanup Phase B engine (may already be None if DPO was run)
+        # Cleanup Phase B engine (may already be None)
         if phase_b_engine is not None:
-            del phase_b_engine
+            _release_vllm_engine(phase_b_engine)
+            phase_b_engine = None
         _cleanup_gpu()
 
         _sync_lora_paths(actors, actor_paths)

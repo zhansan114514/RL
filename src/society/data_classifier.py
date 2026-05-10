@@ -108,11 +108,11 @@ Definitions:
 - evidence: uses facts, definitions, concepts, question wording, or domain knowledge as explicit evidence
 - elimination: compares answer options, rules out alternatives, or explains why one option is better than the others
 
-Return JSON only:
+Return JSON only (pick ONE value for each field, do NOT use "|"):
 {{
-  "primary_style": "direct|evidence|elimination",
-  "secondary_styles": ["direct|evidence|elimination"],
-  "format_status": "valid|answer_only|empty_or_invalid",
+  "primary_style": "one of: direct, evidence, elimination",
+  "secondary_styles": ["subset of: direct, evidence, elimination"],
+  "format_status": "one of: valid, answer_only, empty_or_invalid",
   "confidence": 0.0,
   "evidence": "short reason"
 }}"""
@@ -144,9 +144,9 @@ Score each error dimension from 0.0 to 1.0:
 - grounding: ignores or contradicts the question/options, invents unsupported assumptions
 - verification: fails to check final answer, option-letter mismatch, self-check failure
 
-Return JSON only:
+Return JSON only (pick ONE value for each field, do NOT use "|"):
 {{
-  "format_status": "valid|answer_only|empty_or_invalid",
+  "format_status": "one of: valid, answer_only, empty_or_invalid",
   "scores": {{
     "computation": float,
     "reasoning": float,
@@ -154,8 +154,8 @@ Return JSON only:
     "grounding": float,
     "verification": float
   }},
-  "primary": "computation|reasoning|knowledge|grounding|verification|format_failure|ambiguous",
-  "secondary": ["computation|reasoning|knowledge|grounding|verification"],
+  "primary": "one of: computation, reasoning, knowledge, grounding, verification, format_failure, ambiguous",
+  "secondary": ["subset of: computation, reasoning, knowledge, grounding, verification"],
   "confidence": float,
   "evidence": "short reason"
 }}
@@ -238,7 +238,7 @@ def _call_api(
     api_url: str = DEFAULT_API_URL,
     api_key: str = DEFAULT_API_KEY,
     model: str = DEFAULT_API_MODEL,
-    max_tokens: int = 64,
+    max_tokens: int = 256,
     request_timeout: int | float = DEFAULT_REQUEST_TIMEOUT,
     max_retries: int = DEFAULT_MAX_RETRIES,
     retry_delay: int | float = DEFAULT_RETRY_DELAY,
@@ -339,16 +339,27 @@ def _parse_style_response(response: str) -> Optional[ReasoningStyle]:
     data = _extract_json(response)
     if isinstance(data, dict):
         label = str(data.get("primary_style", "")).strip().lower()
+        # Handle pipe-separated multi-value strings (e.g. "direct|evidence|elimination")
+        label = label.split("|")[0].strip()
         try:
             return ReasoningStyle(label)
         except ValueError:
             pass
 
     clean = re.sub(r'[*_`"\'\(\)\[\]{}]', ' ', response.lower().strip())
+    # Count occurrences of each style rather than matching first-hit;
+    # this prevents "direct" always winning when multiple styles appear
+    # in a truncated multi-value string.
+    style_counts: dict[ReasoningStyle, int] = {}
     for style in ReasoningStyle:
         pattern = r'\b' + re.escape(style.value) + r'\b'
-        if re.search(pattern, clean):
-            return style
+        style_counts[style] = len(re.findall(pattern, clean))
+
+    # If only one style was found, return it directly
+    found = [s for s, c in style_counts.items() if c > 0]
+    if len(found) == 1:
+        return found[0]
+    # If zero or multiple, fall through to variant matching
 
     variants = {
         "directly": ReasoningStyle.DIRECT,
@@ -493,6 +504,8 @@ def _parse_error_profile_response(response: str) -> Optional[ErrorProfileResult]
     }
 
     primary = str(data.get("primary", "")).strip().lower()
+    # Handle pipe-separated multi-value strings
+    primary = primary.split("|")[0].strip()
     if primary not in ERROR_PROFILE_PRIMARY_LABELS:
         primary = max(scores.items(), key=lambda kv: kv[1])[0] if any(scores.values()) else "ambiguous"
 
