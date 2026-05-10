@@ -109,3 +109,64 @@ def test_vllm_sets_cuda_visible_devices_before_loading(monkeypatch):
 
     assert observed_cuda_visible_devices["value"] == "4,5"
     assert engine._init_kwargs["tensor_parallel_size"] == 2
+
+
+def test_society_per_round_accuracy_does_not_use_future_final_answer(monkeypatch):
+    evaluate = _load_society_evaluate_module()
+    from src.society import multi_deliberation
+
+    def fake_multi_agent_deliberate_single_gpu(**kwargs):
+        round0 = types.SimpleNamespace(
+            round_num=0,
+            consensus_answer=None,
+            consensus_confidence=0.0,
+            actor_answer_sources={"actor_direct": "none"},
+            routed_feedbacks={},
+            raw_actor_answers={"actor_direct": None},
+            actor_answers={"actor_direct": None},
+            actor_format_valid={"actor_direct": False},
+            actor_responses={"actor_direct": "No final decision."},
+        )
+        round1 = types.SimpleNamespace(
+            round_num=1,
+            consensus_answer="B",
+            consensus_confidence=1.0,
+            actor_answer_sources={"actor_direct": "strict"},
+            routed_feedbacks={},
+            raw_actor_answers={"actor_direct": "B"},
+            actor_answers={"actor_direct": "B"},
+            actor_format_valid={"actor_direct": True},
+            actor_responses={"actor_direct": "FINAL_ANSWER: B"},
+        )
+        return types.SimpleNamespace(
+            consensus_answer="B",
+            consensus_confidence=1.0,
+            rounds=[round0, round1],
+            final_answers={"actor_direct": "B"},
+        )
+
+    monkeypatch.setattr(
+        multi_deliberation,
+        "multi_agent_deliberate_single_gpu",
+        fake_multi_agent_deliberate_single_gpu,
+    )
+
+    result = evaluate._run_deliberation_on_samples(
+        engine=object(),
+        actor_configs=[],
+        critic_configs=[],
+        samples=[{
+            "question": "Pick B.",
+            "answer": "B",
+            "task_type": "multiple_choice",
+        }],
+        dataset_name="mmlu",
+        lora_paths={},
+        num_rounds=2,
+        max_tokens=16,
+        temperature=0.0,
+    )
+
+    assert result.initial_accuracy == 0.0
+    assert result.final_consensus_accuracy == 1.0
+    assert result.per_round_accuracy == [0.0, 1.0]

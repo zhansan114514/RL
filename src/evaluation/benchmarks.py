@@ -9,23 +9,14 @@ import time
 
 
 from src.algorithms.deliberation import deliberate_batch
-from src.algorithms.reward import (
-    extract_answer_with_source,
-    compute_accuracy_with_ci,
-    compute_per_round_accuracy,
-    compute_improvement_rate,
-    compute_extraction_success_rates,
+from src.evaluation.answer_resolution import (
+    answers_match,
+    compute_accuracy_with_ci_mixed,
+    resolve_answer_for_round,
+    source_rates,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _answers_match(pred: str, label: str, task_type: str) -> bool:
-    """Check if predicted answer matches label, using task-appropriate comparison."""
-    if task_type == "math":
-        from src.algorithms.reward import math_answers_equal
-        return math_answers_equal(pred, label)
-    return pred.upper() == label.upper()
 
 
 def evaluate_benchmark(
@@ -51,7 +42,7 @@ def evaluate_benchmark(
         temperature: Sampling temperature.
 
     Returns:
-        Dict with accuracy, per_round_accuracy, improvement_rate, ci.
+        Dict with stateful accuracy, per-round accuracy, format metrics, and CI.
     """
     return evaluate_benchmark_batch(
         actor_model,
@@ -77,7 +68,11 @@ def evaluate_benchmark_batch(
 ) -> dict:
     """Evaluate Actor-Critic team with batched deliberation."""
     labels = []
+    task_types = []
     all_round_answers = [[] for _ in range(num_rounds)]
+    all_round_raw_answers = [[] for _ in range(num_rounds)]
+    all_round_sources = [[] for _ in range(num_rounds)]
+    all_round_format_valid = [[] for _ in range(num_rounds)]
     all_round_responses = [[] for _ in range(num_rounds)]
     sample_details = []
     eval_start = time.time()
@@ -105,30 +100,36 @@ def evaluate_benchmark_batch(
             task_type = sample.get("task_type", "yes_no")
             label = sample.get("answer", "")
             labels.append(label)
+            task_types.append(task_type)
 
             round_answers = []
-            round_extraction_sources = []
+            raw_round_answers = []
+            round_answer_sources = []
+            strict_format_ok = []
+            previous_answer = None
             for t, round_data in enumerate(trajectory):
                 response = round_data["actor_response"]
-                extraction = extract_answer_with_source(response, task_type)
-                answer = extraction.answer
-                all_round_answers[t].append(answer or "")
+                resolved = resolve_answer_for_round(
+                    response=response,
+                    task_type=task_type,
+                    previous_answer=previous_answer,
+                )
+                answer = resolved.resolved_answer
+                previous_answer = answer
+                all_round_answers[t].append(answer)
+                all_round_raw_answers[t].append(resolved.raw_extracted_answer)
+                all_round_sources[t].append(resolved.extract_source)
+                all_round_format_valid[t].append(resolved.format_valid)
                 all_round_responses[t].append(response)
-                round_answers.append(answer or "")
-                round_extraction_sources.append(extraction.source or "none")
+                round_answers.append(answer)
+                raw_round_answers.append(resolved.raw_extracted_answer)
+                round_answer_sources.append(resolved.extract_source)
+                strict_format_ok.append(resolved.format_valid)
 
-            initial_pred = round_answers[0] if round_answers else ""
-            final_pred = round_answers[-1] if round_answers else ""
-
-            # Use math-aware comparison for math tasks
-            if task_type == "math":
-                from src.algorithms.reward import math_answers_equal
-                initially_correct = math_answers_equal(initial_pred, label)
-                finally_correct = math_answers_equal(final_pred, label)
-            else:
-                correct_label = label.upper().strip()
-                initially_correct = (initial_pred.upper() == correct_label)
-                finally_correct = (final_pred.upper() == correct_label)
+            initial_pred = round_answers[0] if round_answers else None
+            final_pred = round_answers[-1] if round_answers else None
+            initially_correct = answers_match(initial_pred, label, task_type)
+            finally_correct = answers_match(final_pred, label, task_type)
 
             sample_details.append({
                 "index": i,
@@ -140,11 +141,15 @@ def evaluate_benchmark_batch(
                 "initial_answer": initial_pred,
                 "final_answer": final_pred,
                 "initial_extract_source": (
-                    round_extraction_sources[0] if round_extraction_sources else "none"
+                    round_answer_sources[0] if round_answer_sources else "none"
                 ),
                 "final_extract_source": (
-                    round_extraction_sources[-1] if round_extraction_sources else "none"
+                    round_answer_sources[-1] if round_answer_sources else "none"
                 ),
+                "round_answers": round_answers,
+                "raw_round_answers": raw_round_answers,
+                "round_answer_sources": round_answer_sources,
+                "strict_format_ok": strict_format_ok,
                 "label": label,
                 "initially_correct": initially_correct,
                 "finally_correct": finally_correct,
@@ -157,23 +162,41 @@ def evaluate_benchmark_batch(
     eval_elapsed = time.time() - eval_start
 
     # Compute metrics
-    task_type = test_samples[0].get("task_type", "yes_no") if test_samples else "yes_no"
-    sample_task_types = [sample.get("task_type", "yes_no") for sample in test_samples]
-    per_round_extraction_rates = [
-        compute_extraction_success_rates(round_responses, sample_task_types)
-        for round_responses in all_round_responses
+    per_round_answer_sources = [
+        source_rates(round_sources)
+        for round_sources in all_round_sources
     ]
-    final_extraction_rates = (
-        per_round_extraction_rates[-1]
-        if per_round_extraction_rates
-        else compute_extraction_success_rates([])
+    final_answer_sources = (
+        per_round_answer_sources[-1]
+        if per_round_answer_sources
+        else source_rates([])
     )
-    per_round_acc = compute_per_round_accuracy(all_round_answers, labels, task_type=task_type)
-    final_acc, ci_margin = compute_accuracy_with_ci(
-        all_round_answers[-1], labels, task_type=task_type,
+    per_round_acc = [
+        compute_accuracy_with_ci_mixed(round_answers, labels, task_types)[0]
+        for round_answers in all_round_answers
+    ]
+    final_acc, ci_margin = compute_accuracy_with_ci_mixed(
+        all_round_answers[-1] if all_round_answers else [],
+        labels,
+        task_types,
+    )
+    final_round_answers = all_round_answers[-1] if all_round_answers else []
+    final_round_sources = all_round_sources[-1] if all_round_sources else []
+    strict_final_answers = [
+        answer if source == "strict" else None
+        for answer, source in zip(final_round_answers, final_round_sources)
+    ]
+    strict_format_acc, _ = compute_accuracy_with_ci_mixed(
+        strict_final_answers,
+        labels,
+        task_types,
     )
     initial_acc = per_round_acc[0] if per_round_acc else 0.0
-    improvement = compute_improvement_rate(final_acc, initial_acc)
+    improvement = (
+        (final_acc - initial_acc) / initial_acc
+        if initial_acc > 0
+        else 0.0
+    )
 
     # Compute flip statistics
     n_flipped_to_correct = sum(1 for d in sample_details if d["flipped_to_correct"])
@@ -196,10 +219,38 @@ def evaluate_benchmark_batch(
         "ci_95": [max(0, final_acc - ci_margin), min(1, final_acc + ci_margin)],
         "improvement_rate": improvement,
         "absolute_improvement": final_acc - initial_acc,
-        "strict_extract_success_rate": final_extraction_rates["strict_extract_success_rate"],
-        "fallback_extract_success_rate": final_extraction_rates["fallback_extract_success_rate"],
-        "extract_success_rate": final_extraction_rates["extract_success_rate"],
-        "per_round_extraction_rates": per_round_extraction_rates,
+        "strict_format_accuracy": strict_format_acc,
+        "stateful_answer_accuracy": final_acc,
+        "strict_extract_success_rate": final_answer_sources["strict_rate"],
+        "fallback_extract_success_rate": final_answer_sources["fallback_rate"],
+        "extract_success_rate": (
+            final_answer_sources["strict_rate"]
+            + final_answer_sources["fallback_rate"]
+        ),
+        "actor_carried_forward_rate": final_answer_sources["carried_forward_rate"],
+        "actor_unresolved_rate": final_answer_sources["none_rate"],
+        "carried_forward_count": final_answer_sources["carried_forward_count"],
+        "extract_failure_count": final_answer_sources["none_count"],
+        "per_round_extraction_rates": per_round_answer_sources,
+        "per_round_answer_sources": per_round_answer_sources,
+        "format_metrics": {
+            "actor_answer_sources_by_round": {
+                str(t): per_round_answer_sources[t]
+                for t in range(len(per_round_answer_sources))
+            },
+            "actor_strict_format_rate_by_round": [
+                rates["strict_rate"] for rates in per_round_answer_sources
+            ],
+            "actor_fallback_rate_by_round": [
+                rates["fallback_rate"] for rates in per_round_answer_sources
+            ],
+            "actor_carried_forward_rate_by_round": [
+                rates["carried_forward_rate"] for rates in per_round_answer_sources
+            ],
+            "actor_unresolved_rate_by_round": [
+                rates["none_rate"] for rates in per_round_answer_sources
+            ],
+        },
         "per_round_accuracy": per_round_acc,
         "per_round_delta": round_deltas,
         "flip_statistics": {
@@ -210,7 +261,11 @@ def evaluate_benchmark_batch(
         },
         "correct_at_each_round": [
             sum(1 for d in sample_details
-                if _answers_match(all_round_answers[t][d["index"]], labels[d["index"]], d.get("task_type", "yes_no")))
+                if answers_match(
+                    all_round_answers[t][d["index"]],
+                    labels[d["index"]],
+                    d.get("task_type", "yes_no"),
+                ))
             for t in range(num_rounds)
         ],
         "eval_time_seconds": round(eval_elapsed, 1),

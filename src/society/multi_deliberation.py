@@ -27,6 +27,12 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.algorithms.reward import extract_answer_with_source
+from src.evaluation.answer_resolution import (
+    MAINTAIN_PREVIOUS_PATTERNS as ANSWER_MAINTAIN_PREVIOUS_PATTERNS,
+    mentions_maintain_previous,
+    normalize_task_answer,
+    resolve_answer_for_round,
+)
 from src.prompts.templates import answer_contract, append_answer_contract
 from src.society.agent_registry import AgentConfig
 from src.society.critic_schema import CRITIC_JUDGEMENT_CONTRACT
@@ -44,9 +50,12 @@ class DeliberationRound:
     """One round of multi-agent deliberation."""
     round_num: int
     actor_responses: dict[str, str]  # actor_name -> response
-    actor_answers: dict[str, Optional[str]]  # actor_name -> extracted answer
+    actor_answers: dict[str, Optional[str]]  # actor_name -> resolved answer
     critic_feedbacks: dict[str, dict[str, str]]  # actor_name -> {critic_name: feedback}
     routed_feedbacks: dict[str, RoutedFeedback]  # actor_name -> routed
+    raw_actor_answers: dict[str, Optional[str]] = field(default_factory=dict)
+    actor_answer_sources: dict[str, str] = field(default_factory=dict)
+    actor_format_valid: dict[str, bool] = field(default_factory=dict)
     consensus_answer: Optional[str] = None
     consensus_confidence: float = 0.0
     consensus_weights: dict[str, float] = field(default_factory=dict)
@@ -144,6 +153,10 @@ FINAL_ANSWER_LINE_PATTERN = re.compile(
     r"(?m)^(?P<prefix>[ \t]*FINAL_ANSWER[ \t]*:[ \t]*)(?P<answer>.*?)(?P<suffix>[ \t]*)$"
 )
 
+MAINTAIN_PREVIOUS_PATTERNS = [
+    pattern.pattern for pattern in ANSWER_MAINTAIN_PREVIOUS_PATTERNS
+]
+
 MC_TAIL_ANSWER_PATTERNS = [
     re.compile(
         r"(?i)(?:correct\s+answer|answer|option|choice)\s+"
@@ -164,26 +177,30 @@ YES_NO_TAIL_ANSWER_PATTERNS = [
 
 def _normalize_vote_answer(answer: Optional[str], task_type: str) -> Optional[str]:
     """Normalize an extracted answer for voting without changing math strings."""
-    if answer is None:
-        return None
-    text = str(answer).strip()
-    if not text:
-        return None
-    if task_type == "yes_no":
-        upper = text.strip("().").upper()
-        if upper in {"YES", "Y"}:
-            return "YES"
-        if upper in {"NO", "N"}:
-            return "NO"
-        return None
-    if task_type in {"multiple_choice", "mixed"}:
-        upper = text.strip("().").upper()
-        if upper in {"A", "B", "C", "D"}:
-            return upper
-        if task_type == "mixed" and upper in {"YES", "NO"}:
-            return upper
-        return None
-    return text
+    return normalize_task_answer(answer, task_type)
+
+
+def _mentions_maintain_previous(response: str) -> bool:
+    """Backward-compatible wrapper for previous-answer intent detection."""
+    return mentions_maintain_previous(response)
+
+
+def _resolve_actor_answer_for_round(
+    response: str,
+    extracted_answer: Optional[str],
+    previous_answer: Optional[str],
+    task_type: str,
+    extraction_source: Optional[str] = None,
+) -> tuple[Optional[str], str]:
+    """Resolve the task answer for this round without using Critic suggestions."""
+    resolved = resolve_answer_for_round(
+        response=response,
+        task_type=task_type,
+        previous_answer=previous_answer,
+        extracted_answer=extracted_answer,
+        extraction_source=extraction_source,
+    )
+    return resolved.resolved_answer, resolved.extract_source
 
 
 def _find_tail_answer_claim(response: str, task_type: str) -> Optional[str]:
@@ -220,7 +237,7 @@ def _replace_final_answer_line(response: str, repaired_answer: str) -> str:
 def _repair_actor_answer_consistency(
     response: str,
     task_type: str,
-) -> tuple[str, Optional[str], bool]:
+) -> tuple[str, Optional[str], Optional[str], bool]:
     """
     Ensure the recorded Actor answer matches an explicit tail answer claim.
 
@@ -231,15 +248,17 @@ def _repair_actor_answer_consistency(
     """
     extraction = extract_answer_with_source(response, task_type)
     current = _normalize_vote_answer(extraction.answer, task_type)
+    source = extraction.source
     tail_claim = _find_tail_answer_claim(response, task_type)
 
     repaired = False
     if tail_claim and tail_claim != current:
         response = _replace_final_answer_line(response, tail_claim)
         current = tail_claim
+        source = "strict"
         repaired = True
 
-    return response, current, repaired
+    return response, current, source, repaired
 
 
 def _critic_aware_consensus(
@@ -470,12 +489,16 @@ def multi_agent_deliberate_single_gpu(
     rounds: list[DeliberationRound] = []
     # Track previous responses per actor (for deliberation prompts)
     actor_histories: dict[str, list[str]] = {a.name: [] for a in actors}
+    actor_answer_state: dict[str, Optional[str]] = {a.name: None for a in actors}
 
     for round_num in range(num_rounds):
         round_data = DeliberationRound(
             round_num=round_num,
             actor_responses={},
             actor_answers={},
+            raw_actor_answers={},
+            actor_answer_sources={},
+            actor_format_valid={},
             critic_feedbacks={},
             routed_feedbacks={},
         )
@@ -488,12 +511,23 @@ def multi_agent_deliberate_single_gpu(
             cached = _load_json(ckpt_path) if ckpt_path else None
             if cached and "actor_response" in cached:
                 actor_response = cached["actor_response"]
-                actor_response, actor_answer, repaired = _repair_actor_answer_consistency(
+                actor_response, actor_answer, answer_source, repaired = _repair_actor_answer_consistency(
                     actor_response,
                     task_type,
                 )
+                resolved = resolve_answer_for_round(
+                    response=actor_response,
+                    task_type=task_type,
+                    previous_answer=actor_answer_state.get(actor.name),
+                    extracted_answer=actor_answer,
+                    extraction_source=answer_source,
+                )
                 round_data.actor_responses[actor.name] = actor_response
-                round_data.actor_answers[actor.name] = actor_answer
+                round_data.raw_actor_answers[actor.name] = resolved.raw_extracted_answer
+                round_data.actor_answers[actor.name] = resolved.resolved_answer
+                round_data.actor_answer_sources[actor.name] = resolved.extract_source
+                round_data.actor_format_valid[actor.name] = resolved.format_valid
+                actor_answer_state[actor.name] = resolved.resolved_answer
                 actor_histories[actor.name].append(actor_response)
                 if repaired and ckpt_path:
                     _atomic_write_json(
@@ -527,12 +561,23 @@ def multi_agent_deliberate_single_gpu(
             # Store results
             for actor, response in zip(uncached_actors, actor_responses_batch):
                 response = response if isinstance(response, str) else str(response)
-                response, actor_answer, repaired = _repair_actor_answer_consistency(
+                response, actor_answer, answer_source, repaired = _repair_actor_answer_consistency(
                     response,
                     task_type,
                 )
+                resolved = resolve_answer_for_round(
+                    response=response,
+                    task_type=task_type,
+                    previous_answer=actor_answer_state.get(actor.name),
+                    extracted_answer=actor_answer,
+                    extraction_source=answer_source,
+                )
                 round_data.actor_responses[actor.name] = response
-                round_data.actor_answers[actor.name] = actor_answer
+                round_data.raw_actor_answers[actor.name] = resolved.raw_extracted_answer
+                round_data.actor_answers[actor.name] = resolved.resolved_answer
+                round_data.actor_answer_sources[actor.name] = resolved.extract_source
+                round_data.actor_format_valid[actor.name] = resolved.format_valid
+                actor_answer_state[actor.name] = resolved.resolved_answer
                 actor_histories[actor.name].append(response)
 
                 if ckpt_dir:
@@ -762,10 +807,10 @@ def _build_actor_prompt(
     if round_num > 0:
         prompt += (
             "\n\nRevision instruction:\n"
-            "You have received critic feedback above. "
-            "If it points out a valid mistake, revise your answer. "
-            "If you disagree, briefly explain why. "
-            "Do not ignore the feedback silently."
+            "You must make a fresh final decision for this round. "
+            "Even if you keep your previous answer, you MUST restate it on the first line as:\n"
+            "FINAL_ANSWER: <answer>\n"
+            "Then explain whether you changed or maintained the answer."
         )
 
     # Always append the strict output-format contract.

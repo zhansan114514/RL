@@ -12,6 +12,10 @@ from src.algorithms.reward import (
     compute_per_round_accuracy,
     compute_improvement_rate,
 )
+from src.evaluation.answer_resolution import (
+    compute_accuracy_mixed,
+    resolve_answer_for_round,
+)
 
 
 class TestExtractAnswer:
@@ -175,6 +179,35 @@ class TestImprovementRate:
         assert compute_improvement_rate(0.5, 0.0) == 0.0
 
 
+class TestStatefulAnswerResolution:
+    def test_actor_carry_forward_when_maintains_previous_answer(self):
+        resolved = resolve_answer_for_round(
+            response="I think my previous answer remains correct.",
+            extracted_answer=None,
+            previous_answer="A",
+            task_type="multiple_choice",
+        )
+        assert resolved.resolved_answer == "A"
+        assert resolved.extract_source == "carried_forward"
+        assert resolved.format_valid is False
+
+    def test_no_carry_forward_without_previous_answer(self):
+        resolved = resolve_answer_for_round(
+            response="I think the previous reasoning is good.",
+            extracted_answer=None,
+            previous_answer=None,
+            task_type="multiple_choice",
+        )
+        assert resolved.resolved_answer is None
+        assert resolved.extract_source == "none"
+
+    def test_mixed_task_types_accuracy(self):
+        preds = ["A", "YES", "42"]
+        labels = ["A", "Yes", "42.0"]
+        task_types = ["multiple_choice", "yes_no", "math"]
+        assert compute_accuracy_mixed(preds, labels, task_types) == 1.0
+
+
 class TestEvaluateBenchmark:
     """Test the evaluate_benchmark function with mocked inference."""
 
@@ -217,6 +250,49 @@ class TestEvaluateBenchmark:
             assert results["num_rounds"] == 3
             assert len(results["per_round_accuracy"]) == 3
             mock_deliberate_batch.assert_called_once()
+
+    def test_stateful_final_answer_does_not_become_empty(self):
+        from unittest.mock import MagicMock, patch
+        from src.evaluation.benchmarks import evaluate_benchmark
+
+        actor = MagicMock()
+        critic = MagicMock()
+
+        with patch("src.evaluation.benchmarks.deliberate_batch") as mock_deliberate_batch:
+            mock_deliberate_batch.return_value = [[
+                {
+                    "round": 0,
+                    "actor_response": "FINAL_ANSWER: A\nReasoning.",
+                    "critic_response": "Feedback",
+                },
+                {
+                    "round": 1,
+                    "actor_response": "I think my previous answer remains correct.",
+                    "critic_response": "Feedback",
+                },
+            ]]
+
+            results = evaluate_benchmark(
+                actor,
+                critic,
+                [
+                    {
+                        "question": "Q?",
+                        "answer": "A",
+                        "task_type": "multiple_choice",
+                    }
+                ],
+                "mmlu",
+                num_rounds=2,
+            )
+
+            assert results["final_accuracy"] == 1.0
+            assert results["per_round_accuracy"] == [1.0, 1.0]
+            assert results["sample_details"][0]["final_answer"] == "A"
+            assert (
+                results["sample_details"][0]["round_answer_sources"]
+                == ["strict", "carried_forward"]
+            )
 
 
 class TestExtractAnswerEdgeCases:

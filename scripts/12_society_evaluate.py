@@ -22,12 +22,11 @@ from __future__ import annotations
 import gc
 import json
 import logging
-import math
 import os
 import sys
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -77,16 +76,22 @@ STEP_DEFAULTS = {
 class EvalResult:
     """Result of society evaluation."""
     initial_accuracy: float
-    final_accuracy: float
+    final_consensus_accuracy: float
     per_round_accuracy: List[float]
-    improvement_rate: float
+    relative_improvement: float
     absolute_improvement: float
-    consensus_accuracy: float
+    mean_actor_final_accuracy: float
+    best_actor_oracle_accuracy: float
     diversity_score: float
     ci_95: tuple[float, float]
     num_samples: int
     eval_time_seconds: float
     sample_details: List[Dict[str, Any]]
+    format_metrics: Dict[str, Any] = field(default_factory=dict)
+    deliberation_dynamics: Dict[str, int] = field(default_factory=dict)
+    per_round_consensus_confidence: List[float] = field(default_factory=list)
+    critic_metrics: Dict[str, Any] = field(default_factory=dict)
+    ablation_metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -214,31 +219,14 @@ def compute_diversity(responses: List[str]) -> float:
 
 
 def _compute_ci(
-    predictions: List[str],
+    predictions: List[Optional[str]],
     labels: List[str],
-    task_type: str,
+    task_types: List[str],
 ) -> tuple:
-    """Compute accuracy and Wilson confidence interval margin."""
-    from src.algorithms.reward import math_answers_equal
+    """Compute mixed-task accuracy and Wilson confidence interval margin."""
+    from src.evaluation.answer_resolution import compute_accuracy_with_ci_mixed
 
-    correct = 0
-    for pred, label in zip(predictions, labels):
-        if task_type == "math":
-            if math_answers_equal(pred or "", label):
-                correct += 1
-        else:
-            if (pred or "").upper() == label.upper():
-                correct += 1
-
-    n = len(labels)
-    accuracy = correct / n if n > 0 else 0.0
-
-    z = 1.96
-    if n == 0:
-        return accuracy, 0.0
-    denom = 1 + z**2 / n
-    margin = z * math.sqrt((accuracy * (1 - accuracy) + z**2 / (4 * n)) / n) / denom
-    return accuracy, margin
+    return compute_accuracy_with_ci_mixed(predictions, labels, task_types)
 
 
 # ============================================================
@@ -462,12 +450,29 @@ def _run_deliberation_on_samples(
     )
 
     start_time = time.time()
-    all_final_answers = []
-    all_initial_answers = []
-    all_responses = []
+    from src.evaluation.answer_resolution import (
+        answers_match,
+        compute_accuracy_mixed,
+        source_rates,
+    )
+
+    labels = [s.get("answer", "") for s in samples]
+    task_types = [s.get("task_type", "yes_no") for s in samples]
+    per_round_answers: Dict[int, List[Optional[str]]] = {
+        r: [] for r in range(num_rounds)
+    }
+    per_round_confidences: Dict[int, List[float]] = {r: [] for r in range(num_rounds)}
+    actor_sources_by_round: Dict[int, List[str]] = {r: [] for r in range(num_rounds)}
+    critic_schema_valid = 0
+    critic_total = 0
+    critic_selected_total = 0
+    critic_invalid_errors: Counter[str] = Counter()
+    all_final_answers: List[Optional[str]] = []
+    all_initial_answers: List[Optional[str]] = []
+    final_actor_correct_counts = [0 for _ in samples]
+    final_actor_total_counts = [0 for _ in samples]
+    final_actor_any_correct = [False for _ in samples]
     details = []
-    # Track per-round consensus answers for per-round accuracy
-    per_round_answers: Dict[int, List[str]] = {r: [] for r in range(num_rounds)}
 
     for si, sample in enumerate(samples):
         if (si + 1) % 5 == 0 or si == 0:
@@ -486,64 +491,178 @@ def _run_deliberation_on_samples(
             router=router,
         )
 
-        final_answer = result.consensus_answer or ""
+        final_answer = result.consensus_answer
         all_final_answers.append(final_answer)
-        all_responses.append(final_answer)
 
-        # Collect per-round consensus answers
         for rnd in result.rounds:
             if rnd.round_num in per_round_answers:
-                per_round_answers[rnd.round_num].append(
-                    rnd.consensus_answer or final_answer
+                per_round_answers[rnd.round_num].append(rnd.consensus_answer)
+                per_round_confidences[rnd.round_num].append(rnd.consensus_confidence)
+                actor_sources_by_round[rnd.round_num].extend(
+                    rnd.actor_answer_sources.values()
                 )
 
+            for routed in rnd.routed_feedbacks.values():
+                selected = set(routed.selected_critics)
+                critic_selected_total += len(selected)
+                for feedback in routed.raw_feedbacks:
+                    critic_total += 1
+                    if feedback.schema_valid:
+                        critic_schema_valid += 1
+                    else:
+                        critic_invalid_errors.update(feedback.schema_errors)
+
         # Compute initial answer as majority vote across all actors (not just first)
-        initial_answer = final_answer
+        initial_answer = None
         if result.rounds:
             first_round = result.rounds[0]
             init_answers = [a for a in first_round.actor_answers.values() if a is not None]
             if init_answers:
                 counter = Counter(init_answers)
                 initial_answer = counter.most_common(1)[0][0]
-            else:
-                initial_answer = final_answer
         all_initial_answers.append(initial_answer)
+
+        final_actor_answers = result.final_answers or {}
+        for answer in final_actor_answers.values():
+            final_actor_total_counts[si] += 1
+            if answers_match(answer, sample.get("answer", ""), sample.get("task_type", "yes_no")):
+                final_actor_correct_counts[si] += 1
+                final_actor_any_correct[si] = True
+
+        initially_correct = answers_match(
+            initial_answer,
+            sample.get("answer", ""),
+            sample.get("task_type", "yes_no"),
+        )
+        finally_correct = answers_match(
+            final_answer,
+            sample.get("answer", ""),
+            sample.get("task_type", "yes_no"),
+        )
 
         details.append({
             "question": sample.get("question", ""),
+            "initial_answer": initial_answer,
             "final_answer": final_answer,
             "confidence": result.consensus_confidence,
             "ground_truth": sample.get("answer", ""),
+            "task_type": sample.get("task_type", "yes_no"),
+            "initially_correct": initially_correct,
+            "finally_correct": finally_correct,
+            "flipped_to_correct": not initially_correct and finally_correct,
+            "flipped_to_wrong": initially_correct and not finally_correct,
+            "actor_final_answers": final_actor_answers,
+            "rounds": [
+                {
+                    "round_num": rnd.round_num,
+                    "consensus_answer": rnd.consensus_answer,
+                    "consensus_confidence": rnd.consensus_confidence,
+                    "actor_answers": {
+                        name: {
+                            "raw": rnd.raw_actor_answers.get(name),
+                            "resolved": rnd.actor_answers.get(name),
+                            "source": rnd.actor_answer_sources.get(name, "none"),
+                            "format_valid": rnd.actor_format_valid.get(name, False),
+                        }
+                        for name in rnd.actor_responses
+                    },
+                }
+                for rnd in result.rounds
+            ],
         })
 
-    labels = [s.get("answer", "") for s in samples]
-    task_type = samples[0].get("task_type", "yes_no") if samples else "yes_no"
-
-    initial_acc, _ = _compute_ci(all_initial_answers, labels, task_type)
-    final_acc, ci_margin = _compute_ci(all_final_answers, labels, task_type)
+    initial_acc, _ = _compute_ci(all_initial_answers, labels, task_types)
+    final_acc, ci_margin = _compute_ci(all_final_answers, labels, task_types)
     ci_95 = (max(0, final_acc - ci_margin), min(1, final_acc + ci_margin))
 
-    # Compute true per-round accuracy from consensus answers
     round_accs = []
+    per_round_consensus_confidence = []
     for r in range(num_rounds):
         if per_round_answers[r]:
-            acc, _ = _compute_ci(per_round_answers[r], labels[:len(per_round_answers[r])], task_type)
+            acc, _ = _compute_ci(
+                per_round_answers[r],
+                labels[:len(per_round_answers[r])],
+                task_types[:len(per_round_answers[r])],
+            )
             round_accs.append(acc)
-    if not round_accs:
-        round_accs = [initial_acc, final_acc]
+            confidences = per_round_confidences[r]
+            per_round_consensus_confidence.append(
+                sum(confidences) / len(confidences) if confidences else 0.0
+            )
+
+    final_actor_total = sum(final_actor_total_counts)
+    mean_actor_final_accuracy = (
+        sum(final_actor_correct_counts) / final_actor_total
+        if final_actor_total else 0.0
+    )
+    best_actor_oracle_accuracy = (
+        sum(1 for value in final_actor_any_correct if value) / len(samples)
+        if samples else 0.0
+    )
+
+    format_metrics = {
+        "actor_answer_sources_by_round": {
+            str(r): source_rates(actor_sources_by_round[r])
+            for r in range(num_rounds)
+        },
+        "actor_strict_format_rate_by_round": [
+            source_rates(actor_sources_by_round[r])["strict_rate"]
+            for r in range(num_rounds)
+        ],
+        "actor_fallback_rate_by_round": [
+            source_rates(actor_sources_by_round[r])["fallback_rate"]
+            for r in range(num_rounds)
+        ],
+        "actor_carried_forward_rate_by_round": [
+            source_rates(actor_sources_by_round[r])["carried_forward_rate"]
+            for r in range(num_rounds)
+        ],
+        "actor_unresolved_rate_by_round": [
+            source_rates(actor_sources_by_round[r])["none_rate"]
+            for r in range(num_rounds)
+        ],
+    }
+
+    deliberation_dynamics = {
+        "stayed_correct": sum(
+            1 for d in details if d["initially_correct"] and d["finally_correct"]
+        ),
+        "flipped_to_correct": sum(1 for d in details if d["flipped_to_correct"]),
+        "flipped_to_wrong": sum(1 for d in details if d["flipped_to_wrong"]),
+        "stayed_wrong": sum(
+            1 for d in details if not d["initially_correct"] and not d["finally_correct"]
+        ),
+    }
+
+    critic_metrics = {
+        "critic_schema_valid_rate": (
+            critic_schema_valid / critic_total if critic_total else 0.0
+        ),
+        "critic_selected_rate": (
+            critic_selected_total / critic_total if critic_total else 0.0
+        ),
+        "critic_total_count": critic_total,
+        "critic_schema_valid_count": critic_schema_valid,
+        "critic_invalid_count_by_error": dict(critic_invalid_errors),
+    }
 
     return EvalResult(
         initial_accuracy=initial_acc,
-        final_accuracy=final_acc,
+        final_consensus_accuracy=final_acc,
         per_round_accuracy=round_accs,
-        improvement_rate=(final_acc - initial_acc) / initial_acc if initial_acc > 0 else 0.0,
+        relative_improvement=(final_acc - initial_acc) / initial_acc if initial_acc > 0 else 0.0,
         absolute_improvement=final_acc - initial_acc,
-        consensus_accuracy=final_acc,
-        diversity_score=compute_diversity(all_responses),
+        mean_actor_final_accuracy=mean_actor_final_accuracy,
+        best_actor_oracle_accuracy=best_actor_oracle_accuracy,
+        diversity_score=compute_diversity([answer or "" for answer in all_final_answers]),
         ci_95=ci_95,
         num_samples=len(samples),
         eval_time_seconds=time.time() - start_time,
         sample_details=details,
+        format_metrics=format_metrics,
+        deliberation_dynamics=deliberation_dynamics,
+        per_round_consensus_confidence=per_round_consensus_confidence,
+        critic_metrics=critic_metrics,
     )
 
 
@@ -553,24 +672,56 @@ def _build_results_payload(
 ) -> Dict[str, Any]:
     first_result = list(ablation_results.values())[0] if ablation_results else None
     main_result = ablation_results.get("A5_full_system") or first_result
+    main_metrics = {}
+    format_metrics = {}
+    deliberation_dynamics = {}
+    critic_metrics = {}
+    if main_result:
+        main_metrics = {
+            "initial_accuracy": main_result.initial_accuracy,
+            "final_consensus_accuracy": main_result.final_consensus_accuracy,
+            "absolute_improvement": main_result.absolute_improvement,
+            "relative_improvement": main_result.relative_improvement,
+            "ci_95": list(main_result.ci_95),
+            "mean_actor_final_accuracy": main_result.mean_actor_final_accuracy,
+            "best_actor_oracle_accuracy": main_result.best_actor_oracle_accuracy,
+        }
+        format_metrics = main_result.format_metrics
+        deliberation_dynamics = main_result.deliberation_dynamics
+        critic_metrics = main_result.critic_metrics
     return {
+        "main_metrics": main_metrics,
+        "format_metrics": format_metrics,
+        "deliberation_dynamics": deliberation_dynamics,
+        "critic_metrics": critic_metrics,
+        "per_round_accuracy": main_result.per_round_accuracy if main_result else [],
+        "per_round_consensus_confidence": (
+            main_result.per_round_consensus_confidence if main_result else []
+        ),
         "ablation_results": {
             name: {
                 "initial_accuracy": r.initial_accuracy,
-                "final_accuracy": r.final_accuracy,
+                "final_consensus_accuracy": r.final_consensus_accuracy,
                 "per_round_accuracy": r.per_round_accuracy,
-                "improvement_rate": r.improvement_rate,
+                "relative_improvement": r.relative_improvement,
                 "absolute_improvement": r.absolute_improvement,
-                "consensus_accuracy": r.consensus_accuracy,
+                "mean_actor_final_accuracy": r.mean_actor_final_accuracy,
+                "best_actor_oracle_accuracy": r.best_actor_oracle_accuracy,
                 "diversity_score": r.diversity_score,
                 "ci_95": list(r.ci_95),
                 "num_samples": r.num_samples,
                 "eval_time_seconds": r.eval_time_seconds,
+                "format_metrics": r.format_metrics,
+                "deliberation_dynamics": r.deliberation_dynamics,
+                "critic_metrics": r.critic_metrics,
+                "ablation_metadata": r.ablation_metadata,
             }
             for name, r in ablation_results.items()
         },
         "total_eval_time_seconds": total_time,
-        "sample_details": main_result.sample_details if main_result else [],
+        "sample_details_by_ablation": {
+            name: r.sample_details for name, r in ablation_results.items()
+        },
     }
 
 
@@ -582,6 +733,206 @@ def _save_results(
     os.makedirs(os.path.dirname(results_file), exist_ok=True)
     with open(results_file, "w") as f:
         json.dump(_build_results_payload(ablation_results, total_time), f, indent=2)
+
+
+def _mean(values: List[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def _std(values: List[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+    mean = _mean(values)
+    return (sum((value - mean) ** 2 for value in values) / len(values)) ** 0.5
+
+
+def _mean_list(lists: List[List[float]]) -> List[float]:
+    if not lists:
+        return []
+    width = max(len(values) for values in lists)
+    result = []
+    for i in range(width):
+        values = [items[i] for items in lists if i < len(items)]
+        result.append(_mean(values))
+    return result
+
+
+def _sum_counter_dicts(dicts: List[Dict[str, int]]) -> Dict[str, int]:
+    counter: Counter[str] = Counter()
+    for item in dicts:
+        counter.update(item or {})
+    return dict(counter)
+
+
+def _aggregate_source_metric_dicts(items: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not items:
+        return {}
+
+    aggregate: Dict[str, Any] = {}
+    total = sum(int(item.get("total", 0)) for item in items)
+    aggregate["total"] = total
+    for key in ("strict", "fallback", "carried_forward", "none"):
+        count_key = f"{key}_count"
+        rate_key = f"{key}_rate"
+        count = sum(int(item.get(count_key, 0)) for item in items)
+        aggregate[count_key] = count
+        aggregate[rate_key] = count / total if total else 0.0
+    return aggregate
+
+
+def _aggregate_format_metrics(results: List[EvalResult]) -> Dict[str, Any]:
+    if not results:
+        return {}
+
+    round_keys = sorted({
+        int(key)
+        for result in results
+        for key in result.format_metrics.get("actor_answer_sources_by_round", {})
+    })
+    sources_by_round = {}
+    for round_key in round_keys:
+        sources_by_round[str(round_key)] = _aggregate_source_metric_dicts([
+            result.format_metrics.get("actor_answer_sources_by_round", {}).get(
+                str(round_key),
+                {},
+            )
+            for result in results
+        ])
+
+    return {
+        "actor_answer_sources_by_round": sources_by_round,
+        "actor_strict_format_rate_by_round": [
+            sources_by_round[str(r)].get("strict_rate", 0.0)
+            for r in round_keys
+        ],
+        "actor_fallback_rate_by_round": [
+            sources_by_round[str(r)].get("fallback_rate", 0.0)
+            for r in round_keys
+        ],
+        "actor_carried_forward_rate_by_round": [
+            sources_by_round[str(r)].get("carried_forward_rate", 0.0)
+            for r in round_keys
+        ],
+        "actor_unresolved_rate_by_round": [
+            sources_by_round[str(r)].get("none_rate", 0.0)
+            for r in round_keys
+        ],
+    }
+
+
+def _aggregate_critic_metrics(results: List[EvalResult]) -> Dict[str, Any]:
+    critic_total = sum(
+        int(result.critic_metrics.get("critic_total_count", 0))
+        for result in results
+    )
+    critic_schema_valid = sum(
+        int(result.critic_metrics.get("critic_schema_valid_count", 0))
+        for result in results
+    )
+    selected_rate_sum = sum(
+        float(result.critic_metrics.get("critic_selected_rate", 0.0))
+        * int(result.critic_metrics.get("critic_total_count", 0))
+        for result in results
+    )
+    return {
+        "critic_schema_valid_rate": (
+            critic_schema_valid / critic_total if critic_total else 0.0
+        ),
+        "critic_selected_rate": (
+            selected_rate_sum / critic_total if critic_total else 0.0
+        ),
+        "critic_total_count": critic_total,
+        "critic_schema_valid_count": critic_schema_valid,
+        "critic_invalid_count_by_error": _sum_counter_dicts([
+            result.critic_metrics.get("critic_invalid_count_by_error", {})
+            for result in results
+        ]),
+    }
+
+
+def _aggregate_eval_results(
+    name: str,
+    component_results: List[tuple[Dict[str, Any], EvalResult]],
+) -> EvalResult:
+    """Aggregate repeated ablation runs into one mean/std result."""
+    results = [result for _, result in component_results]
+    if not results:
+        raise ValueError(f"Cannot aggregate empty ablation results for {name}")
+
+    final_values = [r.final_consensus_accuracy for r in results]
+    initial_values = [r.initial_accuracy for r in results]
+    relative_values = [r.relative_improvement for r in results]
+    absolute_values = [r.absolute_improvement for r in results]
+    mean_actor_values = [r.mean_actor_final_accuracy for r in results]
+    best_actor_values = [r.best_actor_oracle_accuracy for r in results]
+    diversity_values = [r.diversity_score for r in results]
+
+    final_mean = _mean(final_values)
+    final_std = _std(final_values)
+    initial_mean = _mean(initial_values)
+    relative_mean = _mean(relative_values)
+    absolute_mean = _mean(absolute_values)
+
+    component_summaries = []
+    for metadata, result in component_results:
+        component_summaries.append({
+            **metadata,
+            "initial_accuracy": result.initial_accuracy,
+            "final_consensus_accuracy": result.final_consensus_accuracy,
+            "relative_improvement": result.relative_improvement,
+            "absolute_improvement": result.absolute_improvement,
+            "mean_actor_final_accuracy": result.mean_actor_final_accuracy,
+            "best_actor_oracle_accuracy": result.best_actor_oracle_accuracy,
+            "ci_95": list(result.ci_95),
+            "eval_time_seconds": result.eval_time_seconds,
+        })
+
+    return EvalResult(
+        initial_accuracy=initial_mean,
+        final_consensus_accuracy=final_mean,
+        per_round_accuracy=_mean_list([r.per_round_accuracy for r in results]),
+        relative_improvement=relative_mean,
+        absolute_improvement=absolute_mean,
+        mean_actor_final_accuracy=_mean(mean_actor_values),
+        best_actor_oracle_accuracy=_mean(best_actor_values),
+        diversity_score=_mean(diversity_values),
+        ci_95=(
+            max(0.0, final_mean - 1.96 * final_std),
+            min(1.0, final_mean + 1.96 * final_std),
+        ),
+        num_samples=results[0].num_samples,
+        eval_time_seconds=sum(r.eval_time_seconds for r in results),
+        sample_details=[],
+        format_metrics=_aggregate_format_metrics(results),
+        deliberation_dynamics={
+            key: sum(result.deliberation_dynamics.get(key, 0) for result in results)
+            for key in (
+                "stayed_correct",
+                "flipped_to_correct",
+                "flipped_to_wrong",
+                "stayed_wrong",
+            )
+        },
+        per_round_consensus_confidence=_mean_list([
+            r.per_round_consensus_confidence for r in results
+        ]),
+        critic_metrics=_aggregate_critic_metrics(results),
+        ablation_metadata={
+            "name": name,
+            "aggregation": "mean_std_over_component_runs",
+            "num_component_runs": len(results),
+            "component_results": component_summaries,
+            "std": {
+                "initial_accuracy": _std(initial_values),
+                "final_consensus_accuracy": final_std,
+                "relative_improvement": _std(relative_values),
+                "absolute_improvement": _std(absolute_values),
+                "mean_actor_final_accuracy": _std(mean_actor_values),
+                "best_actor_oracle_accuracy": _std(best_actor_values),
+                "diversity_score": _std(diversity_values),
+            },
+        },
+    )
 
 
 # ============================================================
@@ -635,12 +986,29 @@ def run_all_evaluations(
 
     results: Dict[str, EvalResult] = {}
 
-    # Count total agents that will need LoRA across all ablation configs
-    # (A2-A5 use LoRA-enabled agents, A1 uses base model only)
-    total_agents_with_lora = len(all_actor_names) + len(all_critic_names)
+    # Load phase registries for A1-A3 ablations (pre-society-training LoRA)
+    phase_actors, phase_critics, phase_lora = _build_agent_configs_from_phase_registries(
+        actor_phase_dir=phase_actor_dir,
+        critic_phase_dir=phase_critic_dir,
+        base_model=base_model,
+    )
+    phase_actor_names = [a.name for a in phase_actors]
+    phase_critic_names = [c.name for c in phase_critics]
+
+    final_lora_paths = [
+        info.get("model_path", "")
+        for info in list(registry.get("actors", {}).values())
+        + list(registry.get("critics", {}).values())
+        if info.get("model_path", "")
+    ]
+    all_lora_paths = set(final_lora_paths) | set(phase_lora.values())
+    total_agents_with_lora = max(len(all_lora_paths), 1)
 
     logger.info(f"Loading base model ONCE: {base_model}")
-    logger.info(f"  LoRA agents: {total_agents_with_lora} ({len(all_actor_names)} actors + {len(all_critic_names)} critics)")
+    logger.info(
+        f"  LoRA adapters: {total_agents_with_lora} unique paths "
+        f"(final={len(final_lora_paths)}, phase={len(phase_lora)})"
+    )
     engine = VLLMInference(
         base_model,
         cuda_device=devices,
@@ -653,14 +1021,6 @@ def run_all_evaluations(
         max_lora_rank=max_lora_rank,
     )
 
-    # Load phase registries for A1-A3 ablations (pre-society-training LoRA)
-    phase_actors, phase_critics, phase_lora = _build_agent_configs_from_phase_registries(
-        actor_phase_dir=phase_actor_dir,
-        critic_phase_dir=phase_critic_dir,
-        base_model=base_model,
-    )
-    phase_actor_names = [a.name for a in phase_actors]
-    phase_critic_names = [c.name for c in phase_critics]
     logger.info(
         f"  Phase registries: {len(phase_actors)} actors, {len(phase_critics)} critics "
         f"(for A1-A3 ablations)"
@@ -678,116 +1038,248 @@ def run_all_evaluations(
                 router_min_confidence=router_min_confidence,
                 router_fallback_to_uniform=router_fallback_to_uniform,
             )
-            logger.info(f"  A0: initial={results['A0_base_model'].initial_accuracy:.3f} final={results['A0_base_model'].final_accuracy:.3f}")
+            logger.info(
+                "  A0: initial="
+                f"{results['A0_base_model'].initial_accuracy:.3f} "
+                "final_consensus="
+                f"{results['A0_base_model'].final_consensus_accuracy:.3f}"
+            )
             if results_file:
                 _save_results(results_file, results)
 
             # A1: 1 Actor + 1 Critic from phase registries (pre-society-training)
             # This is the true ACC-Collab baseline: independently diversified
             # single agent pair, NOT a subset of the jointly trained system.
-            logger.info("[A1] 1 phase-diversified Actor + 1 phase-diversified Critic (ACC-Collab baseline)...")
+            logger.info(
+                "[A1] All phase Actor x phase Critic single-pair runs "
+                "(ACC-Collab baseline)..."
+            )
             if phase_actors and phase_critics:
-                results["A1_acc_collab"] = _run_deliberation_on_samples(
-                    engine,
-                    [phase_actors[0]],
-                    [phase_critics[0]],
-                    samples, dataset_name,
-                    phase_lora, num_rounds, max_tokens, temperature,
-                    router_top_k=1,
-                    router_min_confidence=router_min_confidence,
-                    router_fallback_to_uniform=router_fallback_to_uniform,
+                component_results = []
+                for actor in phase_actors:
+                    for critic in phase_critics:
+                        logger.info(f"  A1 component: actor={actor.name}, critic={critic.name}")
+                        component_lora = {
+                            name: path
+                            for name, path in phase_lora.items()
+                            if name in {actor.name, critic.name}
+                        }
+                        component_result = _run_deliberation_on_samples(
+                            engine,
+                            [actor],
+                            [critic],
+                            samples, dataset_name,
+                            component_lora, num_rounds, max_tokens, temperature,
+                            router_top_k=1,
+                            router_min_confidence=router_min_confidence,
+                            router_fallback_to_uniform=router_fallback_to_uniform,
+                        )
+                        component_results.append((
+                            {"actor": actor.name, "critic": critic.name},
+                            component_result,
+                        ))
+                results["A1_acc_collab"] = _aggregate_eval_results(
+                    "A1_acc_collab",
+                    component_results,
                 )
             else:
-                logger.warning("  Phase registries empty, falling back to first agent from final registry")
+                logger.warning("  Phase registries empty, falling back to final registry single-pair sweep")
                 a_configs, c_configs, lora = _build_agent_configs(
                     registry,
-                    actor_names=[all_actor_names[0]],
-                    critic_names=[all_critic_names[0]],
                 )
-                results["A1_acc_collab"] = _run_deliberation_on_samples(
-                    engine, a_configs, c_configs, samples, dataset_name,
-                    lora, num_rounds, max_tokens, temperature,
-                    router_top_k=1,
-                    router_min_confidence=router_min_confidence,
-                    router_fallback_to_uniform=router_fallback_to_uniform,
+                component_results = []
+                for actor in a_configs:
+                    for critic in c_configs:
+                        component_lora = {
+                            name: path
+                            for name, path in lora.items()
+                            if name in {actor.name, critic.name}
+                        }
+                        component_result = _run_deliberation_on_samples(
+                            engine, [actor], [critic], samples, dataset_name,
+                            component_lora, num_rounds, max_tokens, temperature,
+                            router_top_k=1,
+                            router_min_confidence=router_min_confidence,
+                            router_fallback_to_uniform=router_fallback_to_uniform,
+                        )
+                        component_results.append((
+                            {"actor": actor.name, "critic": critic.name},
+                            component_result,
+                        ))
+                results["A1_acc_collab"] = _aggregate_eval_results(
+                    "A1_acc_collab",
+                    component_results,
                 )
-            logger.info(f"  A1: initial={results['A1_acc_collab'].initial_accuracy:.3f} final={results['A1_acc_collab'].final_accuracy:.3f}")
+            logger.info(
+                "  A1: initial="
+                f"{results['A1_acc_collab'].initial_accuracy:.3f} "
+                "final_consensus="
+                f"{results['A1_acc_collab'].final_consensus_accuracy:.3f} "
+                "+/- "
+                f"{results['A1_acc_collab'].ablation_metadata['std']['final_consensus_accuracy']:.3f}"
+            )
             if results_file:
                 _save_results(results_file, results)
 
             # A2: diverse Actors (phase 3) + 1 Critic (phase 4) — Actor diversity only
             # Uses PRE-society-training LoRA from phase 3/4 diversification.
             # Causal question: do diverse Actors improve over 1 Actor?
-            logger.info("[A2] Phase-diversified Actors + 1 phase-diversified Critic (Actor diversity)...")
+            logger.info(
+                "[A2] Phase-diversified Actors + each fixed phase Critic "
+                "(Actor diversity)..."
+            )
             if phase_actors and phase_critics:
-                a2_lora = dict(phase_lora)
-                # Keep only the first critic's lora
-                for cn in phase_critic_names[1:]:
-                    a2_lora.pop(cn, None)
-                results["A2_actor_diversity"] = _run_deliberation_on_samples(
-                    engine,
-                    phase_actors,
-                    [phase_critics[0]],
-                    samples, dataset_name,
-                    a2_lora, num_rounds, max_tokens, temperature,
-                    router_top_k=1,
-                    router_min_confidence=router_min_confidence,
-                    router_fallback_to_uniform=router_fallback_to_uniform,
+                component_results = []
+                actor_names = {actor.name for actor in phase_actors}
+                for critic in phase_critics:
+                    logger.info(f"  A2 component: critic={critic.name}")
+                    component_lora = {
+                        name: path
+                        for name, path in phase_lora.items()
+                        if name in actor_names or name == critic.name
+                    }
+                    component_result = _run_deliberation_on_samples(
+                        engine,
+                        phase_actors,
+                        [critic],
+                        samples, dataset_name,
+                        component_lora, num_rounds, max_tokens, temperature,
+                        router_top_k=1,
+                        router_min_confidence=router_min_confidence,
+                        router_fallback_to_uniform=router_fallback_to_uniform,
+                    )
+                    component_results.append((
+                        {
+                            "actors": [actor.name for actor in phase_actors],
+                            "critic": critic.name,
+                        },
+                        component_result,
+                    ))
+                results["A2_actor_diversity"] = _aggregate_eval_results(
+                    "A2_actor_diversity",
+                    component_results,
                 )
             else:
                 logger.warning("  Phase registries empty, falling back to final registry subset")
                 a_configs, _, a_lora = _build_agent_configs(
                     registry, actor_names=all_actor_names,
                 )
-                _, c_configs, c_lora = _build_agent_configs(
-                    registry, critic_names=[all_critic_names[0]],
+                _, c_configs, c_lora = _build_agent_configs(registry, critic_names=all_critic_names)
+                component_results = []
+                for critic in c_configs:
+                    component_lora = {
+                        **a_lora,
+                        **{critic.name: c_lora.get(critic.name, "")},
+                    }
+                    component_lora = {
+                        name: path for name, path in component_lora.items() if path
+                    }
+                    component_result = _run_deliberation_on_samples(
+                        engine, a_configs, [critic], samples, dataset_name,
+                        component_lora, num_rounds, max_tokens, temperature,
+                        router_top_k=1,
+                        router_min_confidence=router_min_confidence,
+                        router_fallback_to_uniform=router_fallback_to_uniform,
+                    )
+                    component_results.append((
+                        {
+                            "actors": [actor.name for actor in a_configs],
+                            "critic": critic.name,
+                        },
+                        component_result,
+                    ))
+                results["A2_actor_diversity"] = _aggregate_eval_results(
+                    "A2_actor_diversity",
+                    component_results,
                 )
-                results["A2_actor_diversity"] = _run_deliberation_on_samples(
-                    engine, a_configs, c_configs, samples, dataset_name,
-                    {**a_lora, **c_lora}, num_rounds, max_tokens, temperature,
-                    router_top_k=1,
-                    router_min_confidence=router_min_confidence,
-                    router_fallback_to_uniform=router_fallback_to_uniform,
-                )
-            logger.info(f"  A2: initial={results['A2_actor_diversity'].initial_accuracy:.3f} final={results['A2_actor_diversity'].final_accuracy:.3f}")
+            logger.info(
+                "  A2: initial="
+                f"{results['A2_actor_diversity'].initial_accuracy:.3f} "
+                "final_consensus="
+                f"{results['A2_actor_diversity'].final_consensus_accuracy:.3f} "
+                "+/- "
+                f"{results['A2_actor_diversity'].ablation_metadata['std']['final_consensus_accuracy']:.3f}"
+            )
             if results_file:
                 _save_results(results_file, results)
 
             # A3: 1 Actor (phase 3) + 5 Critics (phase 4) + Router — Critic specialization only
             # Uses PRE-society-training LoRA from phase 3/4 diversification.
             # Causal question: does Critic specialization + Router improve over 1 Critic?
-            logger.info("[A3] 1 phase-diversified Actor + 5 phase-diversified Critics + Router (Critic specialization)...")
+            logger.info(
+                "[A3] Each fixed phase Actor + phase-diversified Critics + Router "
+                "(Critic specialization)..."
+            )
             if phase_actors and phase_critics:
-                a3_lora = dict(phase_lora)
-                # Keep only the first actor's lora
-                for an in phase_actor_names[1:]:
-                    a3_lora.pop(an, None)
-                results["A3_critic_specialization"] = _run_deliberation_on_samples(
-                    engine,
-                    [phase_actors[0]],
-                    phase_critics,
-                    samples, dataset_name,
-                    a3_lora, num_rounds, max_tokens, temperature,
-                    router_top_k=2,
-                    router_min_confidence=router_min_confidence,
-                    router_fallback_to_uniform=router_fallback_to_uniform,
+                component_results = []
+                critic_names = {critic.name for critic in phase_critics}
+                for actor in phase_actors:
+                    logger.info(f"  A3 component: actor={actor.name}")
+                    component_lora = {
+                        name: path
+                        for name, path in phase_lora.items()
+                        if name == actor.name or name in critic_names
+                    }
+                    component_result = _run_deliberation_on_samples(
+                        engine,
+                        [actor],
+                        phase_critics,
+                        samples, dataset_name,
+                        component_lora, num_rounds, max_tokens, temperature,
+                        router_top_k=min(2, len(phase_critics)),
+                        router_min_confidence=router_min_confidence,
+                        router_fallback_to_uniform=router_fallback_to_uniform,
+                    )
+                    component_results.append((
+                        {
+                            "actor": actor.name,
+                            "critics": [critic.name for critic in phase_critics],
+                        },
+                        component_result,
+                    ))
+                results["A3_critic_specialization"] = _aggregate_eval_results(
+                    "A3_critic_specialization",
+                    component_results,
                 )
             else:
                 logger.warning("  Phase registries empty, falling back to final registry subset")
-                a_configs, _, a_lora = _build_agent_configs(
-                    registry, actor_names=[all_actor_names[0]],
+                a_configs, _, a_lora = _build_agent_configs(registry, actor_names=all_actor_names)
+                _, c_configs, c_lora = _build_agent_configs(registry, critic_names=all_critic_names)
+                component_results = []
+                for actor in a_configs:
+                    component_lora = {
+                        **{actor.name: a_lora.get(actor.name, "")},
+                        **c_lora,
+                    }
+                    component_lora = {
+                        name: path for name, path in component_lora.items() if path
+                    }
+                    component_result = _run_deliberation_on_samples(
+                        engine, [actor], c_configs, samples, dataset_name,
+                        component_lora, num_rounds, max_tokens, temperature,
+                        router_top_k=min(2, len(c_configs)),
+                        router_min_confidence=router_min_confidence,
+                        router_fallback_to_uniform=router_fallback_to_uniform,
+                    )
+                    component_results.append((
+                        {
+                            "actor": actor.name,
+                            "critics": [critic.name for critic in c_configs],
+                        },
+                        component_result,
+                    ))
+                results["A3_critic_specialization"] = _aggregate_eval_results(
+                    "A3_critic_specialization",
+                    component_results,
                 )
-                _, c_configs, c_lora = _build_agent_configs(
-                    registry, critic_names=all_critic_names,
-                )
-                results["A3_critic_specialization"] = _run_deliberation_on_samples(
-                    engine, a_configs, c_configs, samples, dataset_name,
-                    {**a_lora, **c_lora}, num_rounds, max_tokens, temperature,
-                    router_top_k=2,
-                    router_min_confidence=router_min_confidence,
-                    router_fallback_to_uniform=router_fallback_to_uniform,
-                )
-            logger.info(f"  A3: initial={results['A3_critic_specialization'].initial_accuracy:.3f} final={results['A3_critic_specialization'].final_accuracy:.3f}")
+            logger.info(
+                "  A3: initial="
+                f"{results['A3_critic_specialization'].initial_accuracy:.3f} "
+                "final_consensus="
+                f"{results['A3_critic_specialization'].final_consensus_accuracy:.3f} "
+                "+/- "
+                f"{results['A3_critic_specialization'].ablation_metadata['std']['final_consensus_accuracy']:.3f}"
+            )
             if results_file:
                 _save_results(results_file, results)
 
@@ -809,7 +1301,12 @@ def run_all_evaluations(
                 router_min_confidence=router_min_confidence,
                 router_fallback_to_uniform=router_fallback_to_uniform,
             )
-            logger.info(f"  A4: initial={results['A4_no_routing'].initial_accuracy:.3f} final={results['A4_no_routing'].final_accuracy:.3f}")
+            logger.info(
+                "  A4: initial="
+                f"{results['A4_no_routing'].initial_accuracy:.3f} "
+                "final_consensus="
+                f"{results['A4_no_routing'].final_consensus_accuracy:.3f}"
+            )
             if results_file:
                 _save_results(results_file, results)
 
@@ -828,7 +1325,12 @@ def run_all_evaluations(
                 router_min_confidence=router_min_confidence,
                 router_fallback_to_uniform=router_fallback_to_uniform,
             )
-            logger.info(f"  A5: initial={results['A5_full_system'].initial_accuracy:.3f} final={results['A5_full_system'].final_accuracy:.3f}")
+            logger.info(
+                "  A5: initial="
+                f"{results['A5_full_system'].initial_accuracy:.3f} "
+                "final_consensus="
+                f"{results['A5_full_system'].final_consensus_accuracy:.3f}"
+            )
             if results_file:
                 _save_results(results_file, results)
         else:
@@ -959,8 +1461,8 @@ def main():
     for name, result in ablation_results.items():
         logger.info(f"\n[{name}]")
         logger.info(f"  Initial Accuracy:  {result.initial_accuracy:.4f}")
-        logger.info(f"  Final Accuracy:    {result.final_accuracy:.4f}")
-        logger.info(f"  Improvement Rate:  {result.improvement_rate:.4f}")
+        logger.info(f"  Final Consensus Accuracy: {result.final_consensus_accuracy:.4f}")
+        logger.info(f"  Relative Improvement:     {result.relative_improvement:.4f}")
         logger.info(f"  Absolute Gain:     {result.absolute_improvement:+.4f}")
         logger.info(f"  95% CI:            ({result.ci_95[0]:.4f}, {result.ci_95[1]:.4f})")
         logger.info(f"  Diversity Score:   {result.diversity_score:.4f}")

@@ -756,13 +756,14 @@ class TestMultiAgentCriticRouting:
             "I first thought B. After checking the options, the correct answer is C."
         )
 
-        repaired, answer, changed = _repair_actor_answer_consistency(
+        repaired, answer, source, changed = _repair_actor_answer_consistency(
             response,
             "multiple_choice",
         )
 
         assert changed is True
         assert answer == "C"
+        assert source == "strict"
         assert repaired.startswith("FINAL_ANSWER: C")
 
     def test_critic_aware_consensus_breaks_actor_tie(self):
@@ -840,6 +841,76 @@ class TestMultiAgentCriticRouting:
         assert result.final_answers == {"actor_a": "A", "actor_b": "B"}
         assert result.consensus_answer == "B"
         assert result.rounds[0].consensus_weights["B"] > result.rounds[0].consensus_weights["A"]
+
+    def test_actor_answer_carries_forward_when_maintained(self):
+        """A later Actor response that maintains the previous answer should not erase it."""
+        from src.society.multi_deliberation import multi_agent_deliberate_single_gpu
+
+        class CarryForwardInferenceStub:
+            def __init__(self):
+                self.calls = 0
+
+            def generate(self, prompts, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    return ["FINAL_ANSWER: A\nReasoning."]
+                if self.calls == 2:
+                    return [
+                        "[Answer_Correct: yes]\n"
+                        "[Suggested_Final_Answer: A]\n"
+                        "[Error_Type: none]\n"
+                        "[Confidence: 0.9]\n"
+                        "[Critique]\n"
+                        "The answer is consistent."
+                    ]
+                if self.calls == 3:
+                    return ["I think my previous answer remains correct."]
+                return [
+                    "[Answer_Correct: yes]\n"
+                    "[Suggested_Final_Answer: A]\n"
+                    "[Error_Type: none]\n"
+                    "[Confidence: 0.9]\n"
+                    "[Critique]\n"
+                    "The answer is still consistent."
+                ]
+
+        actors = [
+            AgentConfig(
+                name="actor_direct",
+                role=AgentRole.ACTOR,
+                model_path="/models/base",
+                reasoning_style=ReasoningStyle.DIRECT,
+            )
+        ]
+        critics = [
+            AgentConfig(
+                name="critic_verification",
+                role=AgentRole.CRITIC,
+                model_path="/models/base",
+                error_specialty=CriticSkill.VERIFICATION,
+            )
+        ]
+        sample = {
+            "question": "Which option is correct?",
+            "choices": ["a", "b", "c", "d"],
+            "task_type": "multiple_choice",
+        }
+
+        result = multi_agent_deliberate_single_gpu(
+            inference_engine=CarryForwardInferenceStub(),
+            actors=actors,
+            critics=critics,
+            sample=sample,
+            dataset_name="mmlu",
+            num_rounds=2,
+            router=CriticRouter(top_k=1, min_confidence=0.0),
+        )
+
+        assert result.rounds[1].raw_actor_answers["actor_direct"] is None
+        assert result.rounds[1].actor_answers["actor_direct"] == "A"
+        assert result.rounds[1].actor_answer_sources["actor_direct"] == "carried_forward"
+        assert result.final_answers == {"actor_direct": "A"}
+        assert result.consensus_answer == "A"
 
 
 class TestSocietyAlternatingTrain:
