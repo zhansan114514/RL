@@ -193,6 +193,7 @@ step06_evaluate:
   router_min_confidence: 0.1
   router_require_schema_valid: true
   router_fallback_to_uniform: false
+  eval_batch_size: 8
 
 router:
   top_k: 2

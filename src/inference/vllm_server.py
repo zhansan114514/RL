@@ -68,6 +68,7 @@ class VLLMInference:
             "trust_remote_code": trust_remote_code,
             "enforce_eager": False,
             "disable_log_stats": True,
+            "enable_prefix_caching": True,
         }
         if enable_lora:
             self._init_kwargs["enable_lora"] = True

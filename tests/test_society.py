@@ -912,6 +912,77 @@ class TestMultiAgentCriticRouting:
         assert result.final_answers == {"actor_direct": "A"}
         assert result.consensus_answer == "A"
 
+    def test_batched_deliberation_produces_per_sample_results(self):
+        """Batched deliberation should return one result per sample."""
+        from src.society.multi_deliberation import multi_agent_deliberate_batched_single_gpu
+
+        call_log = []
+
+        class StubEngine:
+            supports_lora = False
+
+            def generate(self, prompts, **kwargs):
+                call_log.append(len(prompts))
+                return [f"FINAL_ANSWER: B\nReasoning {i}." for i in range(len(prompts))]
+
+        actors = [
+            AgentConfig(
+                name="actor_direct",
+                role=AgentRole.ACTOR,
+                model_path="/models/base",
+                reasoning_style=ReasoningStyle.DIRECT,
+            )
+        ]
+        critics = [
+            AgentConfig(
+                name="critic_verification",
+                role=AgentRole.CRITIC,
+                model_path="/models/base",
+                error_specialty=CriticSkill.VERIFICATION,
+            )
+        ]
+        samples = [
+            {
+                "question": "Q1?",
+                "choices": ["a", "b", "c", "d"],
+                "task_type": "multiple_choice",
+            },
+            {
+                "question": "Q2?",
+                "choices": ["a", "b", "c", "d"],
+                "task_type": "multiple_choice",
+            },
+        ]
+
+        results = multi_agent_deliberate_batched_single_gpu(
+            inference_engine=StubEngine(),
+            actors=actors,
+            critics=critics,
+            samples=samples,
+            dataset_name="mmlu",
+            num_rounds=1,
+            router=CriticRouter(top_k=1, min_confidence=0.0),
+        )
+
+        assert len(results) == 2
+        assert all(r.consensus_answer == "B" for r in results)
+        # Actor generation: 1 call with 2 prompts, Critic: 1 call with 2 prompts
+        assert 2 in call_log  # batched prompts
+
+    def test_batched_deliberation_empty_samples(self):
+        """Batched deliberation with empty sample list returns empty list."""
+        from src.society.multi_deliberation import multi_agent_deliberate_batched_single_gpu
+
+        results = multi_agent_deliberate_batched_single_gpu(
+            inference_engine=MagicMock(),
+            actors=[],
+            critics=[],
+            samples=[],
+            dataset_name="mmlu",
+            num_rounds=2,
+        )
+        assert results == []
+
 
 class TestSocietyAlternatingTrain:
     """Test alternating trainer state handoff between phases."""

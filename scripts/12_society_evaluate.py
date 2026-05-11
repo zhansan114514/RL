@@ -69,6 +69,7 @@ STEP_DEFAULTS = {
     "router_fallback_to_uniform": False,
     "sampling": None,
     "mmlu_load_mode": "by_subject",
+    "eval_batch_size": 1,
 }
 
 
@@ -436,9 +437,11 @@ def _run_deliberation_on_samples(
     router_uniform: bool = False,
     router_min_confidence: float = 0.1,
     router_fallback_to_uniform: bool = False,
+    eval_batch_size: int = 1,
 ) -> EvalResult:
     """Run deliberation on samples with a shared vLLM engine. No model loading."""
     from src.society.multi_deliberation import multi_agent_deliberate_single_gpu
+    from src.society.multi_deliberation import multi_agent_deliberate_batched_single_gpu
     from src.society.router import CriticRouter
 
     # Create router with the specified configuration
@@ -478,19 +481,53 @@ def _run_deliberation_on_samples(
         if (si + 1) % 5 == 0 or si == 0:
             logger.info(f"    Sample {si + 1}/{len(samples)}")
 
-        result = multi_agent_deliberate_single_gpu(
-            inference_engine=engine,
-            actors=actor_configs,
-            critics=critic_configs,
-            sample=sample,
-            dataset_name=dataset_name,
-            lora_paths=lora_paths,
-            num_rounds=num_rounds,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            router=router,
+    # ---- Choose single-sample or batched mode ----
+    if eval_batch_size > 1 and len(samples) > 1:
+        # Batched mode: process samples in chunks for higher GPU utilisation
+        logger.info(
+            f"  Using batched deliberation (batch_size={eval_batch_size})"
         )
+        all_results: List[Any] = [None] * len(samples)
+        for batch_start in range(0, len(samples), eval_batch_size):
+            batch = samples[batch_start:batch_start + eval_batch_size]
+            batch_results = multi_agent_deliberate_batched_single_gpu(
+                inference_engine=engine,
+                actors=actor_configs,
+                critics=critic_configs,
+                samples=batch,
+                dataset_name=dataset_name,
+                lora_paths=lora_paths,
+                num_rounds=num_rounds,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                router=router,
+            )
+            for j, result in enumerate(batch_results):
+                all_results[batch_start + j] = result
+            logger.info(
+                f"    Batch {batch_start + 1}-{batch_start + len(batch)}"
+                f"/{len(samples)} done"
+            )
+    else:
+        # Single-sample mode (backward compatible)
+        all_results = []
+        for sample in samples:
+            result = multi_agent_deliberate_single_gpu(
+                inference_engine=engine,
+                actors=actor_configs,
+                critics=critic_configs,
+                sample=sample,
+                dataset_name=dataset_name,
+                lora_paths=lora_paths,
+                num_rounds=num_rounds,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                router=router,
+            )
+            all_results.append(result)
 
+    # ---- Aggregate results ----
+    for si, (sample, result) in enumerate(zip(samples, all_results)):
         final_answer = result.consensus_answer
         all_final_answers.append(final_answer)
 
@@ -959,6 +996,7 @@ def run_all_evaluations(
     phase_actor_dir: str = "output/society/actors",
     phase_critic_dir: str = "output/society/critics",
     results_file: Optional[str] = None,
+    eval_batch_size: int = 1,
 ) -> Dict[str, EvalResult]:
     """Load base model ONCE, run all evaluations sharing the same engine.
 
@@ -985,6 +1023,14 @@ def run_all_evaluations(
     all_critic_names = list(registry.get("critics", {}).keys())
 
     results: Dict[str, EvalResult] = {}
+
+    # Local helper to avoid passing eval_batch_size to every call site
+    def _run(engine, ac, cc, samples, dn, lora, nr, mt, temp, **kw):
+        return _run_deliberation_on_samples(
+            engine, ac, cc, samples, dn, lora, nr, mt, temp,
+            eval_batch_size=eval_batch_size,
+            **kw,
+        )
 
     # Load phase registries for A1-A3 ablations (pre-society-training LoRA)
     phase_actors, phase_critics, phase_lora = _build_agent_configs_from_phase_registries(
@@ -1031,7 +1077,7 @@ def run_all_evaluations(
             # A0: Base model baseline (no training at all) — zero-training reference
             logger.info("[A0] Base model baseline (no LoRA, no training)...")
             a_configs, c_configs, lora = _build_base_agent_configs(base_model)
-            results["A0_base_model"] = _run_deliberation_on_samples(
+            results["A0_base_model"] = _run(
                 engine, a_configs, c_configs, samples, dataset_name,
                 lora, num_rounds, max_tokens, temperature,
                 router_top_k=1,
@@ -1064,7 +1110,7 @@ def run_all_evaluations(
                             for name, path in phase_lora.items()
                             if name in {actor.name, critic.name}
                         }
-                        component_result = _run_deliberation_on_samples(
+                        component_result = _run(
                             engine,
                             [actor],
                             [critic],
@@ -1095,7 +1141,7 @@ def run_all_evaluations(
                             for name, path in lora.items()
                             if name in {actor.name, critic.name}
                         }
-                        component_result = _run_deliberation_on_samples(
+                        component_result = _run(
                             engine, [actor], [critic], samples, dataset_name,
                             component_lora, num_rounds, max_tokens, temperature,
                             router_top_k=1,
@@ -1138,7 +1184,7 @@ def run_all_evaluations(
                         for name, path in phase_lora.items()
                         if name in actor_names or name == critic.name
                     }
-                    component_result = _run_deliberation_on_samples(
+                    component_result = _run(
                         engine,
                         phase_actors,
                         [critic],
@@ -1174,7 +1220,7 @@ def run_all_evaluations(
                     component_lora = {
                         name: path for name, path in component_lora.items() if path
                     }
-                    component_result = _run_deliberation_on_samples(
+                    component_result = _run(
                         engine, a_configs, [critic], samples, dataset_name,
                         component_lora, num_rounds, max_tokens, temperature,
                         router_top_k=1,
@@ -1220,7 +1266,7 @@ def run_all_evaluations(
                         for name, path in phase_lora.items()
                         if name == actor.name or name in critic_names
                     }
-                    component_result = _run_deliberation_on_samples(
+                    component_result = _run(
                         engine,
                         [actor],
                         phase_critics,
@@ -1254,7 +1300,7 @@ def run_all_evaluations(
                     component_lora = {
                         name: path for name, path in component_lora.items() if path
                     }
-                    component_result = _run_deliberation_on_samples(
+                    component_result = _run(
                         engine, [actor], c_configs, samples, dataset_name,
                         component_lora, num_rounds, max_tokens, temperature,
                         router_top_k=min(2, len(c_configs)),
@@ -1293,7 +1339,7 @@ def run_all_evaluations(
                 actor_names=all_actor_names,
                 critic_names=all_critic_names,
             )
-            results["A4_no_routing"] = _run_deliberation_on_samples(
+            results["A4_no_routing"] = _run(
                 engine, a_configs, c_configs, samples, dataset_name,
                 lora, num_rounds, max_tokens, temperature,
                 router_top_k=len(c_configs),  # Use ALL critics
@@ -1317,7 +1363,7 @@ def run_all_evaluations(
                 actor_names=all_actor_names,
                 critic_names=all_critic_names,
             )
-            results["A5_full_system"] = _run_deliberation_on_samples(
+            results["A5_full_system"] = _run(
                 engine, a_configs, c_configs, samples, dataset_name,
                 lora, num_rounds, max_tokens, temperature,
                 router_top_k=router_top_k,  # From config
@@ -1337,7 +1383,7 @@ def run_all_evaluations(
             # Single main evaluation with full system
             logger.info("[Main] Full system evaluation...")
             a_configs, c_configs, lora = _build_agent_configs(registry)
-            results["main"] = _run_deliberation_on_samples(
+            results["main"] = _run(
                 engine, a_configs, c_configs, samples, dataset_name,
                 lora, num_rounds, max_tokens, temperature,
                 router_top_k=router_top_k,
@@ -1440,6 +1486,7 @@ def main():
         phase_actor_dir=phase_actor_dir,
         phase_critic_dir=phase_critic_dir,
         results_file=results_file,
+        eval_batch_size=getattr(args, "eval_batch_size", 1),
     )
     total_time = time.time() - total_start
     logger.info(f"Total evaluation time: {total_time:.1f}s")
