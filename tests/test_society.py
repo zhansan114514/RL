@@ -1,1926 +1,238 @@
-"""
-Comprehensive tests for Phase 0 Society module.
+"""Tests for the natural multi-agent society stack."""
 
-Tests cover:
-1. agent_registry.py - AgentRegistry, AgentConfig, enums
-2. router.py - CriticRouter, parse_confidence, build_critic_feedback
-3. data_classifier.py - DataClassifier, API classification, ClassificationError
-4. diversity_split.py - DiversitySplit, style/error profile splitting
-5. inference_pipeline.py - InferencePipeline, voting strategies, ABLATION_CONFIGS
-6. Phase 0.1 integration - MATH/GSM answer extraction
-"""
+from __future__ import annotations
 
-import json
-import pytest
-from unittest.mock import patch, MagicMock
-from pathlib import Path
-import tempfile
-
-# Import all society modules
 from src.society.agent_registry import (
-    AgentRegistry,
     AgentConfig,
+    AgentRegistry,
     AgentRole,
-    ReasoningStyle,
     CriticSkill,
-    CRITIC_CONFIDENCE_SUFFIX,
+    ReasoningStyle,
+    resolve_critic_skill,
+    resolve_reasoning_style,
 )
-from src.society.router import (
-    CriticRouter,
-    CriticFeedback,
-    RoutedFeedback,
-    build_critic_feedback,
+from src.society.multi_deliberation import (
+    DeliberationRound,
+    _critic_aware_consensus,
+    multi_agent_deliberate_single_gpu,
 )
-from src.society.critic_schema import (
-    parse_confidence,
-    parse_answer_correct,
-)
-from src.society.data_classifier import (
-    DataClassifier,
-    ClassificationError,
-    classify_reasoning_style,
-    classify_error_profile,
-    check_api_available,
-    normalize_chat_api_url,
-    _parse_style_response,
-    _parse_error_profile_response,
-    _compute_sample_hash,
-)
-from src.society.diversity_split import DiversitySplit, RoutedTrainingItem
-from src.society.inference_pipeline import (
-    _majority_vote,
-    _weighted_vote,
-    _best_actor,
-    ABLATION_CONFIGS,
-    clone_registry_without_lora,
-)
-from src.algorithms.reward import extract_answer
-from src.data.preprocessor import generate_wrong_answer
+from src.society.router import CriticFeedback, CriticRouter, build_critic_feedback
 
 
-def valid_critic_response(
-    answer_correct: bool = False,
-    suggested: str = "B",
-    error_type: str = "verification",
-    confidence: float = 0.8,
-    critique: str = "The option mapping needs correction.",
-) -> str:
-    return (
-        f"[Answer_Correct: {'yes' if answer_correct else 'no'}]\n"
-        f"[Suggested_Final_Answer: {suggested}]\n"
-        f"[Error_Type: {error_type}]\n"
-        f"[Confidence: {confidence:.2f}]\n"
-        "[Critique]\n"
-        f"{critique}"
+class FakeEngine:
+    supports_lora = False
+
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.prompts = []
+
+    def generate(self, prompts, **kwargs):
+        self.prompts.extend(prompts)
+        count = len(prompts)
+        out = self.responses[:count]
+        self.responses = self.responses[count:]
+        assert len(out) == count
+        return out
+
+
+def test_agent_registry_builds_default_society():
+    registry = AgentRegistry.create_default(base_model_path="base")
+
+    assert [actor.reasoning_style for actor in registry.list_actors()] == [
+        ReasoningStyle.DIRECT,
+        ReasoningStyle.EVIDENCE,
+        ReasoningStyle.ELIMINATION,
+    ]
+    assert [critic.error_specialty for critic in registry.list_critics()] == [
+        CriticSkill.COMPUTATION,
+        CriticSkill.REASONING,
+        CriticSkill.KNOWLEDGE,
+        CriticSkill.GROUNDING,
+        CriticSkill.VERIFICATION,
+    ]
+
+
+def test_enum_resolution_is_strict_but_case_insensitive():
+    assert resolve_reasoning_style("Evidence") is ReasoningStyle.EVIDENCE
+    assert resolve_critic_skill("factual") is CriticSkill.KNOWLEDGE
+
+
+def test_build_critic_feedback_parses_field_level_judgement():
+    critic = AgentConfig(
+        name="critic_reasoning",
+        role=AgentRole.CRITIC,
+        model_path="base",
+        error_specialty=CriticSkill.REASONING,
     )
 
+    feedback = build_critic_feedback(
+        critic,
+        """The actor overlooks the decisive option wording.
+
+Judgement:
+Answer correct: no
+Suggested answer: C
+Confidence: 0.82""",
+        task_type="multiple_choice",
+    )
+
+    assert feedback.critic_name == "critic_reasoning"
+    assert feedback.skill == "reasoning"
+    assert feedback.answer_correct == "no"
+    assert feedback.suggested_answer == "C"
+    assert feedback.confidence == 0.82
+    assert feedback.usable_for_feedback
+    assert feedback.usable_for_routing
+    assert feedback.usable_for_consensus
+
+
+def test_router_selects_natural_feedback_without_schema_filter():
+    low_no_conf = CriticFeedback(
+        critic_name="critic_a",
+        skill="reasoning",
+        critique="Useful but low-information feedback.",
+        confidence=None,
+        answer_correct="unknown",
+        suggested_answer=None,
+        usable_for_feedback=True,
+        usable_for_routing=False,
+        usable_for_consensus=False,
+    )
+    high = CriticFeedback(
+        critic_name="critic_b",
+        skill="grounding",
+        critique="The passage contradicts the actor's answer.",
+        confidence=0.9,
+        answer_correct="no",
+        suggested_answer="B",
+        usable_for_feedback=True,
+        usable_for_routing=True,
+        usable_for_consensus=True,
+    )
+
+    decision = CriticRouter(top_k=1).route([low_no_conf, high])
+
+    assert decision.selected_feedbacks == [high]
+    assert "The passage contradicts" in decision.feedback_text
+    assert "confidence=" not in decision.feedback_text
+    assert "schema_valid" not in decision.feedback_text
+
+
+def test_router_default_score_parameter_affects_missing_confidence_feedback():
+    no_conf = CriticFeedback(
+        critic_name="critic_no_conf",
+        skill="reasoning",
+        critique="No confidence field, but useful critique.",
+        confidence=None,
+        answer_correct="unknown",
+        suggested_answer=None,
+        usable_for_feedback=True,
+        usable_for_routing=False,
+        usable_for_consensus=False,
+    )
+    low_conf = CriticFeedback(
+        critic_name="critic_low_conf",
+        skill="verification",
+        critique="Low confidence critique.",
+        confidence=0.2,
+        answer_correct="unknown",
+        suggested_answer=None,
+        usable_for_feedback=True,
+        usable_for_routing=True,
+        usable_for_consensus=False,
+    )
+
+    decision = CriticRouter(top_k=1, default_score=0.8).route([no_conf, low_conf])
+
+    assert decision.selected_feedbacks == [no_conf]
+
+
+def test_critic_aware_consensus_uses_actor_votes_and_critic_signals():
+    feedback = CriticFeedback(
+        critic_name="critic_reasoning",
+        skill="reasoning",
+        critique="Actor should switch to C.",
+        confidence=0.9,
+        answer_correct="no",
+        suggested_answer="C",
+        usable_for_feedback=True,
+        usable_for_routing=True,
+        usable_for_consensus=True,
+    )
+    round_data = DeliberationRound(
+        round_num=0,
+        actor_responses={"actor_direct": "The final result is A."},
+        actor_answers={"actor_direct": "A"},
+        actor_answer_sources={"actor_direct": "final_result"},
+        actor_parse_confidence={"actor_direct": 1.0},
+        critic_raw_responses={"actor_direct": {"critic_reasoning": feedback.raw_response}},
+        critic_feedbacks={"actor_direct": {"critic_reasoning": feedback}},
+        routed_feedbacks={"actor_direct": [feedback]},
+    )
 
-# ============================================================
-# 1. agent_registry.py Tests
-# ============================================================
+    answer, confidence, weights = _critic_aware_consensus(round_data, "multiple_choice")
 
-class TestAgentConfig:
-    """Test AgentConfig dataclass."""
+    assert answer == "A"
+    assert weights["A"] == 1.0
+    assert weights["C"] == 0.9
+    assert confidence > 0.5
 
-    def test_create_actor_config(self):
-        """Should create Actor config with reasoning style."""
-        config = AgentConfig(
-            name="actor_evidence",
-            role=AgentRole.ACTOR,
-            model_path="/models/base",
-            reasoning_style=ReasoningStyle.EVIDENCE,
-        )
-        assert config.name == "actor_evidence"
-        assert config.role == AgentRole.ACTOR
-        assert config.reasoning_style == ReasoningStyle.EVIDENCE
-        assert config.error_specialty is None
 
-    def test_create_critic_config(self):
-        """Should create Critic config with error specialty."""
-        config = AgentConfig(
-            name="critic_computation",
-            role=AgentRole.CRITIC,
-            model_path="/models/base",
-            error_specialty=CriticSkill.COMPUTATION,
-        )
-        assert config.role == AgentRole.CRITIC
-        assert config.error_specialty == CriticSkill.COMPUTATION
-        assert config.reasoning_style is None
-
-    def test_display_name_actor(self):
-        """Actor display_name should include reasoning style."""
-        config = AgentConfig(
-            name="actor_1",
-            role=AgentRole.ACTOR,
-            model_path="/models/base",
-            reasoning_style=ReasoningStyle.EVIDENCE,
-        )
-        assert config.display_name == "Actor-evidence"
-
-    def test_display_name_critic(self):
-        """Critic display_name should include error specialty."""
-        config = AgentConfig(
-            name="critic_1",
-            role=AgentRole.CRITIC,
-            model_path="/models/base",
-            error_specialty=CriticSkill.REASONING,
-        )
-        assert config.display_name == "Critic-reasoning"
-
-    def test_system_prompt_actor(self):
-        """Actor system prompt should be built from style."""
-        config = AgentConfig(
-            name="actor_1",
-            role=AgentRole.ACTOR,
-            model_path="/models/base",
-            reasoning_style=ReasoningStyle.DIRECT,
-        )
-        assert "direct reasoner" in config.system_prompt.lower()
-
-    def test_system_prompt_critic(self):
-        """Critic system prompt should include confidence suffix."""
-        config = AgentConfig(
-            name="critic_1",
-            role=AgentRole.CRITIC,
-            model_path="/models/base",
-            error_specialty=CriticSkill.VERIFICATION,
-        )
-        assert CRITIC_CONFIDENCE_SUFFIX in config.system_prompt
-        assert "[Confidence: 0.0-1.0]" in config.system_prompt
-        assert "[Suggested_Final_Answer:" in config.system_prompt
-        assert "[Error_Type:" in config.system_prompt
-
-    def test_to_dict(self):
-        """Should serialize to dictionary."""
-        config = AgentConfig(
-            name="test_actor",
-            role=AgentRole.ACTOR,
-            model_path="/models/base",
-            reasoning_style=ReasoningStyle.ELIMINATION,
-            temperature=0.5,
-            max_tokens=256,
-        )
-        d = config.to_dict()
-        assert d["name"] == "test_actor"
-        assert d["role"] == "actor"
-        assert d["reasoning_style"] == "elimination"
-        assert d["temperature"] == 0.5
-        assert d["max_tokens"] == 256
-
-    def test_from_dict(self):
-        """Should deserialize from dictionary."""
-        d = {
-            "name": "test_critic",
-            "role": "critic",
-            "model_path": "/models/base",
-            "lora_path": "/models/lora",
-            "error_specialty": "computation",
-            "temperature": 0.8,
-            "max_tokens": 512,
-            "system_prompt": "Test prompt",
-        }
-        config = AgentConfig.from_dict(d)
-        assert config.name == "test_critic"
-        assert config.role == AgentRole.CRITIC
-        assert config.error_specialty == CriticSkill.COMPUTATION
-        assert config.lora_path == "/models/lora"
-
-
-class TestAgentRegistry:
-    """Test AgentRegistry management."""
-
-    def test_register_agent(self):
-        """Should register an agent."""
-        registry = AgentRegistry()
-        config = AgentConfig(
-            name="actor_1",
-            role=AgentRole.ACTOR,
-            model_path="/models/base",
-        )
-        registry.register(config)
-        assert registry.get("actor_1") == config
-        assert len(registry) == 1
-
-    def test_list_actors(self):
-        """Should list only actors."""
-        registry = AgentRegistry()
-        registry.register(AgentConfig(
-            name="actor_1", role=AgentRole.ACTOR, model_path="/models/base",
-            reasoning_style=ReasoningStyle.EVIDENCE,
-        ))
-        registry.register(AgentConfig(
-            name="critic_1", role=AgentRole.CRITIC, model_path="/models/base",
-            error_specialty=CriticSkill.COMPUTATION,
-        ))
-        actors = registry.list_actors()
-        assert len(actors) == 1
-        assert actors[0].role == AgentRole.ACTOR
-
-    def test_list_critics(self):
-        """Should list only critics."""
-        registry = AgentRegistry()
-        registry.register(AgentConfig(
-            name="actor_1", role=AgentRole.ACTOR, model_path="/models/base",
-            reasoning_style=ReasoningStyle.EVIDENCE,
-        ))
-        registry.register(AgentConfig(
-            name="critic_1", role=AgentRole.CRITIC, model_path="/models/base",
-            error_specialty=CriticSkill.REASONING,
-        ))
-        critics = registry.list_critics()
-        assert len(critics) == 1
-        assert critics[0].role == AgentRole.CRITIC
-
-    def test_get_actor_by_style(self):
-        """Should get actor by reasoning style."""
-        registry = AgentRegistry()
-        registry.register(AgentConfig(
-            name="actor_1", role=AgentRole.ACTOR, model_path="/models/base",
-            reasoning_style=ReasoningStyle.DIRECT,
-        ))
-        actor = registry.get_actor_by_style(ReasoningStyle.DIRECT)
-        assert actor is not None
-        assert actor.reasoning_style == ReasoningStyle.DIRECT
-
-    def test_get_actor_by_style_not_found(self):
-        """Should return None if style not found."""
-        registry = AgentRegistry()
-        actor = registry.get_actor_by_style(ReasoningStyle.EVIDENCE)
-        assert actor is None
-
-    def test_get_critic_by_specialty(self):
-        """Should get critic by error specialty."""
-        registry = AgentRegistry()
-        registry.register(AgentConfig(
-            name="critic_1", role=AgentRole.CRITIC, model_path="/models/base",
-            error_specialty=CriticSkill.KNOWLEDGE,
-        ))
-        critic = registry.get_critic_by_specialty(CriticSkill.KNOWLEDGE)
-        assert critic is not None
-        assert critic.error_specialty == CriticSkill.KNOWLEDGE
-
-    def test_get_all_pairs(self):
-        """Should get all actor-critic pairs."""
-        registry = AgentRegistry()
-        registry.register(AgentConfig(
-            name="actor_1", role=AgentRole.ACTOR, model_path="/models/base",
-            reasoning_style=ReasoningStyle.EVIDENCE,
-        ))
-        registry.register(AgentConfig(
-            name="actor_2", role=AgentRole.ACTOR, model_path="/models/base",
-            reasoning_style=ReasoningStyle.DIRECT,
-        ))
-        registry.register(AgentConfig(
-            name="critic_1", role=AgentRole.CRITIC, model_path="/models/base",
-            error_specialty=CriticSkill.COMPUTATION,
-        ))
-        registry.register(AgentConfig(
-            name="critic_2", role=AgentRole.CRITIC, model_path="/models/base",
-            error_specialty=CriticSkill.REASONING,
-        ))
-        pairs = registry.get_all_pairs()
-        assert len(pairs) == 4  # 2 actors * 2 critics
-
-    def test_save_and_load(self):
-        """Should save and load registry from JSON."""
-        registry = AgentRegistry(base_model_path="/models/qwen")
-        registry.register(AgentConfig(
-            name="actor_1",
-            role=AgentRole.ACTOR,
-            model_path="/models/qwen",
-            reasoning_style=ReasoningStyle.EVIDENCE,
-        ))
-        registry.register(AgentConfig(
-            name="critic_1",
-            role=AgentRole.CRITIC,
-            model_path="/models/qwen",
-            error_specialty=CriticSkill.COMPUTATION,
-        ))
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            temp_path = f.name
-
-        try:
-            registry.save(temp_path)
-            loaded = AgentRegistry.load(temp_path)
-
-            assert loaded.base_model_path == "/models/qwen"
-            assert len(loaded) == 2
-            assert loaded.get("actor_1") is not None
-            assert loaded.get("critic_1") is not None
-        finally:
-            Path(temp_path).unlink(missing_ok=True)
-
-    def test_create_default(self):
-        """Should create default 3-actor + 5-critic setup."""
-        registry = AgentRegistry.create_default(base_model_path="/models/qwen")
-
-        assert len(registry.list_actors()) == 3
-        assert len(registry.list_critics()) == 5
-        assert len(registry) == 8
-
-        # Check all reasoning styles are present
-        actors = registry.list_actors()
-        actor_styles = {a.reasoning_style for a in actors}
-        assert actor_styles == set(ReasoningStyle)
-
-        # Check all error profiles are present
-        critics = registry.list_critics()
-        critic_specialties = {c.error_specialty for c in critics}
-        assert critic_specialties == set(CriticSkill)
-
-    def test_clone_registry_without_lora_preserves_agents(self):
-        """A0 baseline should use the same agents without adapters."""
-        registry = AgentRegistry.create_default(base_model_path="/models/qwen")
-        cloned = clone_registry_without_lora(registry)
-
-        assert len(cloned.list_actors()) == len(registry.list_actors())
-        assert len(cloned.list_critics()) == len(registry.list_critics())
-        assert all(agent.lora_path is None for agent in cloned.list_actors())
-        assert all(agent.lora_path is None for agent in cloned.list_critics())
-        assert all(agent.lora_path for agent in registry.list_actors())
-
-    def test_repr(self):
-        """String representation should show actor/critic counts."""
-        registry = AgentRegistry()
-        registry.register(AgentConfig(
-            name="actor_1", role=AgentRole.ACTOR, model_path="/models/base",
-            reasoning_style=ReasoningStyle.EVIDENCE,
-        ))
-        registry.register(AgentConfig(
-            name="critic_1", role=AgentRole.CRITIC, model_path="/models/base",
-            error_specialty=CriticSkill.COMPUTATION,
-        ))
-        assert "1 actors" in repr(registry)
-        assert "1 critics" in repr(registry)
-
-
-class TestEnums:
-    """Test enum definitions."""
-
-    def test_reasoning_style_values(self):
-        """ReasoningStyle should have correct values."""
-        assert ReasoningStyle.EVIDENCE.value == "evidence"
-        assert ReasoningStyle.DIRECT.value == "direct"
-        assert ReasoningStyle.ELIMINATION.value == "elimination"
-
-    def test_critic_skill_values(self):
-        """CriticSkill should have correct values."""
-        assert CriticSkill.COMPUTATION.value == "computation"
-        assert CriticSkill.REASONING.value == "reasoning"
-        assert CriticSkill.KNOWLEDGE.value == "knowledge"
-        assert CriticSkill.GROUNDING.value == "grounding"
-        assert CriticSkill.VERIFICATION.value == "verification"
-
-
-# ============================================================
-# 2. router.py Tests
-# ============================================================
-
-class TestParseConfidence:
-    """Test confidence parsing from Critic responses."""
-
-    def test_parse_confidence_standard(self):
-        """Should parse standard [Confidence: 0.X] format."""
-        assert parse_confidence(valid_critic_response(confidence=0.8)) == 0.8
-        assert parse_confidence(valid_critic_response(confidence=0.95)) == 0.95
-
-    def test_parse_confidence_case_insensitive(self):
-        """Should be case insensitive."""
-        assert parse_confidence(valid_critic_response(confidence=0.7).replace("[Confidence:", "[confidence:")) == 0.7
-        assert parse_confidence(valid_critic_response(confidence=0.6).replace("[Confidence:", "[CONFIDENCE:")) == 0.6
-
-    def test_parse_confidence_with_spaces(self):
-        """Should handle various spacing (but our regex is strict)."""
-        assert parse_confidence(valid_critic_response(confidence=0.5).replace("[Confidence: 0.50]", "[Confidence:0.5]")) == 0.5
-        assert parse_confidence("[ Confidence : 0.9 ]") is None
-
-    def test_parse_confidence_clamped(self):
-        """Should clamp to [0.0, 1.0] for valid numbers."""
-        assert parse_confidence(valid_critic_response(confidence=0.9).replace("[Confidence: 0.90]", "[Confidence: 1.5]")) == 1.0
-        assert parse_confidence("[Confidence: -0.5]") is None
-
-    def test_parse_confidence_invalid(self):
-        """Should return None for invalid format."""
-        assert parse_confidence("No confidence here") is None
-        assert parse_confidence("[Confidence: abc]") is None
-        assert parse_confidence("") is None
-
-
-class TestParseAnswerCorrect:
-    """Test answer correctness parsing from Critic responses."""
-
-    def test_parse_yes(self):
-        assert parse_answer_correct(valid_critic_response(answer_correct=True)) is True
-
-    def test_parse_no(self):
-        assert parse_answer_correct(valid_critic_response(answer_correct=False)) is False
-
-    def test_parse_case_insensitive(self):
-        assert parse_answer_correct(valid_critic_response(answer_correct=True).replace("[Answer_Correct: yes]", "[answer_correct: YES]")) is True
-        assert parse_answer_correct(valid_critic_response(answer_correct=False).replace("[Answer_Correct: no]", "[ANSWER_CORRECT: No]")) is False
-
-    def test_parse_with_surrounding_text(self):
-        text = "The solution has a reasoning error.\n[Answer_Correct: no]\n[Confidence: 0.85]"
-        assert parse_answer_correct(text) is None
-
-    def test_parse_missing_tag(self):
-        assert parse_answer_correct("No tag here") is None
-        assert parse_answer_correct("") is None
-
-    def test_parse_invalid_value(self):
-        assert parse_answer_correct("[Answer_Correct: maybe]") is None
-
-
-class TestBuildCriticFeedback:
-    """Test building CriticFeedback from raw response."""
-
-    def test_build_with_confidence(self):
-        """Should zero confidence when the verdict schema is incomplete."""
-        config = AgentConfig(
-            name="critic_1",
-            role=AgentRole.CRITIC,
-            model_path="/models/base",
-            error_specialty=CriticSkill.COMPUTATION,
-        )
-        response = "Check your math [Confidence: 0.8]"
-        feedback = build_critic_feedback(config, response)
-
-        assert feedback.critic_name == "critic_1"
-        assert feedback.error_specialty == CriticSkill.COMPUTATION
-        assert feedback.confidence == 0.0
-        assert feedback.feedback_text == response
-        assert feedback.answer_correct is None
-        assert feedback.schema_valid is False
-        assert "missing_verdict_block" in feedback.schema_errors
-        assert "missing_answer_correct" in feedback.schema_errors
-        assert feedback.raw_response == response
-
-    def test_build_without_confidence(self):
-        """Should not invent useful confidence when confidence is missing."""
-        config = AgentConfig(
-            name="critic_1",
-            role=AgentRole.CRITIC,
-            model_path="/models/base",
-            error_specialty=CriticSkill.REASONING,
-        )
-        response = "Check your reasoning"
-        feedback = build_critic_feedback(config, response)
-
-        assert feedback.confidence == 0.0
-        assert feedback.feedback_text == "Check your reasoning"
-        assert feedback.answer_correct is None
-        assert feedback.schema_valid is False
-
-    def test_build_with_answer_correct(self):
-        """Should parse a verdict-first complete Critic response."""
-        config = AgentConfig(
-            name="critic_1",
-            role=AgentRole.CRITIC,
-            model_path="/models/base",
-            error_specialty=CriticSkill.COMPUTATION,
-        )
-        response = (
-            "[Answer_Correct: no]\n"
-            "[Suggested_Final_Answer: B]\n"
-            "[Error_Type: computation]\n"
-            "[Confidence: 0.9]\n"
-            "[Critique]\n"
-            "The answer is wrong."
-        )
-        feedback = build_critic_feedback(config, response, actor_answer="A")
-
-        assert feedback.confidence == 0.9
-        assert feedback.answer_correct is False
-        assert feedback.suggested_answer == "B"
-        assert feedback.error_type == "computation"
-        assert feedback.schema_valid is True
-        assert "[Answer_Correct:" not in feedback.feedback_text
-        assert "[Confidence:" not in feedback.feedback_text
-
-    def test_build_marks_contradictory_verdict_invalid(self):
-        """Should reject high-confidence labels that contradict themselves."""
-        config = AgentConfig(
-            name="critic_1",
-            role=AgentRole.CRITIC,
-            model_path="/models/base",
-            error_specialty=CriticSkill.VERIFICATION,
-        )
-        response = (
-            "[Answer_Correct: yes]\n"
-            "[Suggested_Final_Answer: D]\n"
-            "[Error_Type: verification]\n"
-            "[Confidence: 0.95]\n"
-            "[Critique]\n"
-            "The actor is right."
-        )
-        feedback = build_critic_feedback(config, response, actor_answer="B")
-
-        assert feedback.confidence == 0.0
-        assert feedback.schema_valid is False
-        assert "contradiction_correct_with_different_suggestion" in feedback.schema_errors
-
-
-class TestCriticRouter:
-    """Test CriticRouter MoE-style routing."""
-
-    def test_route_empty_feedbacks(self):
-        """Should handle empty feedback list."""
-        router = CriticRouter()
-        result = router.route([])
-        assert result.feedback_text == ""
-        assert result.selected_critics == []
-        assert result.weights == []
-
-    def test_route_single_critic(self):
-        """Single critic should have weight 1.0."""
-        router = CriticRouter()
-        feedbacks = [
-            CriticFeedback(
-                critic_name="critic_1",
-                error_specialty=CriticSkill.COMPUTATION,
-                feedback_text="Check math",
-                confidence=0.8,
-            )
-        ]
-        result = router.route(feedbacks)
-
-        assert len(result.selected_critics) == 1
-        assert result.weights[0] == pytest.approx(1.0)
-
-    def test_route_top_k_selection(self):
-        """Should select top-k by confidence."""
-        router = CriticRouter(top_k=2)
-        feedbacks = [
-            CriticFeedback("c1", CriticSkill.COMPUTATION, "f1", 0.5),
-            CriticFeedback("c2", CriticSkill.REASONING, "f2", 0.9),
-            CriticFeedback("c3", CriticSkill.KNOWLEDGE, "f3", 0.7),
-            CriticFeedback("c4", CriticSkill.VERIFICATION, "f4", 0.6),
-        ]
-        result = router.route(feedbacks)
-
-        assert len(result.selected_critics) == 2
-        # Should select c2 (0.9) and c3 (0.7) or similar top 2
-        assert "c2" in result.selected_critics
-
-    def test_route_min_confidence_filter(self):
-        """Should filter by min_confidence."""
-        router = CriticRouter(min_confidence=0.5)
-        feedbacks = [
-            CriticFeedback("c1", CriticSkill.COMPUTATION, "f1", 0.3),
-            CriticFeedback("c2", CriticSkill.REASONING, "f2", 0.7),
-        ]
-        result = router.route(feedbacks)
-
-        assert len(result.selected_critics) == 1
-        assert "c2" in result.selected_critics
-
-    def test_route_fallback_to_uniform(self):
-        """Should fallback only among schema-valid feedbacks below threshold."""
-        router = CriticRouter(min_confidence=0.8, fallback_to_uniform=True)
-        feedbacks = [
-            CriticFeedback("c1", CriticSkill.COMPUTATION, "f1", 0.3),
-            CriticFeedback("c2", CriticSkill.REASONING, "f2", 0.5),
-        ]
-        result = router.route(feedbacks)
-
-        # With fallback, should still route
-        assert len(result.selected_critics) <= 2
-
-    def test_route_ignores_invalid_schema_feedback(self):
-        """Malformed feedback should not be selected even with high raw score."""
-        router = CriticRouter(top_k=2, min_confidence=0.0)
-        feedbacks = [
-            CriticFeedback("bad", CriticSkill.COMPUTATION, "bad", 0.99, schema_valid=False),
-            CriticFeedback("good", CriticSkill.REASONING, "good", 0.4, schema_valid=True),
-        ]
-        result = router.route(feedbacks)
-
-        assert result.selected_critics == ["good"]
-        assert result.weights == pytest.approx([1.0])
-
-    def test_route_no_fallback_returns_empty(self):
-        """Should return empty when all below min_confidence and no fallback."""
-        router = CriticRouter(min_confidence=0.8, fallback_to_uniform=False)
-        feedbacks = [
-            CriticFeedback("c1", CriticSkill.COMPUTATION, "f1", 0.3),
-        ]
-        result = router.route(feedbacks)
-
-        assert result.feedback_text == ""
-
-    def test_softmax_temperature(self):
-        """Higher temperature should make weights more uniform."""
-        router_low = CriticRouter(temperature=0.1)
-        router_high = CriticRouter(temperature=5.0)
-        feedbacks = [
-            CriticFeedback("c1", CriticSkill.COMPUTATION, "f1", 0.9),
-            CriticFeedback("c2", CriticSkill.REASONING, "f2", 0.1),
-        ]
-
-        result_low = router_low.route(feedbacks)
-        result_high = router_high.route(feedbacks)
-
-        # With top_k=2 (default), both critics are selected
-        # The weights are normalized after selection
-        # Low temp amplifies differences, high temp makes them more equal
-
-        # Just verify weights sum to 1
-        assert sum(result_low.weights) == pytest.approx(1.0)
-        assert sum(result_high.weights) == pytest.approx(1.0)
-
-        # With only 2 critics and top_k=2, both are always selected
-        # The temperature affects the softmax but with renormalization
-        # after selection, the effect is less pronounced
-        assert len(result_low.selected_critics) == 2
-        assert len(result_high.selected_critics) == 2
-
-
-class TestMultiAgentCriticRouting:
-    """Test integration between deliberation and critic router."""
-
-    def test_all_critics_generate_before_router_top_k(self):
-        """Router top_k should not pre-filter critic generation."""
-        from src.society.multi_deliberation import multi_agent_deliberate_single_gpu
-
-        class BatchInferenceStub:
-            def __init__(self):
-                self.calls = []
-
-            def generate(self, prompts, **kwargs):
-                self.calls.append(list(prompts))
-                if len(self.calls) == 1:
-                    return [
-                        "The passage supports the claim.\nFINAL_ANSWER: Yes"
-                        for _ in prompts
-                    ]
-
-                confidences = [0.2, 0.95, 0.8, 0.7, 0.3]
-                return [
-                    (
-                        "[Answer_Correct: yes]\n"
-                        "[Suggested_Final_Answer: YES]\n"
-                        "[Error_Type: none]\n"
-                        f"[Confidence: {confidences[i]}]\n"
-                        "[Critique]\n"
-                        f"feedback_{i}"
-                    )
-                    for i, _ in enumerate(prompts)
-                ]
-
-        actor = AgentConfig(
+def test_multi_agent_deliberation_keeps_raw_actor_response_and_routes_feedback():
+    actors = [
+        AgentConfig(
             name="actor_direct",
             role=AgentRole.ACTOR,
-            model_path="/models/base",
+            model_path="base",
             reasoning_style=ReasoningStyle.DIRECT,
         )
-        critics = [
-            AgentConfig(
-                name=f"critic_{skill.value}",
-                role=AgentRole.CRITIC,
-                model_path="/models/base",
-                error_specialty=skill,
-            )
-            for skill in [
-                CriticSkill.COMPUTATION,
-                CriticSkill.REASONING,
-                CriticSkill.KNOWLEDGE,
-                CriticSkill.GROUNDING,
-                CriticSkill.VERIFICATION,
-            ]
-        ]
-        sample = {
-            "question": "Is the sky blue?",
-            "passage": "The sky appears blue in daylight.",
-            "answer": "yes",
-            "task_type": "yes_no",
-        }
-        engine = BatchInferenceStub()
-
-        result = multi_agent_deliberate_single_gpu(
-            inference_engine=engine,
-            actors=[actor],
-            critics=critics,
-            sample=sample,
-            dataset_name="boolq",
-            num_rounds=1,
-            router=CriticRouter(top_k=2, min_confidence=0.0),
-        )
-
-        critic_call = engine.calls[1]
-        first_round = result.rounds[0]
-        routed = first_round.routed_feedbacks[actor.name]
-
-        assert len(critic_call) == 5
-        assert set(first_round.critic_feedbacks[actor.name]) == {
-            critic.name for critic in critics
-        }
-        assert len(routed.raw_feedbacks) == 5
-        assert routed.selected_critics == ["critic_reasoning", "critic_knowledge"]
-
-    def test_critic_prompt_requires_verdict_first_schema(self):
-        """Critic prompt should require structured verdict fields even with an empty system prompt."""
-        from src.society.multi_deliberation import _build_critic_prompt
-
-        critic = AgentConfig(
-            name="critic_plain",
+    ]
+    critics = [
+        AgentConfig(
+            name="critic_verification",
             role=AgentRole.CRITIC,
-            model_path="/models/base",
+            model_path="base",
             error_specialty=CriticSkill.VERIFICATION,
-            system_prompt="",
         )
-        critic.system_prompt = ""
-        sample = {
-            "question": "Pick one.",
-            "choices": ["a", "b", "c", "d"],
+    ]
+    engine = FakeEngine([
+        "Reasoning text.\nThe final result is A.",
+        """The answer is consistent.
+
+Judgement:
+Answer correct: yes
+Suggested answer: A
+Confidence: 0.7""",
+        "Revised reasoning.\nThe final result is B.",
+        """The actor changed incorrectly.
+
+Judgement:
+Answer correct: no
+Suggested answer: A
+Confidence: 0.9""",
+    ])
+
+    result = multi_agent_deliberate_single_gpu(
+        inference_engine=engine,
+        actors=actors,
+        critics=critics,
+        sample={
+            "question": "Pick A.",
+            "choices": ["A", "B", "C", "D"],
+            "answer": "A",
             "task_type": "multiple_choice",
-        }
-
-        prompt = _build_critic_prompt(
-            critic,
-            sample,
-            "mmlu",
-            "FINAL_ANSWER: A\nReasoning.",
-        )
-
-        assert "[Answer_Correct: yes or no]" in prompt
-        assert "[Suggested_Final_Answer: A or B or C or D or Yes or No or unknown]" in prompt
-        assert prompt.index("[Answer_Correct: yes or no]") < prompt.index("I am answering")
-
-    def test_actor_answer_consistency_repair(self):
-        """A later explicit answer correction should update FINAL_ANSWER."""
-        from src.society.multi_deliberation import _repair_actor_answer_consistency
-
-        response = (
-            "FINAL_ANSWER: B\n"
-            "I first thought B. After checking the options, the correct answer is C."
-        )
-
-        repaired, answer, source, changed = _repair_actor_answer_consistency(
-            response,
-            "multiple_choice",
-        )
-
-        assert changed is True
-        assert answer == "C"
-        assert source == "strict"
-        assert repaired.startswith("FINAL_ANSWER: C")
-
-    def test_critic_aware_consensus_breaks_actor_tie(self):
-        """Valid Critic suggestions should break a two-actor tie."""
-        from src.society.multi_deliberation import multi_agent_deliberate_single_gpu
-
-        class TieInferenceStub:
-            def __init__(self):
-                self.calls = []
-
-            def generate(self, prompts, **kwargs):
-                self.calls.append(list(prompts))
-                if len(self.calls) == 1:
-                    return [
-                        "FINAL_ANSWER: A\nReasoning for A.",
-                        "FINAL_ANSWER: B\nReasoning for B.",
-                    ]
-
-                if "FINAL_ANSWER: A" in prompts[0]:
-                    return [
-                        "[Answer_Correct: no]\n"
-                        "[Suggested_Final_Answer: B]\n"
-                        "[Error_Type: verification]\n"
-                        "[Confidence: 0.9]\n"
-                        "[Critique]\n"
-                        "The option mapping favors B."
-                    ]
-                return [
-                    "[Answer_Correct: yes]\n"
-                    "[Suggested_Final_Answer: B]\n"
-                    "[Error_Type: none]\n"
-                    "[Confidence: 0.9]\n"
-                    "[Critique]\n"
-                    "The answer is consistent."
-                ]
-
-        actors = [
-            AgentConfig(
-                name="actor_a",
-                role=AgentRole.ACTOR,
-                model_path="/models/base",
-                reasoning_style=ReasoningStyle.DIRECT,
-            ),
-            AgentConfig(
-                name="actor_b",
-                role=AgentRole.ACTOR,
-                model_path="/models/base",
-                reasoning_style=ReasoningStyle.EVIDENCE,
-            ),
-        ]
-        critics = [
-            AgentConfig(
-                name="critic_verification",
-                role=AgentRole.CRITIC,
-                model_path="/models/base",
-                error_specialty=CriticSkill.VERIFICATION,
-            )
-        ]
-        sample = {
-            "question": "Which option is correct?",
-            "choices": ["a", "b", "c", "d"],
-            "task_type": "multiple_choice",
-        }
-
-        result = multi_agent_deliberate_single_gpu(
-            inference_engine=TieInferenceStub(),
-            actors=actors,
-            critics=critics,
-            sample=sample,
-            dataset_name="mmlu",
-            num_rounds=1,
-            router=CriticRouter(top_k=1, min_confidence=0.0),
-        )
-
-        assert result.final_answers == {"actor_a": "A", "actor_b": "B"}
-        assert result.consensus_answer == "B"
-        assert result.rounds[0].consensus_weights["B"] > result.rounds[0].consensus_weights["A"]
-
-    def test_actor_answer_carries_forward_when_maintained(self):
-        """A later Actor response that maintains the previous answer should not erase it."""
-        from src.society.multi_deliberation import multi_agent_deliberate_single_gpu
-
-        class CarryForwardInferenceStub:
-            def __init__(self):
-                self.calls = 0
-
-            def generate(self, prompts, **kwargs):
-                self.calls += 1
-                if self.calls == 1:
-                    return ["FINAL_ANSWER: A\nReasoning."]
-                if self.calls == 2:
-                    return [
-                        "[Answer_Correct: yes]\n"
-                        "[Suggested_Final_Answer: A]\n"
-                        "[Error_Type: none]\n"
-                        "[Confidence: 0.9]\n"
-                        "[Critique]\n"
-                        "The answer is consistent."
-                    ]
-                if self.calls == 3:
-                    return ["I think my previous answer remains correct."]
-                return [
-                    "[Answer_Correct: yes]\n"
-                    "[Suggested_Final_Answer: A]\n"
-                    "[Error_Type: none]\n"
-                    "[Confidence: 0.9]\n"
-                    "[Critique]\n"
-                    "The answer is still consistent."
-                ]
-
-        actors = [
-            AgentConfig(
-                name="actor_direct",
-                role=AgentRole.ACTOR,
-                model_path="/models/base",
-                reasoning_style=ReasoningStyle.DIRECT,
-            )
-        ]
-        critics = [
-            AgentConfig(
-                name="critic_verification",
-                role=AgentRole.CRITIC,
-                model_path="/models/base",
-                error_specialty=CriticSkill.VERIFICATION,
-            )
-        ]
-        sample = {
-            "question": "Which option is correct?",
-            "choices": ["a", "b", "c", "d"],
-            "task_type": "multiple_choice",
-        }
-
-        result = multi_agent_deliberate_single_gpu(
-            inference_engine=CarryForwardInferenceStub(),
-            actors=actors,
-            critics=critics,
-            sample=sample,
-            dataset_name="mmlu",
-            num_rounds=2,
-            router=CriticRouter(top_k=1, min_confidence=0.0),
-        )
-
-        assert result.rounds[1].raw_actor_answers["actor_direct"] is None
-        assert result.rounds[1].actor_answers["actor_direct"] == "A"
-        assert result.rounds[1].actor_answer_sources["actor_direct"] == "carried_forward"
-        assert result.final_answers == {"actor_direct": "A"}
-        assert result.consensus_answer == "A"
-
-    def test_batched_deliberation_produces_per_sample_results(self):
-        """Batched deliberation should return one result per sample."""
-        from src.society.multi_deliberation import multi_agent_deliberate_batched_single_gpu
-
-        call_log = []
-
-        class StubEngine:
-            supports_lora = False
-
-            def generate(self, prompts, **kwargs):
-                call_log.append(len(prompts))
-                return [f"FINAL_ANSWER: B\nReasoning {i}." for i in range(len(prompts))]
-
-        actors = [
-            AgentConfig(
-                name="actor_direct",
-                role=AgentRole.ACTOR,
-                model_path="/models/base",
-                reasoning_style=ReasoningStyle.DIRECT,
-            )
-        ]
-        critics = [
-            AgentConfig(
-                name="critic_verification",
-                role=AgentRole.CRITIC,
-                model_path="/models/base",
-                error_specialty=CriticSkill.VERIFICATION,
-            )
-        ]
-        samples = [
-            {
-                "question": "Q1?",
-                "choices": ["a", "b", "c", "d"],
-                "task_type": "multiple_choice",
-            },
-            {
-                "question": "Q2?",
-                "choices": ["a", "b", "c", "d"],
-                "task_type": "multiple_choice",
-            },
-        ]
-
-        results = multi_agent_deliberate_batched_single_gpu(
-            inference_engine=StubEngine(),
-            actors=actors,
-            critics=critics,
-            samples=samples,
-            dataset_name="mmlu",
-            num_rounds=1,
-            router=CriticRouter(top_k=1, min_confidence=0.0),
-        )
-
-        assert len(results) == 2
-        assert all(r.consensus_answer == "B" for r in results)
-        # Actor generation: 1 call with 2 prompts, Critic: 1 call with 2 prompts
-        assert 2 in call_log  # batched prompts
-
-    def test_batched_deliberation_empty_samples(self):
-        """Batched deliberation with empty sample list returns empty list."""
-        from src.society.multi_deliberation import multi_agent_deliberate_batched_single_gpu
-
-        results = multi_agent_deliberate_batched_single_gpu(
-            inference_engine=MagicMock(),
-            actors=[],
-            critics=[],
-            samples=[],
-            dataset_name="mmlu",
-            num_rounds=2,
-        )
-        assert results == []
-
-
-class TestSocietyAlternatingTrain:
-    """Test alternating trainer state handoff between phases."""
-
-    def test_build_lora_adapters_raises_when_required_lora_missing(
-        self, monkeypatch
-    ):
-        """Agents with lora_path must not silently fall back to base model."""
-        from src.society import society_trainer, multi_deliberation
-        from src.society.multi_deliberation import LoRAError
-
-        actor = AgentConfig(
-            name="actor_direct",
-            role=AgentRole.ACTOR,
-            model_path="/models/base",
-            lora_path="/missing/actor_adapter",
-            reasoning_style=ReasoningStyle.DIRECT,
-        )
-
-        def fake_load_lora_adapter(engine, lora_path):
-            raise LoRAError("adapter_config.json not found")
-
-        monkeypatch.setattr(
-            multi_deliberation, "_load_lora_adapter", fake_load_lora_adapter
-        )
-
-        with pytest.raises(
-            LoRAError,
-            match="actor_direct.*missing/actor_adapter.*adapter_config",
-        ):
-            society_trainer._build_lora_adapters(object(), [actor])
-
-    def test_phase_handoff_uses_newly_trained_lora_paths(self, tmp_path, monkeypatch):
-        """Phase B should see Phase A critics; next Phase A should see Phase B actors."""
-        from src.society import society_trainer
-
-        registry = AgentRegistry(base_model_path="/models/base")
-        registry.register(AgentConfig(
-            name="actor_direct",
-            role=AgentRole.ACTOR,
-            model_path="/models/base",
-            lora_path="/initial/actor",
-            reasoning_style=ReasoningStyle.DIRECT,
-        ))
-        registry.register(AgentConfig(
-            name="critic_computation",
-            role=AgentRole.CRITIC,
-            model_path="/models/base",
-            lora_path="/initial/critic",
-            error_specialty=CriticSkill.COMPUTATION,
-        ))
-
-        pair_generation_calls = []
-
-        def fake_generate_critic_pairs_algorithm1(**kwargs):
-            pair_generation_calls.append({
-                "phase": "critic",
-                "actor_paths": [
-                    actor.lora_path for actor in kwargs["actors"]
-                ],
-                "critic_path": kwargs["critic"].lora_path,
-            })
-            return [{
-                "sample": {"question": "1+1?", "answer": "2", "task_type": "math"},
-                "chosen": "correct feedback",
-                "rejected": "incorrect feedback",
-            }]
-
-        def fake_generate_actor_pairs_algorithm1(**kwargs):
-            pair_generation_calls.append({
-                "phase": "actor",
-                "actor_path": kwargs["actor"].lora_path,
-                "critic_paths": [
-                    critic.lora_path for critic in kwargs["critics"]
-                ],
-            })
-            return [{
-                "sample": {"question": "1+1?", "answer": "2", "task_type": "math"},
-                "chosen": "correct answer",
-                "rejected": "incorrect answer",
-            }]
-
-        def fake_run_dpo_training(**kwargs):
-            return f"{kwargs['output_dir']}/adapter"
-
-        monkeypatch.setattr(
-            society_trainer, "_generate_critic_pairs_algorithm1",
-            fake_generate_critic_pairs_algorithm1,
-        )
-        monkeypatch.setattr(
-            society_trainer, "_generate_actor_pairs_algorithm1",
-            fake_generate_actor_pairs_algorithm1,
-        )
-        monkeypatch.setattr(
-            society_trainer, "_run_dpo_training", fake_run_dpo_training
-        )
-        monkeypatch.setattr(society_trainer, "_cleanup_gpu", lambda: None)
-
-        result = society_trainer.society_alternating_train(
-            registry=registry,
-            dataset=[{"question": "1+1?", "answer": "2", "task_type": "math"}],
-            dataset_name="math",
-            output_base_dir=str(tmp_path),
-            num_iterations=2,
-            min_pairs_per_critic=1,
-        )
-
-        critic_iter0 = f"{tmp_path}/critics/critic_computation/iter_0/adapter"
-        actor_iter0 = f"{tmp_path}/actors/actor_direct/iter_0/adapter"
-        critic_iter1 = f"{tmp_path}/critics/critic_computation/iter_1/adapter"
-        actor_iter1 = f"{tmp_path}/actors/actor_direct/iter_1/adapter"
-
-        actor_phase_calls = [
-            call for call in pair_generation_calls
-            if call["phase"] == "actor"
-        ]
-        critic_phase_calls = [
-            call for call in pair_generation_calls
-            if call["phase"] == "critic"
-        ]
-
-        assert actor_phase_calls[0]["critic_paths"] == [critic_iter0]
-        assert critic_phase_calls[1]["actor_paths"] == [actor_iter0]
-        assert result.critic_paths["critic_computation"] == critic_iter1
-        assert result.actor_paths["actor_direct"] == actor_iter1
-        assert registry.get("critic_computation").lora_path == critic_iter1
-        assert registry.get("actor_direct").lora_path == actor_iter1
-
-
-# ============================================================
-# 3. data_classifier.py Tests
-# ============================================================
-
-class TestClassificationError:
-    """Test that ClassificationError is raised when API is unavailable."""
-
-    def test_style_raises_when_no_api_key(self):
-        """Should raise ClassificationError when GLM_API_KEY is not set."""
-        with patch("src.society.data_classifier.DEFAULT_API_KEY", ""):
-            with patch("src.society.data_classifier._compute_sample_hash", return_value="unique_hash"):
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    with pytest.raises(ClassificationError, match="GLM_API_KEY"):
-                        classify_reasoning_style(
-                            response="Some response",
-                            question="Some question",
-                            use_api=True,
-                            cache_dir=tmpdir,
-                        )
-
-    def test_error_profile_raises_when_no_api_key(self):
-        """Should raise ClassificationError when GLM_API_KEY is not set."""
-        with patch("src.society.data_classifier.DEFAULT_API_KEY", ""):
-            with patch("src.society.data_classifier._compute_sample_hash", return_value="unique_hash"):
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    with pytest.raises(ClassificationError, match="GLM_API_KEY"):
-                        classify_error_profile(
-                            response="Some response",
-                            question="Some question",
-                            use_api=True,
-                            cache_dir=tmpdir,
-                        )
-
-    def test_style_raises_on_unparseable_api_response(self):
-        """Should raise ClassificationError when API response cannot be parsed."""
-        with patch("src.society.data_classifier._call_api", return_value="UNKNOWN_STYLE"):
-            with patch("src.society.data_classifier._compute_sample_hash", return_value="unique_hash"):
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    with pytest.raises(ClassificationError, match="Could not parse"):
-                        classify_reasoning_style(
-                            response="Some response",
-                            question="Some question",
-                            use_api=True,
-                            cache_dir=tmpdir,
-                        )
-
-    def test_api_failure_raises(self):
-        """Should raise ClassificationError when API call fails."""
-        with patch("src.society.data_classifier._call_api", side_effect=ClassificationError("Connection refused")):
-            with patch("src.society.data_classifier._compute_sample_hash", return_value="unique_hash"):
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    with pytest.raises(ClassificationError):
-                        classify_reasoning_style(
-                            response="Some response",
-                            question="Some question",
-                            use_api=True,
-                            cache_dir=tmpdir,
-                        )
-
-    def test_call_api_retries_timeout_then_succeeds(self):
-        """Transient timeouts should be retried before failing classification."""
-        import requests
-        from src.society import data_classifier
-
-        first = requests.exceptions.Timeout("slow")
-        response = MagicMock()
-        response.raise_for_status.return_value = None
-        response.json.return_value = {
-            "choices": [{"message": {"content": "EVIDENCE"}}],
-        }
-
-        with patch("requests.post", side_effect=[first, response]) as mock_post:
-            with patch("src.society.data_classifier.time.sleep") as mock_sleep:
-                result = data_classifier._call_api(
-                    "prompt",
-                    api_key="key",
-                    request_timeout=1,
-                    max_retries=2,
-                    retry_delay=0,
-                )
-
-        assert result == "EVIDENCE"
-        assert mock_post.call_count == 2
-        mock_sleep.assert_not_called()
-
-    def test_call_api_does_not_retry_unauthorized(self):
-        """Permanent HTTP errors should fail immediately."""
-        import requests
-        from src.society import data_classifier
-
-        response = MagicMock(status_code=401)
-        error = requests.exceptions.HTTPError("401 Client Error")
-        error.response = response
-        response.raise_for_status.side_effect = error
-
-        with patch("requests.post", return_value=response) as mock_post:
-            with pytest.raises(ClassificationError, match="API HTTP error"):
-                data_classifier._call_api(
-                    "prompt",
-                    api_key="key",
-                    request_timeout=1,
-                    max_retries=5,
-                    retry_delay=0,
-                )
-
-        assert mock_post.call_count == 1
-
-    def test_check_api_available_no_key(self):
-        """check_api_available should return False when no key is set."""
-        with patch("src.society.data_classifier.DEFAULT_API_KEY", ""):
-            available, reason = check_api_available()
-            assert available is False
-            assert "GLM_API_KEY" in reason
-
-
-class TestAPIConfig:
-    """Test OpenAI-compatible API configuration helpers."""
-
-    def test_normalize_chat_api_url(self):
-        assert normalize_chat_api_url("https://api.labforge.top") == (
-            "https://api.labforge.top/v1/chat/completions"
-        )
-        assert normalize_chat_api_url("https://api.labforge.top/v1") == (
-            "https://api.labforge.top/v1/chat/completions"
-        )
-        assert normalize_chat_api_url("https://api.labforge.top/v1/chat/completions") == (
-            "https://api.labforge.top/v1/chat/completions"
-        )
-
-
-class TestParseStyleResponse:
-    """Test parsing API response to ReasoningStyle."""
-
-    def test_parse_evidence(self):
-        assert _parse_style_response("EVIDENCE") == ReasoningStyle.EVIDENCE
-        assert _parse_style_response("evidence") == ReasoningStyle.EVIDENCE
-        assert _parse_style_response("The style is EVIDENCE") == ReasoningStyle.EVIDENCE
-
-    def test_parse_elimination(self):
-        assert _parse_style_response("ELIMINATION") == ReasoningStyle.ELIMINATION
-        assert _parse_style_response("elimination") == ReasoningStyle.ELIMINATION
-
-    def test_parse_direct(self):
-        assert _parse_style_response("DIRECT") == ReasoningStyle.DIRECT
-        assert _parse_style_response("direct") == ReasoningStyle.DIRECT
-
-    def test_parse_invalid(self):
-        assert _parse_style_response("INVALID") is None
-        assert _parse_style_response("") is None
-
-
-class TestParseErrorResponse:
-    """Test parsing API response to error profile."""
-
-    def test_parse_computation(self):
-        result = _parse_error_profile_response(json.dumps({
-            "scores": {"computation": 0.9, "reasoning": 0.1, "knowledge": 0.0, "grounding": 0.0, "verification": 0.0},
-            "primary": "computation",
-            "secondary": [],
-            "confidence": 0.8,
-            "evidence": "calc",
-        }))
-        assert result.primary == "computation"
-        assert result.scores["computation"] == 0.9
-
-    def test_parse_reasoning(self):
-        result = _parse_error_profile_response(json.dumps({
-            "scores": {"reasoning": 0.8},
-            "primary": "reasoning",
-            "secondary": [],
-            "confidence": 0.7,
-        }))
-        assert result.primary == "reasoning"
-
-    def test_parse_knowledge(self):
-        result = _parse_error_profile_response(json.dumps({
-            "scores": {"knowledge": 0.8},
-            "primary": "knowledge",
-            "secondary": ["grounding"],
-            "confidence": 0.7,
-        }))
-        assert result.primary == "knowledge"
-
-    def test_parse_verification(self):
-        result = _parse_error_profile_response(json.dumps({
-            "scores": {"verification": 0.8},
-            "primary": "verification",
-            "secondary": [],
-            "confidence": 0.7,
-        }))
-        assert result.primary == "verification"
-
-    def test_format_failure_overrides_specialist_primary(self):
-        result = _parse_error_profile_response(json.dumps({
-            "format_status": "answer_only",
-            "scores": {
-                "computation": 0.0,
-                "reasoning": 0.1,
-                "knowledge": 0.0,
-                "grounding": 0.0,
-                "verification": 0.8,
-            },
-            "primary": "verification",
-            "secondary": [],
-            "confidence": 0.7,
-        }))
-        assert result.primary == "format_failure"
-
-    def test_parse_invalid(self):
-        assert _parse_error_profile_response("INVALID") is None
-
-
-class TestComputeSampleHash:
-    """Test hash computation for caching."""
-
-    def test_hash_deterministic(self):
-        """Same input should produce same hash."""
-        h1 = _compute_sample_hash("Question 1", "Response 1")
-        h2 = _compute_sample_hash("Question 1", "Response 1")
-        assert h1 == h2
-
-    def test_hash_different_inputs(self):
-        """Different inputs should produce different hashes."""
-        h1 = _compute_sample_hash("Question 1", "Response 1")
-        h2 = _compute_sample_hash("Question 2", "Response 1")
-        assert h1 != h2
-
-
-class TestDataClassifier:
-    """Test DataClassifier class."""
-
-    def test_classify_reasoning_style_with_api_mock(self):
-        """Should use API response when available."""
-        with patch("src.society.data_classifier._call_api") as mock_api:
-            mock_api.return_value = "EVIDENCE"
-            with tempfile.TemporaryDirectory() as tmpdir:
-                classifier = DataClassifier()
-                result = classifier.classify_reasoning_style(
-                    response="Let x = 5",
-                    question="Solve for x",
-                    use_api=True,
-                    cache_dir=tmpdir,
-                )
-                assert result.style == ReasoningStyle.EVIDENCE
-                assert result.confidence == 0.9
-
-    def test_classify_error_profile_with_api_mock(self):
-        """Should use API response for error profile."""
-        with patch("src.society.data_classifier._call_api") as mock_api:
-            mock_api.return_value = json.dumps({
-                "scores": {
-                    "computation": 0.0,
-                    "reasoning": 0.9,
-                    "knowledge": 0.1,
-                    "grounding": 0.0,
-                    "verification": 0.0,
-                },
-                "primary": "reasoning",
-                "secondary": [],
-                "confidence": 0.9,
-                "evidence": "bad inference",
-            })
-            with tempfile.TemporaryDirectory() as tmpdir:
-                classifier = DataClassifier()
-                result = classifier.classify_error_profile(
-                    response="Wrong reasoning",
-                    question="Problem",
-                    use_api=True,
-                    cache_dir=tmpdir,
-                )
-                assert result.primary == "reasoning"
-                assert result.confidence == 0.9
-
-    def test_classify_with_cache(self):
-        """Should load from cache when available."""
-        with tempfile.TemporaryDirectory() as tmpdir:
-            # Create cache file
-            cache_file = Path(tmpdir) / "style_v4_mmlu_native3_abc123.json"
-            cache_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(cache_file, "w") as f:
-                json.dump({
-                    "style": "elimination",
-                    "confidence": 0.85,
-                    "raw_response": "CACHED",
-                }, f)
-
-            with patch("src.society.data_classifier._compute_sample_hash", return_value="abc123"):
-                classifier = DataClassifier()
-                result = classifier.classify_reasoning_style(
-                    response="Any response",
-                    question="Any question",
-                    use_api=True,
-                    cache_dir=tmpdir,
-                )
-                assert result.style == ReasoningStyle.ELIMINATION
-                assert result.confidence == 0.85
-
-    def test_classify_api_failure_raises(self):
-        """Should raise ClassificationError when API returns None."""
-        with patch("src.society.data_classifier._call_api", return_value=None):
-            with patch("src.society.data_classifier._compute_sample_hash", return_value="unique_hash"):
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    classifier = DataClassifier()
-                    with pytest.raises(ClassificationError):
-                        classifier.classify_reasoning_style(
-                            response="Let x = 5",
-                            question="Solve",
-                            use_api=True,
-                            cache_dir=tmpdir,
-                        )
-
-
-# ============================================================
-# 4. diversity_split.py Tests
-# ============================================================
-
-class TestDiversitySplit:
-    """Test data splitting by reasoning style and error profile."""
-
-    def test_split_by_reasoning_style(self, tmp_path):
-        """Should split samples by reasoning style."""
-        splitter = DiversitySplit(cache_dir=str(tmp_path / "style_cache"))
-        samples = [
-            {"question": f"Q{i}", "answer": "A"}
-            for i in range(10)
-        ]
-        responses = [
-            "Let x = 5",  # EVIDENCE
-            "Let me verify",  # ELIMINATION
-            "Direct calculation",  # DIRECT
-            "Let y = 10",  # EVIDENCE
-            "Check the answer",  # ELIMINATION
-            "Step by step",  # DIRECT
-            "Use equation",  # EVIDENCE
-            "Verify result",  # ELIMINATION
-            "Simple math",  # DIRECT
-            "Let z = 2",  # EVIDENCE
-        ]
-
-        # Mock API to return deterministic classifications
-        api_responses = [
-            "EVIDENCE", "ELIMINATION", "DIRECT", "EVIDENCE",
-            "ELIMINATION", "DIRECT", "EVIDENCE", "ELIMINATION",
-            "DIRECT", "EVIDENCE",
-        ]
-        with patch("src.society.data_classifier._call_api", side_effect=api_responses):
-            splits = splitter.split_by_reasoning_style(samples, responses)
-
-        assert ReasoningStyle.EVIDENCE in splits
-        assert ReasoningStyle.DIRECT in splits
-        assert ReasoningStyle.ELIMINATION in splits
-
-        # Default split no longer destructively down-samples majority styles.
-        assert len(splits[ReasoningStyle.EVIDENCE]) == 4
-        assert len(splits[ReasoningStyle.ELIMINATION]) == 3
-        assert len(splits[ReasoningStyle.DIRECT]) == 3
-
-    def test_split_by_error_profile(self):
-        """Should split by error profile."""
-        splitter = DiversitySplit(balance=False)
-        samples = [
-            {"question": f"Q{i}", "answer": "42"}
-            for i in range(5)
-        ]
-        responses = [
-            "The number is fabricated",
-            "Logical fallacy here",
-            "Calculation error",
-            "Should have verified",
-            "Wrong computation",
-        ]
-
-        def profile_json(primary):
-            scores = {
-                "computation": 0.0,
-                "reasoning": 0.0,
-                "knowledge": 0.0,
-                "grounding": 0.0,
-                "verification": 0.0,
-            }
-            scores[primary] = 0.9
-            return json.dumps({
-                "scores": scores,
-                "primary": primary,
-                "secondary": [],
-                "confidence": 0.9,
-                "evidence": primary,
-            })
-
-        api_responses = [
-            profile_json("knowledge"),
-            profile_json("reasoning"),
-            profile_json("computation"),
-            profile_json("verification"),
-            profile_json("computation"),
-        ]
-        with patch("src.society.data_classifier._call_api", side_effect=api_responses):
-            splits = splitter.split_by_error_profile(samples, responses)
-
-        assert len(splits) == 5
-        assert {item.skill for item in splits} == {
-            CriticSkill.COMPUTATION,
-            CriticSkill.REASONING,
-            CriticSkill.KNOWLEDGE,
-            CriticSkill.GROUNDING,
-            CriticSkill.VERIFICATION,
-        } - {CriticSkill.GROUNDING}
-
-    def test_split_balancing(self, tmp_path):
-        """Should balance splits when enabled."""
-        splitter = DiversitySplit(balance=True, cache_dir=str(tmp_path / "style_cache"))
-        samples = [{"question": f"Q{i}", "answer": "A"} for i in range(100)]
-        responses = ["Let x = 5"] * 80 + ["Verify this"] * 20
-
-        # 80 EVIDENCE + 20 ELIMINATION -> balanced to 20 each
-        api_responses = ["EVIDENCE"] * 80 + ["ELIMINATION"] * 20
-        with patch("src.society.data_classifier._call_api", side_effect=api_responses):
-            splits = splitter.split_by_reasoning_style(samples, responses)
-
-        # With balancing, should downsample EVIDENCE to 20
-        assert len(splits[ReasoningStyle.EVIDENCE]) <= 80
-
-    def test_split_no_responses(self):
-        """Should leave samples unclassified when no responses are available."""
-        splitter = DiversitySplit()
-        samples = [
-            {"question": f"Q{i}", "answer": "A"}
-            for i in range(10)
-        ]
-
-        # No responses -> no fabricated round-robin assignment.
-        splits = splitter.split_by_reasoning_style(samples, responses=None)
-
-        total = sum(len(v) for v in splits.values())
-        assert total == 0
-
-    def test_strict_reasoning_style_fails_without_classifier(self, monkeypatch):
-        """Strict style splitting should not round-robin when API is unavailable."""
-        monkeypatch.delenv("GLM_API_KEY", raising=False)
-        splitter = DiversitySplit(strict_classification=True, use_api=True, api_key="")
-        samples = [{"question": "Q", "answer": "A"}]
-        responses = ["Let x = 1"]
-
-        with pytest.raises(ClassificationError, match="requires GLM_API_KEY"):
-            splitter.split_by_reasoning_style(samples, responses)
-
-    def test_strict_error_profile_fails_without_classifier(self, monkeypatch):
-        """Strict error routing should not send API failures to the general pool."""
-        monkeypatch.delenv("GLM_API_KEY", raising=False)
-        splitter = DiversitySplit(balance=False, strict_classification=True, use_api=True, api_key="")
-        samples = [{"question": "Q", "answer": "42"}]
-        responses = ["wrong"]
-
-        with pytest.raises(ClassificationError, match="requires GLM_API_KEY"):
-            splitter.split_by_error_profile(samples, responses)
-
-    def test_adaptive_critic_mix_skips_sparse_specialty(self):
-        """Should not train specialists when target data is too sparse."""
-        splitter = DiversitySplit(seed=123)
-        items = [
-            RoutedTrainingItem(
-                sample={"question": f"Q{i}"},
-                response=f"R{i}",
-                skill=CriticSkill.REASONING,
-                weight=1.0,
-                profile={},
-            )
-            for i in range(10)
-        ]
-        items.append(RoutedTrainingItem(
-            sample={"question": "Qc"},
-            response="Rc",
-            skill=CriticSkill.COMPUTATION,
-            weight=1.0,
-            profile={},
-        ))
-
-        selected = splitter.build_critic_training_mix(
-            all_items=items,
-            target_skill=CriticSkill.COMPUTATION,
-            max_items=8,
-            min_specialty_items=4,
-            min_specialty_ratio=0.2,
-        )
-
-        assert selected == []
-
-    def test_adaptive_critic_mix_prefers_specialty_and_tracks_source_bucket(self):
-        """Should select a specialty-heavy mix when target data is sufficient."""
-        splitter = DiversitySplit(seed=123)
-        items = []
-        for i in range(10):
-            items.append(RoutedTrainingItem(
-                sample={"question": f"C{i}"},
-                response=f"RC{i}",
-                skill=CriticSkill.COMPUTATION,
-                weight=1.0,
-                profile={},
-            ))
-        for i in range(10):
-            items.append(RoutedTrainingItem(
-                sample={"question": f"R{i}"},
-                response=f"RR{i}",
-                skill=CriticSkill.REASONING,
-                weight=1.0,
-                profile={},
-            ))
-
-        selected = splitter.build_critic_training_mix(
-            all_items=items,
-            target_skill=CriticSkill.COMPUTATION,
-            max_items=10,
-            min_specialty_items=4,
-            min_specialty_ratio=0.2,
-            specialty_ratio=0.6,
-            general_ratio=0.3,
-            calibration_ratio=0.1,
-        )
-
-        buckets = {item.source_bucket for item in selected}
-        specialty_items = [
-            item for item in selected
-            if item.source_bucket == "specialty"
-        ]
-
-        assert len(selected) == 10
-        assert len(specialty_items) >= 6
-        assert {"specialty", "general", "calibration"} <= buckets
-
-
-# ============================================================
-# 5. inference_pipeline.py Tests
-# ============================================================
-
-class TestVotingStrategies:
-    """Test voting strategy implementations."""
-
-    def test_majority_vote_clear_winner(self):
-        """Should select answer with majority."""
-        answers = {"actor_1": "42", "actor_2": "42", "actor_3": "40"}
-        result, confidence = _majority_vote(answers)
-        assert result == "42"
-        assert confidence == 2/3
-
-    def test_majority_vote_tie(self):
-        """Should handle ties (first wins)."""
-        answers = {"actor_1": "42", "actor_2": "40"}
-        result, confidence = _majority_vote(answers)
-        assert result in ["42", "40"]
-        assert confidence == 0.5
-
-    def test_weighted_vote(self):
-        """Should weight by answer frequency."""
-        mock_result = MagicMock()
-        mock_result.final_answers = {"actor_1": "42", "actor_2": "42", "actor_3": "40"}
-
-        answers = {"actor_1": "42", "actor_2": "42", "actor_3": "40"}
-        result, confidence = _weighted_vote(answers, mock_result)
-        assert result == "42"
-        assert confidence == pytest.approx(2/3)
-
-    def test_best_actor_with_consensus(self):
-        """Should select the actor with highest Critic confidence."""
-
-        mock_result = MagicMock()
-        mock_result.consensus_answer = "42"
-        mock_result.consensus_confidence = 0.9
-        mock_result.final_answers = {"actor_1": "42", "actor_2": "40"}
-
-        # Create last round with routed feedbacks that have different confidence
-        mock_round = MagicMock()
-        fb_high = MagicMock()
-        fb_high.confidence = 0.9
-        fb_high.critic_name = "critic_1"
-        fb_low = MagicMock()
-        fb_low.confidence = 0.3
-        fb_low.critic_name = "critic_1"
-
-        routed_high = RoutedFeedback(
-            feedback_text="High conf feedback",
-            selected_critics=["critic_1"],
-            raw_feedbacks=[fb_high],
-            weights={"critic_1": 0.9},
-        )
-        routed_low = RoutedFeedback(
-            feedback_text="Low conf feedback",
-            selected_critics=["critic_1"],
-            raw_feedbacks=[fb_low],
-            weights={"critic_1": 0.3},
-        )
-        mock_round.routed_feedbacks = {
-            "actor_1": routed_high,
-            "actor_2": routed_low,
-        }
-        mock_result.rounds = [mock_round]
-
-        answers = {"actor_1": "42", "actor_2": "40"}
-        result, confidence = _best_actor(answers, mock_result)
-        assert result == "42"  # Tie-broken by higher Critic confidence for actor_1
-        assert confidence == 0.5  # 1 out of 2 actors agree
-
-    def test_best_actor_fallback(self):
-        """Should fallback to majority vote when no confidence data available."""
-        mock_result = MagicMock()
-        mock_result.consensus_answer = None
-        mock_result.final_answers = {"actor_1": "42", "actor_2": "40"}
-        mock_result.rounds = []  # No rounds -> no confidence data
-
-        answers = {"actor_1": "42", "actor_2": "40"}
-        result, confidence = _best_actor(answers, mock_result)
-        assert result == "42"
-
-
-class TestAblationConfigs:
-    """Test ablation experiment configurations."""
-
-    def test_ablation_configs_complete(self):
-        """Should have all 5 ablation configurations."""
-        assert "A1" in ABLATION_CONFIGS
-        assert "A2" in ABLATION_CONFIGS
-        assert "A3" in ABLATION_CONFIGS
-        assert "A4" in ABLATION_CONFIGS
-        assert "A5" in ABLATION_CONFIGS
-
-    def test_a1_baseline(self):
-        """A1 should be baseline 1 actor + 1 critic."""
-        config = ABLATION_CONFIGS["A1"]
-        assert config["num_actors"] == 1
-        assert config["num_critics"] == 1
-        assert config["router_top_k"] == 1
-
-    def test_a2_actor_diversity(self):
-        """A2 should have 3 actors + 1 critic."""
-        config = ABLATION_CONFIGS["A2"]
-        assert config["num_actors"] == 3
-        assert config["num_critics"] == 1
-
-    def test_a3_critic_specialization(self):
-        """A3 should have 1 actor + 5 critics with routing."""
-        config = ABLATION_CONFIGS["A3"]
-        assert config["num_actors"] == 1
-        assert config["num_critics"] == 5
-        assert config["router_top_k"] == 2
-
-    def test_a4_no_routing(self):
-        """A4 should have all agents with uniform weights."""
-        config = ABLATION_CONFIGS["A4"]
-        assert config["num_actors"] == 3
-        assert config["num_critics"] == 5
-        assert config["router_top_k"] == 5
-
-    def test_a5_full_system(self):
-        """A5 should be full system with routing."""
-        config = ABLATION_CONFIGS["A5"]
-        assert config["num_actors"] == 3
-        assert config["num_critics"] == 5
-        assert config["router_top_k"] == 2
-
-
-# ============================================================
-# 6. Phase 0.1 Integration Tests (MATH/GSM)
-# ============================================================
-
-class TestMathAnswerExtraction:
-    """Test MATH/GSM answer extraction with \boxed{} format."""
-
-    def test_extract_boxed_simple(self):
-        """Should extract simple boxed answer."""
-        response = r"The answer is \boxed{42}."
-        result = extract_answer(response, task_type="math")
-        assert result == "42"
-
-    def test_extract_boxed_expression(self):
-        """Should extract mathematical expressions."""
-        response = r"Therefore, \boxed{x^2 + 2x + 1}."
-        result = extract_answer(response, task_type="math")
-        assert "x^2" in result
-
-    def test_extract_boxed_multiple(self):
-        """Should extract first boxed answer."""
-        response = r"First \boxed{1}, then \boxed{2}."
-        result = extract_answer(response, task_type="math")
-        assert result == "1"
-
-    def test_extract_final_answer_pattern(self):
-        """Should extract from 'Final Answer:' pattern."""
-        response = "Final Answer: 42"
-        result = extract_answer(response, task_type="math")
-        assert result == "42"
-
-    def test_extract_numeric_fallback(self):
-        """Should fallback to numeric extraction."""
-        response = "Therefore, the result equals 42."
-        result = extract_answer(response, task_type="math")
-        assert result == "42"
-
-    def test_extract_empty_response(self):
-        """Should handle empty response."""
-        result = extract_answer("", task_type="math")
-        assert result is None
-
-    def test_extract_negative_number(self):
-        """Should handle negative numbers."""
-        response = r"\boxed{-42}"
-        result = extract_answer(response, task_type="math")
-        assert result == "-42"
-
-
-class TestGenerateWrongAnswerMath:
-    """Test wrong answer generation for MATH/GSM tasks."""
-
-    def test_generate_wrong_math_numeric(self):
-        """Should generate different numeric answer."""
-        # For math type without choices, it returns a random float
-        result = generate_wrong_answer("42", task_type="math")
-        # Just verify it returns something
-        assert result is not None
-        # It won't be "42" since that's the correct answer
-        # But it could be any random number
-
-    def test_generate_wrong_math_with_choices(self):
-        """Should pick from available choices."""
-        # When task_type is not "yes_no", it treats as multiple choice
-        result = generate_wrong_answer("C", choices=["A", "B", "C", "D"])
-        assert result != "C"
-        assert result in ["A", "B", "D"]
-
-
-class TestMATHPromptTemplates:
-    """Test MATH/GSM prompt template integration."""
-
-    def test_math_template_exists(self):
-        """MATH dataset should have templates."""
-        from src.prompts.templates import get_available_datasets, get_prompt_template
-        from src.prompts.templates import PromptType
-
-        datasets = get_available_datasets()
-        assert "math" in datasets
-
-        template = get_prompt_template("math", PromptType.SINGLE_SHOT)
-        assert "{question}" in template
-
-    def test_gsm8k_template_exists(self):
-        """GSM8K dataset should have templates."""
-        from src.prompts.templates import get_available_datasets, get_prompt_template
-        from src.prompts.templates import PromptType
-
-        datasets = get_available_datasets()
-        assert "gsm8k" in datasets
-
-        template = get_prompt_template("gsm8k", PromptType.SINGLE_SHOT)
-        assert "{question}" in template
-
-
-# ============================================================
-# 7. Integration Tests
-# ============================================================
-
-class TestSocietyIntegration:
-    """End-to-end integration tests."""
-
-    def test_full_registry_creation_and_routing(self):
-        """Test creating registry and routing feedbacks."""
-        # Create default registry
-        registry = AgentRegistry.create_default()
-
-        # Verify agents
-        assert len(registry.list_actors()) == 3
-        assert len(registry.list_critics()) == 5
-
-        # Create mock feedbacks
-        feedbacks = [
-            CriticFeedback(
-                critic_name=c.name,
-                error_specialty=c.error_specialty,
-                feedback_text=f"Feedback from {c.name}",
-                confidence=0.5 + i * 0.1,
-            )
-            for i, c in enumerate(registry.list_critics())
-        ]
-
-        # Route
-        router = CriticRouter(top_k=2)
-        result = router.route(feedbacks)
-
-        assert len(result.selected_critics) == 2
-        assert result.feedback_text
-
-    def test_classification_and_splitting_pipeline(self, tmp_path):
-        """Test classify then split pipeline."""
-        splitter = DiversitySplit(cache_dir=str(tmp_path / "style_cache"))
-
-        samples = [
-            {"question": "Solve x + 5 = 10", "answer": "5"},
-            {"question": "Calculate 2 * 3", "answer": "6"},
-            {"question": "Verify the result", "answer": "10"},
-        ]
-
-        responses = [
-            "Let x = 5, solve equation",
-            "2 * 3 = 6 directly",
-            "Let me check: verify is correct",
-        ]
-
-        # Mock API to return deterministic styles
-        with patch("src.society.data_classifier._call_api", side_effect=["EVIDENCE", "DIRECT", "ELIMINATION"]):
-            splits = splitter.split_by_reasoning_style(samples, responses)
-
-        # Verify all styles have samples
-        assert len(splits[ReasoningStyle.EVIDENCE]) >= 1
-        assert len(splits[ReasoningStyle.DIRECT]) >= 1
-        assert len(splits[ReasoningStyle.ELIMINATION]) >= 1
+        },
+        dataset_name="mmlu",
+        num_rounds=2,
+        max_tokens=16,
+        temperature=0.0,
+    )
+
+    assert result.rounds[0].actor_responses["actor_direct"] == "Reasoning text.\nThe final result is A."
+    assert result.rounds[0].actor_answers["actor_direct"] == "A"
+    assert result.rounds[0].actor_answer_sources["actor_direct"] == "final_result"
+    assert result.rounds[0].routed_feedbacks["actor_direct"][0].critique.startswith("The answer is consistent")
+    assert result.rounds[1].actor_answers["actor_direct"] == "B"
+    assert result.rounds[1].consensus_weights["A"] == 0.9
+    assert result.rounds[1].consensus_weights["B"] == 1.0
+    assert result.consensus_answer == "B"

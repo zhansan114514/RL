@@ -12,8 +12,7 @@ import logging
 from typing import Any
 
 from src.algorithms.reward import extract_answer, math_answers_equal, normalize_answer
-from src.prompts.formatter import format_prompt
-from src.prompts.templates import PromptType
+from src.prompts.prompt_builder import build_guided_actor_prompt
 from src.society.agent_registry import ACTOR_STYLE_PROMPTS, ReasoningStyle
 from src.society.data_classifier import (
     ClassificationError,
@@ -126,11 +125,11 @@ def make_synthetic_rejected_response(sample: dict[str, Any]) -> str:
     if task_type in {"multiple_choice", "mixed"}:
         for option in ("A", "B", "C", "D"):
             if option != correct:
-                return f"FINAL_ANSWER: {option}\nRATIONALE:\nThis response gives an unsupported answer."
+                return f"This response gives an unsupported answer.\n\nThe final result is {option}."
     if task_type == "yes_no":
         wrong = "NO" if correct == "YES" else "YES"
-        return f"FINAL_ANSWER: {wrong.title()}\nRATIONALE:\nThis response gives an unsupported answer."
-    return "FINAL_ANSWER: 0\nRATIONALE:\nThis response gives an unsupported answer."
+        return f"This response gives an unsupported answer.\n\nThe final result is {wrong.title()}."
+    return "This response gives an unsupported numeric result.\n\nThe final result is 0."
 
 
 def _build_style_generation_prompt(
@@ -138,17 +137,18 @@ def _build_style_generation_prompt(
     style: ReasoningStyle,
     dataset_name: str,
 ) -> str:
-    prompt = format_prompt(
-        dataset_name,
-        PromptType.GUIDED_SINGLE_SHOT,
+    prompt = build_guided_actor_prompt(
         sample,
+        dataset_name,
         target_answer=sample.get("answer", ""),
+        style=style,
     )
     return (
         "/no_think\n"
         f"{ACTOR_STYLE_PROMPTS[style]}\n\n"
         "Generate one correct response for training an Actor with this style.\n"
-        "Use the required FINAL_ANSWER and RATIONALE format exactly.\n"
+        "Reason naturally and end with exactly one sentence of the form: "
+        "The final result is <answer>.\n"
         "Do not mention that this is synthetic training data.\n\n"
         f"{prompt}\n\n"
         f"Gold answer for this augmentation task: {sample.get('answer', '')}\n"

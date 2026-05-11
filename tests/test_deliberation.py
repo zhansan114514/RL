@@ -72,13 +72,15 @@ class TestDeliberateEngine:
             "task_type": "yes_no",
         }
         traj = deliberate(actor, critic, sample, "boolq", num_rounds=1)
-        # Round 0 prompt should be the single-shot prompt
-        assert "yes-no question" in traj[0]["actor_prompt"]
+        assert "Question:\nIs X true?" in traj[0]["actor_prompt"]
+        assert "Passage:\nEvidence for X." in traj[0]["actor_prompt"]
+        assert "The final result is <answer>." in traj[0]["actor_prompt"]
+        assert "FINAL_ANSWER" not in traj[0]["actor_prompt"]
 
     def test_critic_prompt_receives_previous_responses(self):
         from src.algorithms.deliberation import deliberate
 
-        actor = MockInference(responses=["FINAL_ANSWER: Yes", "FINAL_ANSWER: No"])
+        actor = MockInference(responses=["The final result is Yes.", "The final result is No."])
         critic = MockInference(responses=["Round 0 feedback.", "Round 1 feedback."])
         sample = {
             "question": "Is X true?",
@@ -88,9 +90,10 @@ class TestDeliberateEngine:
         }
         traj = deliberate(actor, critic, sample, "boolq", num_rounds=2)
 
-        assert "Person 1 said: FINAL_ANSWER: Yes" in traj[1]["critic_prompt"]
-        assert "Person 2 said: Round 0 feedback." in traj[1]["critic_prompt"]
-        assert "{responses_text}" not in traj[1]["critic_prompt"]
+        assert "Actor response:" in traj[1]["critic_prompt"]
+        assert "The final result is No." in traj[1]["critic_prompt"]
+        assert "Judgement:" in traj[1]["critic_prompt"]
+        assert "{actor_response}" not in traj[1]["critic_prompt"]
 
 
 class TestDeliberationEdgeCases:

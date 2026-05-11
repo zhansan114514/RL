@@ -34,11 +34,8 @@ from _utils import setup_logging
 from src.utils.config import ConfigManager
 from src.society.multi_deliberation import LoRAError
 from src.society.society_trainer import LoRAModelAdapter
-from src.society.critic_schema import (
-    CRITIC_JUDGEMENT_CONTRACT,
-    parse_critic_judgement,
-    render_critic_judgement,
-)
+from src.parsing.critic_parser import parse_critic_response
+from src.prompts.critic_prompts import render_critic_judgement
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -551,11 +548,11 @@ def build_structured_critic_pairs(
             target_skill=skill.value,
             negative_kind=_negative_kind(idx, source_bucket),
         )
-        parsed = parse_critic_judgement(chosen, actor_answer=p.get("actor_answer"))
-        if not parsed.schema_valid:
+        parsed = parse_critic_response(chosen, p.get("sample", {}).get("task_type", "multiple_choice"))
+        if not parsed.usable_for_feedback:
             raise RuntimeError(
-                f"Generated invalid structured critic chosen for {p.get('raw_pair_id')}: "
-                f"{parsed.schema_errors}"
+                f"Generated unusable critic chosen for {p.get('raw_pair_id')}: "
+                f"{parsed.parse_errors}"
             )
 
         structured_pairs.append({
@@ -591,14 +588,14 @@ def summarize_structured_critic_pairs(
     real_specialty_items: int,
 ) -> Dict[str, Any]:
     total = len(preference_pairs)
-    schema_valid = 0
+    parse_usable = 0
     for pair in preference_pairs:
-        parsed = parse_critic_judgement(
+        parsed = parse_critic_response(
             pair.get("chosen", ""),
-            actor_answer=pair.get("metadata", {}).get("actor_answer", ""),
+            pair.get("sample", {}).get("task_type", "multiple_choice"),
         )
-        if parsed.schema_valid:
-            schema_valid += 1
+        if parsed.usable_for_feedback:
+            parse_usable += 1
     bucket_counts = Counter(
         p.get("metadata", {}).get("source_bucket", "unknown")
         for p in preference_pairs
@@ -610,7 +607,7 @@ def summarize_structured_critic_pairs(
     return {
         "sample_count": total,
         "real_specialty_items": real_specialty_items,
-        "chosen_schema_valid_rate": schema_valid / total if total else 0.0,
+        "chosen_parse_usable_rate": parse_usable / total if total else 0.0,
         "source_bucket_counts": dict(bucket_counts),
         "assigned_skill_counts": dict(assigned_counts),
         "synthetic_pair_count": 0,
@@ -627,9 +624,8 @@ def _render_chosen_judgement(pair: Dict[str, Any], profile: Dict[str, Any]) -> s
     if not evidence:
         evidence = "The actor response is inconsistent with the verified answer and needs correction."
     return render_critic_judgement(
-        answer_correct=False,
-        suggested_final_answer=str(pair.get("correct_answer") or "unknown"),
-        error_type=primary,
+        answer_correct="no",
+        suggested_answer=str(pair.get("correct_answer") or "unknown"),
         confidence=max(0.1, min(1.0, confidence)),
         critique=evidence,
     )
@@ -660,32 +656,28 @@ def _render_rejected_judgement(
         )
     if negative_kind == "answer_correct_wrong":
         return render_critic_judgement(
-            answer_correct=True,
-            suggested_final_answer=actor_answer,
-            error_type="none",
+            answer_correct="yes",
+            suggested_answer=actor_answer,
             confidence=0.80,
             critique="The actor answer is acceptable.",
         )
     if negative_kind == "suggested_answer_wrong":
         return render_critic_judgement(
-            answer_correct=False,
-            suggested_final_answer=actor_answer,
-            error_type=primary if primary in {"computation", "reasoning", "knowledge", "grounding", "verification"} else target_skill,
+            answer_correct="no",
+            suggested_answer=actor_answer,
             confidence=0.75,
             critique="The critique identifies a problem but repeats the actor's wrong answer.",
         )
     if negative_kind == "error_type_wrong":
         return render_critic_judgement(
-            answer_correct=False,
-            suggested_final_answer=correct_answer,
-            error_type=wrong_error_type,
+            answer_correct="no",
+            suggested_answer=correct_answer,
             confidence=0.75,
             critique="The suggested answer may be right, but the error type is misdiagnosed.",
         )
     return render_critic_judgement(
-        answer_correct=False,
-        suggested_final_answer=correct_answer,
-        error_type=primary if primary in {"computation", "reasoning", "knowledge", "grounding", "verification"} else target_skill,
+        answer_correct="no",
+        suggested_answer=correct_answer,
         confidence=0.35,
         critique="Weak critique.",
     )
@@ -800,8 +792,7 @@ def train_critic_dpo(
     from datasets import Dataset
     from src.training.dpo_trainer import train_dpo
     from src.utils.model_utils import detect_model_type
-    from src.prompts.formatter import format_prompt
-    from src.prompts.templates import PromptType
+    from src.prompts.prompt_builder import build_simple_actor_prompt, build_simple_critic_prompt
 
     model_type = detect_model_type(model_name)
 
@@ -813,9 +804,6 @@ def train_critic_dpo(
     logger.info(f"    Pairs: {len(preference_pairs)}")
     logger.info(f"    Output: {critic_output_dir}")
 
-    # Reconstruct full prompts using the same schema contract as inference.
-    # Prompts include question/options/context and actor_response only.  They do
-    # not include correct_answer; gold is used offline to render chosen labels.
     prompts = []
     for p in preference_pairs:
         sample = p.get("sample", {})
@@ -825,18 +813,10 @@ def train_critic_dpo(
             f"Specialize in detecting {critic_skill} errors.\n"
         )
         if actor_resp:
-            prompt = format_prompt(
-                dataset_name, PromptType.DELIBERATION_CRITIC, sample,
-                actor_response=actor_resp,
-            )
+            prompt = build_simple_critic_prompt(sample, dataset_name, actor_resp)
         else:
-            prompt = format_prompt(
-                dataset_name,
-                PromptType.SINGLE_SHOT,
-                sample,
-                include_answer_contract=False,
-            )
-        prompts.append(f"{skill_instruction}{CRITIC_JUDGEMENT_CONTRACT}\n\n{prompt}")
+            prompt = build_simple_actor_prompt(sample, dataset_name)
+        prompts.append(f"{skill_instruction}\n{prompt}")
 
     # Convert preference_pairs to HuggingFace Dataset
     hf_data = {

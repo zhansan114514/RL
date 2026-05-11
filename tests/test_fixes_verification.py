@@ -16,7 +16,7 @@ class TestFix1DeliberationPreviousResponses:
     """Fix #1: previous_responses should contain interleaved actor and critic responses."""
 
     def test_previous_responses_interleaved_structure(self):
-        """After each round, previous_responses should have actor then critic response."""
+        """Revision prompts should expose the previous actor response and critic feedback."""
         from src.algorithms.deliberation import deliberate
 
         actor = MagicMock()
@@ -36,37 +36,13 @@ class TestFix1DeliberationPreviousResponses:
             "task_type": "yes_no",
         }
 
-        # Track format_prompt calls to verify responses structure
-        prompt_calls = []
-        original_format = __import__('src.prompts.formatter', fromlist=['format_prompt']).format_prompt
-        def track_format(dataset_name, prompt_type, sample_arg, **kwargs):
-            prompt_calls.append({
-                "prompt_type": str(prompt_type),
-                "responses": list(kwargs.get("responses", [])),  # Copy list
-            })
-            return original_format(dataset_name, prompt_type, sample_arg, **kwargs)
+        trajectory = deliberate(actor, critic, sample, "boolq", num_rounds=3)
 
-        with patch('src.algorithms.deliberation.format_prompt', side_effect=track_format):
-            trajectory = deliberate(actor, critic, sample, "boolq", num_rounds=3)
-
-        # Round 0: Single shot (no previous_responses)
         assert len(trajectory) == 3
-
-        # Find deliberation actor prompts (they have responses parameter)
-        deliberation_actor_calls = [
-            p for p in prompt_calls
-            if "DELIBERATION_ACTOR" in p["prompt_type"] and len(p["responses"]) > 0
-        ]
-
-        # First deliberation actor prompt (round 1, t=1) should have 2 items: [actor0, critic0]
-        if len(deliberation_actor_calls) > 0:
-            assert len(deliberation_actor_calls[0]["responses"]) == 2, \
-                f"Round 1 should have actor0 + critic0 in previous_responses, got {deliberation_actor_calls[0]['responses']}"
-
-        # Second deliberation actor prompt (round 2, t=2) should have 4 items: [actor0, critic0, actor1, critic1]
-        if len(deliberation_actor_calls) > 1:
-            assert len(deliberation_actor_calls[1]["responses"]) == 4, \
-                f"Round 2 should have actor0 + critic0 + actor1 + critic1, got {deliberation_actor_calls[1]['responses']}"
+        assert "You previously gave this response:\nActor 0" in trajectory[1]["actor_prompt"]
+        assert "Critics provided the following feedback:\nCritic 0" in trajectory[1]["actor_prompt"]
+        assert "You previously gave this response:\nActor 1" in trajectory[2]["actor_prompt"]
+        assert "Critics provided the following feedback:\nCritic 1" in trajectory[2]["actor_prompt"]
 
     def test_previous_responses_actor_then_critic_order(self):
         """Verify order is actor response first, then critic response."""

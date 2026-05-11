@@ -177,7 +177,7 @@ step06_evaluate:
     dual_gpu:
       devices: [1, 2]
       tensor_parallel_size: 2
-      gpu_memory_utilization: 0.80
+      gpu_memory_utilization: 0.65
   sampling:
     test:
       strategy: "random"

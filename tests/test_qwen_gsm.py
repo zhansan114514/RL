@@ -69,8 +69,8 @@ class TestMathAnswerExtraction:
             # \frac and \sqrt with nested {} — balanced brace matching handles correctly
             ("\\boxed{\\frac{1}{2}}", "\\frac{1}{2}"),  # Balanced extraction
             ("\\boxed{\\sqrt{2}}", "\\sqrt{2}"),  # Balanced extraction
-            # Multiple boxes (should extract first)
-            ("First \\boxed{1} then \\boxed{2}", "1"),
+            # Multiple boxes: natural protocol prefers the latest final-ish answer.
+            ("First \\boxed{1} then \\boxed{2}", "2"),
             # Case insensitive variations
             ("boxed{100}", "100"),
             # With text around
@@ -111,7 +111,7 @@ class TestMathAnswerExtraction:
             ("= 42", "42"),
             ("x = 10", "10"),
             # Multiple equals (regex gets last match)
-            ("x = 5, y = 10", "5"),  # Note: fallback patterns get first match in some cases
+            ("x = 5, y = 10", "10"),
             # With units (should extract number)
             ("The result is 42 meters", "42"),
         ],

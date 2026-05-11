@@ -1,53 +1,42 @@
-"""Stateful answer resolution and mixed-task evaluation helpers."""
+"""Answer normalization and mixed-task evaluation helpers."""
 
 from __future__ import annotations
 
 import math
-import re
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-from src.algorithms.reward import (
-    extract_answer_with_source,
-    math_answers_equal,
-    normalize_answer,
-)
+from src.algorithms.reward import math_answers_equal, normalize_answer
+from src.parsing.answer_extractor import extract_answer
 
 
-MAINTAIN_PREVIOUS_PATTERNS = [
-    re.compile(r"(?i)\bprevious answer\b.*\b(correct|right|still|remain|remains)\b"),
-    re.compile(r"(?i)\b(correct|right|still|remain|remains)\b.*\bprevious answer\b"),
-    re.compile(r"(?i)\bI\s+(still\s+)?(?:think|believe|maintain)\b.*\b(previous|original)\b"),
-    re.compile(r"(?i)\bmy\s+(?:previous|original)\s+answer\s+(?:is|remains)\s+(?:correct|right)\b"),
-    re.compile(r"我(?:仍然|依然|还是)?认为(?:之前|原来|上一轮)的?答案(?:是)?(?:正确|对的)"),
-    re.compile(r"(?:维持|保持)(?:之前|原来|上一轮)的?答案"),
+ANSWER_SOURCES = [
+    "final_result",
+    "final_answer",
+    "boxed",
+    "tail_claim",
+    "weak_tail",
+    "none",
 ]
 
 
 @dataclass(frozen=True)
 class ResolvedAnswer:
-    """Answer state for one generation round."""
+    """Answer state for one generation."""
 
     raw_extracted_answer: Optional[str]
     resolved_answer: Optional[str]
     extract_source: str
-    format_valid: bool
-
-
-def mentions_maintain_previous(response: str) -> bool:
-    """Return whether a response explicitly keeps the previous answer."""
-    text = response or ""
-    return any(pattern.search(text) for pattern in MAINTAIN_PREVIOUS_PATTERNS)
+    parse_confidence: float
 
 
 def normalize_task_answer(answer: Optional[str], task_type: str) -> Optional[str]:
-    """Normalize an answer token for stateful voting without collapsing yes/no."""
+    """Normalize an answer token for voting without collapsing yes/no labels."""
     if answer is None:
         return None
     text = str(answer).strip()
     if not text:
         return None
-
     if task_type == "math":
         return text
 
@@ -77,37 +66,26 @@ def resolve_answer_for_round(
     previous_answer: Optional[str] = None,
     extracted_answer: Optional[str] = None,
     extraction_source: Optional[str] = None,
+    parse_confidence: Optional[float] = None,
 ) -> ResolvedAnswer:
-    """Resolve a round answer using extraction first, then explicit carry-forward."""
+    """Resolve a round answer from extraction only.
+
+    The previous answer parameter is accepted by legacy callers but no longer
+    used.  Actor outputs are not repaired or carried forward implicitly.
+    """
+    del previous_answer
     if extracted_answer is None and extraction_source is None:
-        extraction = extract_answer_with_source(response, task_type)
+        extraction = extract_answer(response, task_type)
         extracted_answer = extraction.answer
         extraction_source = extraction.source
+        parse_confidence = extraction.confidence
 
     normalized = normalize_task_answer(extracted_answer, task_type)
-    if normalized:
-        source = extraction_source or "fallback"
-        return ResolvedAnswer(
-            raw_extracted_answer=extracted_answer,
-            resolved_answer=normalized,
-            extract_source=source,
-            format_valid=source == "strict",
-        )
-
-    previous = normalize_task_answer(previous_answer, task_type)
-    if previous and mentions_maintain_previous(response):
-        return ResolvedAnswer(
-            raw_extracted_answer=extracted_answer,
-            resolved_answer=previous,
-            extract_source="carried_forward",
-            format_valid=False,
-        )
-
     return ResolvedAnswer(
         raw_extracted_answer=extracted_answer,
-        resolved_answer=None,
-        extract_source="none",
-        format_valid=False,
+        resolved_answer=normalized,
+        extract_source=extraction_source or "none",
+        parse_confidence=0.0 if parse_confidence is None else parse_confidence,
     )
 
 
@@ -159,17 +137,28 @@ def compute_accuracy_with_ci_mixed(
 
 
 def source_counts(sources: Sequence[str]) -> dict[str, int]:
-    """Count answer-source categories with stable keys."""
-    keys = ["strict", "fallback", "carried_forward", "none"]
-    return {key: sum(1 for source in sources if source == key) for key in keys}
+    """Count parser source categories."""
+    return {key: sum(1 for source in sources if source == key) for key in ANSWER_SOURCES}
 
 
 def source_rates(sources: Sequence[str]) -> dict[str, float | int]:
-    """Return strict/fallback/carried-forward/unresolved counts and rates."""
+    """Return parser source counts and rates."""
     total = len(sources)
     counts = source_counts(sources)
     result: dict[str, float | int] = {"total": total}
     for key, count in counts.items():
         result[f"{key}_count"] = count
         result[f"{key}_rate"] = count / total if total else 0.0
+    result["parse_success_count"] = total - counts["none"]
+    result["parse_success_rate"] = (
+        result["parse_success_count"] / total if total else 0.0
+    )
+    flexible_count = (
+        counts["final_answer"]
+        + counts["boxed"]
+        + counts["tail_claim"]
+        + counts["weak_tail"]
+    )
+    result["flexible_parse_count"] = flexible_count
+    result["flexible_parse_rate"] = flexible_count / total if total else 0.0
     return result

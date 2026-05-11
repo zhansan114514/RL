@@ -4,13 +4,12 @@ Preference data builder: filters and formats trajectory pairs for DPO training.
 
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING
-
-from src.prompts.templates import append_answer_contract
 
 if TYPE_CHECKING:
     from datasets import Dataset
+
+import logging
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +38,7 @@ def build_preference_dataset(
 
         if agent == "actor":
             dataset.append({
-                "prompt": append_answer_contract(
-                    pair.get("actor_prompt", ""),
-                    pair.get("sample"),
-                ),
+                "prompt": pair.get("actor_prompt", ""),
                 "chosen": pair["positive"],
                 "rejected": pair["negative"],
                 "round": pair["round"],

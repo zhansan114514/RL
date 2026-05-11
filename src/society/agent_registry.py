@@ -17,8 +17,6 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from src.society.critic_schema import CRITIC_JUDGEMENT_CONTRACT
-
 logger = logging.getLogger(__name__)
 
 
@@ -148,18 +146,16 @@ def resolve_critic_skill(value: str) -> CriticSkill:
 
 ACTOR_STYLE_PROMPTS = {
     ReasoningStyle.DIRECT: (
-        "You are a direct reasoner. Solve the question concisely. "
-        "Use only the minimum reasoning needed to justify the final answer."
+        "Solve with the shortest sufficient reasoning. Avoid unnecessary discussion "
+        "and focus on the most direct route to the answer."
     ),
     ReasoningStyle.EVIDENCE: (
-        "You are an evidence-based reasoner. Identify the key facts, "
-        "concepts, definitions, or wording in the question, then use them "
-        "as evidence to justify the answer."
+        "Identify key facts, concepts, definitions, wording, or evidence from "
+        "the question and use them to justify the answer."
     ),
     ReasoningStyle.ELIMINATION: (
-        "You are an option-elimination reasoner. Compare the answer choices, "
-        "eliminate incorrect or less plausible options, and explain why the "
-        "selected option is best."
+        "Compare answer choices, eliminate incorrect or weaker options, and "
+        "explain why the selected option is best."
     ),
 }
 
@@ -191,11 +187,6 @@ CRITIC_SPECIALTY_PROMPTS = {
         "and whether self-checks should have caught contradictions."
     ),
 }
-
-# Backward-compatible symbol for older imports. The contract lives in
-# src.society.critic_schema and should not be duplicated here.
-CRITIC_CONFIDENCE_SUFFIX = CRITIC_JUDGEMENT_CONTRACT
-
 
 # ============================================================
 # Agent configuration
@@ -230,8 +221,7 @@ class AgentConfig:
         if self.role == AgentRole.ACTOR and self.reasoning_style:
             return ACTOR_STYLE_PROMPTS.get(self.reasoning_style, "")
         elif self.role == AgentRole.CRITIC and self.error_specialty:
-            base = CRITIC_SPECIALTY_PROMPTS.get(self.error_specialty, "")
-            return base + CRITIC_CONFIDENCE_SUFFIX
+            return CRITIC_SPECIALTY_PROMPTS.get(self.error_specialty, "")
         return ""
 
     @property

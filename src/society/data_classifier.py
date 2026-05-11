@@ -101,7 +101,7 @@ Question:
 Response:
 {response}
 
-Ignore any leading FINAL_ANSWER line. Classify the reasoning body.
+Ignore the final answer sentence and classify the reasoning body.
 
 Definitions:
 - direct: concise answer with minimal explanation; does not systematically cite evidence or compare options

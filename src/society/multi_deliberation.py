@@ -1,62 +1,37 @@
-"""
-Multi-agent deliberation engine for Diverse Actor-Critic Society.
-
-Implements the single-GPU deliberation with batched inference:
-  1. All Actors generate responses (batched into single vLLM call)
-  2. All Critics evaluate each Actor response (batched per actor)
-  3. Router combines feedback (softmax confidence -> Top-K -> weighted concat)
-  4. Feedback is injected into next-round Actor prompts
-  5. Critic-aware weighted consensus picks the final answer
-
-LoRA support:
-  LoRA adapters are loaded dynamically into the vLLM engine via
-  the vLLM LoRA API.  Each agent's ``lora_path`` (if set) is used
-  to load the adapter before that agent's generation calls.
-
-Crash recovery: each model call persisted to disk, skip on restart.
-"""
+"""Natural multi-agent deliberation engine."""
 
 from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from src.algorithms.reward import extract_answer_with_source
-from src.evaluation.answer_resolution import (
-    MAINTAIN_PREVIOUS_PATTERNS as ANSWER_MAINTAIN_PREVIOUS_PATTERNS,
-    mentions_maintain_previous,
-    normalize_task_answer,
-    resolve_answer_for_round,
-)
-from src.prompts.templates import answer_contract, append_answer_contract
+from src.evaluation.answer_resolution import normalize_task_answer
+from src.parsing.answer_extractor import extract_answer
+from src.prompts.prompt_builder import build_actor_prompt, build_critic_feedback_prompt
 from src.society.agent_registry import AgentConfig
-from src.society.critic_schema import CRITIC_JUDGEMENT_CONTRACT
-from src.society.router import CriticRouter, build_critic_feedback, RoutedFeedback
+from src.society.router import CriticFeedback, CriticRouter, build_critic_feedback
 
 logger = logging.getLogger(__name__)
 
 
-# ============================================================
-# Data classes
-# ============================================================
-
 @dataclass
 class DeliberationRound:
-    """One round of multi-agent deliberation."""
+    """One natural deliberation round."""
+
     round_num: int
-    actor_responses: dict[str, str]  # actor_name -> response
-    actor_answers: dict[str, Optional[str]]  # actor_name -> resolved answer
-    critic_feedbacks: dict[str, dict[str, str]]  # actor_name -> {critic_name: feedback}
-    routed_feedbacks: dict[str, RoutedFeedback]  # actor_name -> routed
-    raw_actor_answers: dict[str, Optional[str]] = field(default_factory=dict)
-    actor_answer_sources: dict[str, str] = field(default_factory=dict)
-    actor_format_valid: dict[str, bool] = field(default_factory=dict)
+    actor_responses: dict[str, str]
+    actor_answers: dict[str, Optional[str]]
+    actor_answer_sources: dict[str, str]
+    actor_parse_confidence: dict[str, float]
+    critic_raw_responses: dict[str, dict[str, str]]
+    critic_feedbacks: dict[str, dict[str, CriticFeedback]]
+    routed_feedbacks: dict[str, list[CriticFeedback]]
+    routed_feedback_texts: dict[str, str] = field(default_factory=dict)
     consensus_answer: Optional[str] = None
     consensus_confidence: float = 0.0
     consensus_weights: dict[str, float] = field(default_factory=dict)
@@ -65,13 +40,13 @@ class DeliberationRound:
 @dataclass
 class MultiDeliberationResult:
     """Complete result of multi-agent deliberation."""
+
     rounds: list[DeliberationRound]
-    final_answers: dict[str, Optional[str]]  # actor_name -> final answer
+    final_answers: dict[str, Optional[str]]
     consensus_answer: Optional[str]
     consensus_confidence: float
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    # Compatibility aliases for scripts that use different field names
     @property
     def final_answer(self) -> Optional[str]:
         return self.consensus_answer
@@ -82,19 +57,21 @@ class MultiDeliberationResult:
 
     @property
     def individual_results(self) -> list[dict]:
-        """Return per-actor results for backward compatibility."""
         results = []
         for actor_name, answer in self.final_answers.items():
             trajectory = []
-            for r in self.rounds:
-                if actor_name in r.actor_responses:
-                    trajectory.append({
-                        "actor_response": r.actor_responses[actor_name],
-                        "actor_answer": r.actor_answers.get(actor_name),
-                    })
-                    if actor_name in r.critic_feedbacks:
-                        for cn, fb in r.critic_feedbacks[actor_name].items():
-                            trajectory[-1][f"critic_{cn}_feedback"] = fb
+            for round_data in self.rounds:
+                if actor_name not in round_data.actor_responses:
+                    continue
+                item = {
+                    "actor_response": round_data.actor_responses[actor_name],
+                    "actor_answer": round_data.actor_answers.get(actor_name),
+                    "answer_source": round_data.actor_answer_sources.get(actor_name),
+                    "parse_confidence": round_data.actor_parse_confidence.get(actor_name),
+                }
+                for critic_name, fb in round_data.critic_feedbacks.get(actor_name, {}).items():
+                    item[f"critic_{critic_name}_feedback"] = fb.critique
+                trajectory.append(item)
             results.append({
                 "actor_name": actor_name,
                 "final_answer": answer,
@@ -103,12 +80,8 @@ class MultiDeliberationResult:
         return results
 
 
-# ============================================================
-# Atomic disk persistence for crash recovery
-# ============================================================
-
 def _atomic_write_json(path: Path, data: dict) -> None:
-    """Write JSON atomically (tmp + replace)."""
+    """Write JSON atomically."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     with open(tmp, "w") as f:
@@ -117,28 +90,22 @@ def _atomic_write_json(path: Path, data: dict) -> None:
 
 
 def _load_json(path: Path) -> Optional[dict]:
-    """Load JSON if exists."""
-    if path.exists():
-        try:
-            with open(path) as f:
-                return json.load(f)
-        except (json.JSONDecodeError, OSError):
-            pass
-    return None
+    """Load JSON if it exists and is valid."""
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return None
 
 
-# ============================================================
-# LoRA management
-# ============================================================
-
-# Stable LoRA ID assignment: deterministic mapping from path to integer
-_LORA_ID_COUNTER: int = 0
+_LORA_ID_COUNTER = 0
 _LORA_ID_CACHE: dict[str, int] = {}
 
 
 def _get_stable_lora_id(lora_path: str) -> int:
-    """Get a stable, unique integer ID for a LoRA path."""
-    global _LORA_ID_COUNTER, _LORA_ID_CACHE
+    global _LORA_ID_COUNTER
     if lora_path not in _LORA_ID_CACHE:
         _LORA_ID_COUNTER += 1
         _LORA_ID_CACHE[lora_path] = _LORA_ID_COUNTER
@@ -147,142 +114,23 @@ def _get_stable_lora_id(lora_path: str) -> int:
 
 class LoRAError(RuntimeError):
     """Raised when a LoRA adapter cannot be loaded or used."""
-    pass
-
-
-FINAL_ANSWER_LINE_PATTERN = re.compile(
-    r"(?m)^(?P<prefix>[ \t]*FINAL_ANSWER[ \t]*:[ \t]*)(?P<answer>.*?)(?P<suffix>[ \t]*)$"
-)
-
-MAINTAIN_PREVIOUS_PATTERNS = [
-    pattern.pattern for pattern in ANSWER_MAINTAIN_PREVIOUS_PATTERNS
-]
-
-# Deliberation context intro strings (prefix-cached prompt restructure).
-# For deliberation rounds, the prompt is restructured as:
-#   [system_prompt] -> [question/options/passage] -> [deliberation context] -> [contract]
-# This allows vLLM prefix caching to reuse the question KV across rounds.
-_DELIBERATION_INTRO = {
-    "boolq": "Several people have provided answers to a yes-no question.",
-    "math": "Several people have provided solutions to a mathematics problem.",
-    "gsm8k": "Several people have provided solutions to a grade school mathematics problem.",
-}
-
-MC_TAIL_ANSWER_PATTERNS = [
-    re.compile(
-        r"(?i)(?:correct\s+answer|answer|option|choice)\s+"
-        r"(?:should\s+be|is|would\s+be|must\s+be)\s*\(?\s*([A-D])\s*\)?"
-    ),
-    re.compile(r"(?i)(?:therefore|thus|so)\s*,?\s*(?:the\s+)?(?:answer|option|choice)\s+is\s*\(?\s*([A-D])\s*\)?"),
-    re.compile(r"(?i)(?:final\s+answer|answer)\s*:\s*\(?\s*([A-D])\s*\)?"),
-]
-
-YES_NO_TAIL_ANSWER_PATTERNS = [
-    re.compile(
-        r"(?i)(?:correct\s+answer|answer)\s+"
-        r"(?:should\s+be|is|would\s+be|must\s+be)\s*(yes|no)\b"
-    ),
-    re.compile(r"(?i)(?:final\s+answer|answer)\s*:\s*(yes|no)\b"),
-]
 
 
 def _normalize_vote_answer(answer: Optional[str], task_type: str) -> Optional[str]:
-    """Normalize an extracted answer for voting without changing math strings."""
     return normalize_task_answer(answer, task_type)
 
 
-def _mentions_maintain_previous(response: str) -> bool:
-    """Backward-compatible wrapper for previous-answer intent detection."""
-    return mentions_maintain_previous(response)
-
-
-def _resolve_actor_answer_for_round(
-    response: str,
-    extracted_answer: Optional[str],
-    previous_answer: Optional[str],
-    task_type: str,
-    extraction_source: Optional[str] = None,
-) -> tuple[Optional[str], str]:
-    """Resolve the task answer for this round without using Critic suggestions."""
-    resolved = resolve_answer_for_round(
-        response=response,
-        task_type=task_type,
-        previous_answer=previous_answer,
-        extracted_answer=extracted_answer,
-        extraction_source=extraction_source,
-    )
-    return resolved.resolved_answer, resolved.extract_source
-
-
-def _find_tail_answer_claim(response: str, task_type: str) -> Optional[str]:
-    """Find an explicit answer claim in the tail of an Actor response."""
-    lines = [line.strip() for line in response.strip().splitlines() if line.strip()]
-    tail = "\n".join(lines[-8:])
-
-    patterns = YES_NO_TAIL_ANSWER_PATTERNS if task_type == "yes_no" else MC_TAIL_ANSWER_PATTERNS
-    if task_type not in {"yes_no", "multiple_choice", "mixed"}:
-        return None
-
-    for pattern in patterns:
-        matches = pattern.findall(tail)
-        if matches:
-            return _normalize_vote_answer(matches[-1], task_type)
-
-    return None
-
-
-def _replace_final_answer_line(response: str, repaired_answer: str) -> str:
-    """Replace the last FINAL_ANSWER line, or prepend one if missing."""
-    matches = list(FINAL_ANSWER_LINE_PATTERN.finditer(response))
-    if not matches:
-        return f"FINAL_ANSWER: {repaired_answer}\n{response.lstrip()}"
-
-    last = matches[-1]
-    return (
-        response[:last.start()]
-        + f"{last.group('prefix')}{repaired_answer}{last.group('suffix')}"
-        + response[last.end():]
-    )
-
-
-def _repair_actor_answer_consistency(
-    response: str,
-    task_type: str,
-) -> tuple[str, Optional[str], Optional[str], bool]:
-    """
-    Ensure the recorded Actor answer matches an explicit tail answer claim.
-
-    The prompt asks Actors to put FINAL_ANSWER first.  In practice some traces
-    contain a stale first-line answer and a later explicit correction.  For MC
-    and yes/no tasks, repair only strong tail patterns such as "the correct
-    answer is C"; weak standalone letters are intentionally ignored.
-    """
-    extraction = extract_answer_with_source(response, task_type)
-    current = _normalize_vote_answer(extraction.answer, task_type)
-    source = extraction.source
-    tail_claim = _find_tail_answer_claim(response, task_type)
-
-    repaired = False
-    if tail_claim and tail_claim != current:
-        response = _replace_final_answer_line(response, tail_claim)
-        current = tail_claim
-        source = "strict"
-        repaired = True
-
-    return response, current, source, repaired
+def _extract_actor_answer(response: str, task_type: str) -> tuple[Optional[str], str, float]:
+    extracted = extract_answer(response, task_type)
+    answer = _normalize_vote_answer(extracted.answer, task_type)
+    return answer, extracted.source, extracted.confidence
 
 
 def _critic_aware_consensus(
     round_data: DeliberationRound,
     task_type: str,
 ) -> tuple[Optional[str], float, dict[str, float]]:
-    """
-    Combine Actor votes with schema-valid Critic signals.
-
-    Actor answers get a base vote of 1.0.  Valid Critics add confidence-weighted
-    support to the Actor answer when they mark it correct, or to their suggested
-    final answer when they mark it incorrect.  Invalid Critic outputs are ignored.
-    """
+    """Consensus from Actor votes plus Critic judgement signals."""
     weights: dict[str, float] = {}
 
     for answer in round_data.actor_answers.values():
@@ -290,19 +138,17 @@ def _critic_aware_consensus(
         if normalized:
             weights[normalized] = weights.get(normalized, 0.0) + 1.0
 
-    for actor_name, routed in round_data.routed_feedbacks.items():
+    for actor_name, feedbacks in round_data.critic_feedbacks.items():
         actor_answer = _normalize_vote_answer(round_data.actor_answers.get(actor_name), task_type)
-        for feedback in routed.raw_feedbacks:
-            if not feedback.schema_valid or feedback.confidence <= 0:
+        for feedback in feedbacks.values():
+            if feedback.confidence is None:
                 continue
-
-            if feedback.answer_correct is True and actor_answer:
+            if feedback.answer_correct == "yes" and actor_answer:
                 weights[actor_answer] = weights.get(actor_answer, 0.0) + feedback.confidence
-                continue
-
-            suggested = _normalize_vote_answer(feedback.suggested_answer, task_type)
-            if feedback.answer_correct is False and suggested:
-                weights[suggested] = weights.get(suggested, 0.0) + feedback.confidence
+            elif feedback.answer_correct == "no":
+                suggested = _normalize_vote_answer(feedback.suggested_answer, task_type)
+                if suggested:
+                    weights[suggested] = weights.get(suggested, 0.0) + feedback.confidence
 
     if not weights:
         return None, 0.0, {}
@@ -321,67 +167,32 @@ def _critic_aware_consensus(
     )
     total = sum(weights.values())
     confidence = best_weight / total if total > 0 else 0.0
-
     return best_answer, confidence, weights
 
 
 def _resolve_adapter_path(path: str) -> str:
-    """Resolve a LoRA adapter path.
-
-    _dpo_runner.py saves:
-      - LoRA adapter  -> output_dir + "_adapter/"
-      - merged model  -> output_dir/
-
-    Callers typically hold the merged-model path.  This function
-    automatically discovers the adapter directory next to it.
-
-    Raises LoRAError if no valid adapter directory is found.
-    """
     p = Path(path)
-
-    # Case 1: path already points to a valid adapter directory
     if (p / "adapter_config.json").exists():
         return str(p)
-
-    # Case 2: try _adapter suffix (convention from _dpo_runner.py)
     adapter_path = Path(str(p) + "_adapter")
     if (adapter_path / "adapter_config.json").exists():
-        logger.info(f"Resolved adapter path: {adapter_path} (from {path})")
+        logger.info("Resolved adapter path: %s (from %s)", adapter_path, path)
         return str(adapter_path)
-
     raise LoRAError(
-        f"LoRA adapter not found.  Tried:\n"
-        f"  1. {p}/adapter_config.json\n"
-        f"  2. {adapter_path}/adapter_config.json\n"
-        f"If '{p}' is a merged model directory, the adapter should be at "
-        f"'{adapter_path}'.  Make sure _dpo_runner.py has been run and both "
-        f"directories exist."
+        f"LoRA adapter not found. Tried {p}/adapter_config.json and "
+        f"{adapter_path}/adapter_config.json."
     )
 
 
 def _load_lora_adapter(engine: Any, lora_path: str) -> Any:
-    """Create a LoRARequest for the given adapter path.
-
-    Validates that the adapter directory exists and contains the required
-    files.  Raises LoRAError if the adapter is missing or invalid.
-
-    Returns a LoRARequest object (never None for non-empty paths).
-    """
     if not lora_path:
         return None
-
-    # Validate engine supports LoRA
-    if hasattr(engine, 'supports_lora') and not engine.supports_lora:
+    if hasattr(engine, "supports_lora") and not engine.supports_lora:
         raise LoRAError(
-            f"Agent requires LoRA adapter at '{lora_path}', but the "
-            f"VLLMInference engine was created without enable_lora=True.  "
-            f"Re-create the engine with enable_lora=True, max_loras=<N>, "
-            f"max_lora_rank=256."
+            f"Agent requires LoRA adapter at '{lora_path}', but the inference "
+            "engine was created without LoRA support."
         )
-
-    # Resolve adapter path (handles _adapter suffix convention)
     resolved_path = _resolve_adapter_path(lora_path)
-
     try:
         try:
             from vllm.lora.request import LoRARequest
@@ -389,26 +200,106 @@ def _load_lora_adapter(engine: Any, lora_path: str) -> Any:
             from vllm import LoRARequest
         lora_name = Path(resolved_path).name or "adapter"
         lora_id = _get_stable_lora_id(resolved_path)
-        lora_request = LoRARequest(lora_name, lora_id, resolved_path)
-        logger.info(f"Created LoRARequest: name={lora_name}, id={lora_id}, path={resolved_path}")
-        return lora_request
+        return LoRARequest(lora_name, lora_id, resolved_path)
     except ImportError as e:
-        raise LoRAError(
-            f"vllm.LoRARequest import failed: {e}.  "
-            f"Ensure vllm >= 0.6 is installed for LoRA support."
-        ) from e
+        raise LoRAError(f"vllm.LoRARequest import failed: {e}") from e
     except Exception as e:
-        raise LoRAError(
-            f"Failed to create LoRARequest for '{resolved_path}': {e}"
-        ) from e
+        raise LoRAError(f"Failed to create LoRARequest for '{resolved_path}': {e}") from e
 
 
-# ============================================================
-# Multi-agent deliberation (single GPU, batched inference)
-# ============================================================
+def _generate_with_lora(
+    engine: Any,
+    prompts: list[str],
+    agents: list[AgentConfig],
+    lora_requests: dict[str, Any],
+    max_tokens: int = 512,
+    temperature: float = 0.7,
+) -> list[str]:
+    """Generate responses with per-agent LoRA adapters."""
+    groups: dict[Optional[Any], list[tuple[int, str]]] = {}
+    for idx, (prompt, agent) in enumerate(zip(prompts, agents)):
+        groups.setdefault(lora_requests.get(agent.name), []).append((idx, prompt))
+
+    results: list[Optional[str]] = [None] * len(prompts)
+    for lora_req, items in groups.items():
+        batch_prompts = [prompt for _, prompt in items]
+        batch_indices = [idx for idx, _ in items]
+        if lora_req is not None:
+            try:
+                if hasattr(engine, "generate_with_lora"):
+                    batch_results = engine.generate_with_lora(
+                        batch_prompts,
+                        lora_req,
+                        max_tokens=max_tokens,
+                        temperature=temperature,
+                    )
+                elif hasattr(engine, "_llm") and engine._llm is not None:
+                    from vllm import SamplingParams
+                    params = SamplingParams(max_tokens=max_tokens, temperature=temperature, n=1)
+                    outputs = engine._llm.generate(batch_prompts, params, lora_request=lora_req)
+                    batch_results = [choice.text for out in outputs for choice in out.outputs]
+                else:
+                    raise LoRAError("Engine does not support LoRA generation.")
+            except LoRAError:
+                raise
+            except Exception as e:
+                agent_names = [agents[idx].name for idx in batch_indices]
+                raise LoRAError(f"LoRA generation failed for agents {agent_names}: {e}") from e
+        else:
+            batch_results = engine.generate(
+                batch_prompts,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+        for idx, result in zip(batch_indices, batch_results):
+            results[idx] = result if isinstance(result, str) else str(result)
+
+    return [result or "" for result in results]
+
+
+def _prepare_loras(
+    inference_engine: Any,
+    actors: list[AgentConfig],
+    critics: list[AgentConfig],
+    lora_paths: Optional[dict[str, str]],
+) -> dict[str, Any]:
+    lora_paths = lora_paths or {}
+    agents = list(actors) + list(critics)
+    needing = []
+    for agent in agents:
+        path = lora_paths.get(agent.name, agent.lora_path)
+        if path:
+            needing.append((agent.name, path))
+    if needing:
+        supports = hasattr(inference_engine, "supports_lora") and inference_engine.supports_lora
+        if not supports:
+            agent_list = ", ".join(f"{name} ({path})" for name, path in needing)
+            raise LoRAError(f"Agents require LoRA but engine does not support it: {agent_list}")
+
+    requests: dict[str, Any] = {}
+    for agent in agents:
+        path = lora_paths.get(agent.name, agent.lora_path)
+        if path:
+            requests[agent.name] = _load_lora_adapter(inference_engine, path)
+    return requests
+
+
+def _empty_result(actors: list[AgentConfig], critics: list[AgentConfig]) -> MultiDeliberationResult:
+    return MultiDeliberationResult(
+        rounds=[],
+        final_answers={},
+        consensus_answer=None,
+        consensus_confidence=0.0,
+        metadata={"num_actors": len(actors), "num_critics": len(critics)},
+    )
+
+
+def _actor_feedback_for_next_round(round_data: DeliberationRound, actor_name: str) -> str:
+    return round_data.routed_feedback_texts.get(actor_name, "")
+
 
 def multi_agent_deliberate_single_gpu(
-    inference_engine: Any,  # VLLMInference
+    inference_engine: Any,
     actors: list[AgentConfig],
     critics: list[AgentConfig],
     sample: dict,
@@ -420,249 +311,129 @@ def multi_agent_deliberate_single_gpu(
     checkpoint_dir: Optional[str] = None,
     lora_paths: Optional[dict[str, str]] = None,
 ) -> MultiDeliberationResult:
-    """
-    Multi-agent deliberation on a single GPU with batched inference.
-
-    For each round:
-    1. All Actors generate responses (batched into 1 vLLM call)
-    2. All Critics evaluate each Actor (batched: M critics x 1 actor = 1 call)
-    3. Router combines Critic feedback
-    4. Feedback is injected into next-round Actor prompts
-    5. Consensus via Actor votes plus schema-valid Critic signals
-
-    LoRA adapters are loaded via LoRARequest objects passed to generate().
-
-    Args:
-        inference_engine: VLLMInference instance (base model).
-        actors: List of Actor AgentConfigs.
-        critics: List of Critic AgentConfigs.
-        sample: Standardized sample dict.
-        dataset_name: Dataset name for prompt templates.
-        num_rounds: Number of deliberation rounds.
-        max_tokens: Max tokens per generation.
-        temperature: Sampling temperature.
-        router: CriticRouter for combining feedback.
-        checkpoint_dir: Directory for crash recovery persistence.
-        lora_paths: Optional dict mapping agent_name -> LoRA adapter path.
-
-    Returns:
-        MultiDeliberationResult with complete deliberation history.
-    """
+    """Run natural multi-Actor, multi-Critic deliberation for one sample."""
     if router is None:
         router = CriticRouter(top_k=2)
-
     if num_rounds <= 0:
-        logger.warning("num_rounds <= 0, returning empty result")
-        return MultiDeliberationResult(
-            rounds=[],
-            final_answers={},
-            consensus_answer=None,
-            consensus_confidence=0.0,
-            metadata={"num_actors": len(actors), "num_critics": len(critics)},
-        )
+        return _empty_result(actors, critics)
 
     task_type = sample.get("task_type", "yes_no")
     ckpt_dir = Path(checkpoint_dir) if checkpoint_dir else None
-    lora_paths = lora_paths or {}
-
-    # Check which agents require LoRA and validate engine support
-    agents_needing_lora = []
-    for agent in list(actors) + list(critics):
-        lora_path = lora_paths.get(agent.name, agent.lora_path)
-        if lora_path:
-            agents_needing_lora.append((agent.name, lora_path))
-
-    if agents_needing_lora:
-        engine_supports_lora = (
-            hasattr(inference_engine, 'supports_lora')
-            and inference_engine.supports_lora
-        )
-        if not engine_supports_lora:
-            agent_list = ", ".join(f"{n} ({p})" for n, p in agents_needing_lora)
-            raise LoRAError(
-                f"{len(agents_needing_lora)} agents require LoRA adapters "
-                f"but the inference engine does not have LoRA enabled.\n"
-                f"  Agents: {agent_list}\n"
-                f"  Fix: create VLLMInference with enable_lora=True, "
-                f"max_loras={len(agents_needing_lora)}, max_lora_rank=256"
-            )
-
-    # Pre-create LoRA request objects for each agent (once, reuse across rounds)
-    lora_requests: dict[str, Any] = {}
-    for agent in list(actors) + list(critics):
-        lora_path = lora_paths.get(agent.name, agent.lora_path)
-        if lora_path:
-            lora_req = _load_lora_adapter(inference_engine, lora_path)
-            if lora_req is not None:
-                lora_requests[agent.name] = lora_req
-                logger.info(f"Loaded LoRA for {agent.name}: {lora_path}")
-
+    lora_requests = _prepare_loras(inference_engine, actors, critics, lora_paths)
     rounds: list[DeliberationRound] = []
-    # Track previous responses per actor (for deliberation prompts)
-    actor_histories: dict[str, list[str]] = {a.name: [] for a in actors}
-    actor_answer_state: dict[str, Optional[str]] = {a.name: None for a in actors}
+    previous_actor_responses = {actor.name: "" for actor in actors}
+    previous_feedback = {actor.name: "" for actor in actors}
 
     for round_num in range(num_rounds):
         round_data = DeliberationRound(
             round_num=round_num,
             actor_responses={},
             actor_answers={},
-            raw_actor_answers={},
             actor_answer_sources={},
-            actor_format_valid={},
+            actor_parse_confidence={},
+            critic_raw_responses={},
             critic_feedbacks={},
             routed_feedbacks={},
         )
 
-        # ---- Step 1: Batch all Actor responses into 1 vLLM call ----
-        # Check crash recovery first
-        uncached_actors = []
+        uncached_actors: list[AgentConfig] = []
         for actor in actors:
             ckpt_path = ckpt_dir / f"round_{round_num}" / f"actor_{actor.name}.json" if ckpt_dir else None
             cached = _load_json(ckpt_path) if ckpt_path else None
             if cached and "actor_response" in cached:
-                actor_response = cached["actor_response"]
-                actor_response, actor_answer, answer_source, repaired = _repair_actor_answer_consistency(
-                    actor_response,
-                    task_type,
-                )
-                resolved = resolve_answer_for_round(
-                    response=actor_response,
-                    task_type=task_type,
-                    previous_answer=actor_answer_state.get(actor.name),
-                    extracted_answer=actor_answer,
-                    extraction_source=answer_source,
-                )
-                round_data.actor_responses[actor.name] = actor_response
-                round_data.raw_actor_answers[actor.name] = resolved.raw_extracted_answer
-                round_data.actor_answers[actor.name] = resolved.resolved_answer
-                round_data.actor_answer_sources[actor.name] = resolved.extract_source
-                round_data.actor_format_valid[actor.name] = resolved.format_valid
-                actor_answer_state[actor.name] = resolved.resolved_answer
-                actor_histories[actor.name].append(actor_response)
-                if repaired and ckpt_path:
-                    _atomic_write_json(
-                        ckpt_path,
-                        {"actor_response": actor_response, "answer_repaired": True},
-                    )
-                logger.info(f"[Recovery] Loaded cached response for {actor.name} round {round_num}")
+                response = str(cached["actor_response"])
+                answer, source, parse_conf = _extract_actor_answer(response, task_type)
+                round_data.actor_responses[actor.name] = response
+                round_data.actor_answers[actor.name] = answer
+                round_data.actor_answer_sources[actor.name] = source
+                round_data.actor_parse_confidence[actor.name] = parse_conf
+                previous_actor_responses[actor.name] = response
+                logger.info("[Recovery] Loaded cached response for %s round %s", actor.name, round_num)
             else:
                 uncached_actors.append(actor)
 
         if uncached_actors:
-            # Build all actor prompts
-            actor_prompts = []
-            for actor in uncached_actors:
-                prompt = _build_actor_prompt(
-                    actor, sample, dataset_name, round_num,
-                    actor_histories[actor.name],
+            prompts = [
+                build_actor_prompt(
+                    actor,
+                    sample,
+                    dataset_name,
+                    round_num=round_num,
+                    previous_actor_response=previous_actor_responses[actor.name],
+                    critic_feedback=previous_feedback[actor.name],
                 )
-                actor_prompts.append(prompt)
-
-            # Generate with LoRA if available
-            actor_responses_batch = _generate_with_lora(
+                for actor in uncached_actors
+            ]
+            responses = _generate_with_lora(
                 inference_engine,
-                actor_prompts,
+                prompts,
                 uncached_actors,
                 lora_requests,
                 max_tokens=max_tokens,
                 temperature=temperature,
             )
-
-            # Store results
-            for actor, response in zip(uncached_actors, actor_responses_batch):
-                response = response if isinstance(response, str) else str(response)
-                response, actor_answer, answer_source, repaired = _repair_actor_answer_consistency(
-                    response,
-                    task_type,
-                )
-                resolved = resolve_answer_for_round(
-                    response=response,
-                    task_type=task_type,
-                    previous_answer=actor_answer_state.get(actor.name),
-                    extracted_answer=actor_answer,
-                    extraction_source=answer_source,
-                )
+            for actor, response in zip(uncached_actors, responses):
+                answer, source, parse_conf = _extract_actor_answer(response, task_type)
                 round_data.actor_responses[actor.name] = response
-                round_data.raw_actor_answers[actor.name] = resolved.raw_extracted_answer
-                round_data.actor_answers[actor.name] = resolved.resolved_answer
-                round_data.actor_answer_sources[actor.name] = resolved.extract_source
-                round_data.actor_format_valid[actor.name] = resolved.format_valid
-                actor_answer_state[actor.name] = resolved.resolved_answer
-                actor_histories[actor.name].append(response)
-
+                round_data.actor_answers[actor.name] = answer
+                round_data.actor_answer_sources[actor.name] = source
+                round_data.actor_parse_confidence[actor.name] = parse_conf
+                previous_actor_responses[actor.name] = response
                 if ckpt_dir:
                     ckpt_path = ckpt_dir / f"round_{round_num}" / f"actor_{actor.name}.json"
-                    _atomic_write_json(
-                        ckpt_path,
-                        {"actor_response": response, "answer_repaired": repaired},
-                    )
+                    _atomic_write_json(ckpt_path, {"actor_response": response})
 
-        # ---- Step 2: Batch all Critic evaluations ----
         for actor in actors:
             actor_response = round_data.actor_responses[actor.name]
+            round_data.critic_raw_responses[actor.name] = {}
             round_data.critic_feedbacks[actor.name] = {}
 
-            # Check cache for all critics
-            uncached_critics = []
+            uncached_critics: list[AgentConfig] = []
             for critic in critics:
-                ckpt_path = (ckpt_dir / f"round_{round_num}" /
-                             f"critic_{critic.name}_for_{actor.name}.json" if ckpt_dir else None)
+                ckpt_path = (
+                    ckpt_dir / f"round_{round_num}" / f"critic_{critic.name}_for_{actor.name}.json"
+                    if ckpt_dir else None
+                )
                 cached = _load_json(ckpt_path) if ckpt_path else None
                 if cached and "critic_response" in cached:
-                    round_data.critic_feedbacks[actor.name][critic.name] = cached["critic_response"]
+                    response = str(cached["critic_response"])
+                    round_data.critic_raw_responses[actor.name][critic.name] = response
                 else:
                     uncached_critics.append(critic)
 
             if uncached_critics:
-                # Build all critic prompts for this actor
-                critic_prompts = [
-                    _build_critic_prompt(c, sample, dataset_name, actor_response)
-                    for c in uncached_critics
+                prompts = [
+                    build_critic_feedback_prompt(critic, sample, dataset_name, actor_response)
+                    for critic in uncached_critics
                 ]
-
-                # Generate with LoRA if available
-                critic_responses_batch = _generate_with_lora(
+                responses = _generate_with_lora(
                     inference_engine,
-                    critic_prompts,
+                    prompts,
                     uncached_critics,
                     lora_requests,
                     max_tokens=max_tokens,
                     temperature=temperature,
                 )
-
-                for critic, response in zip(uncached_critics, critic_responses_batch):
-                    response = response if isinstance(response, str) else str(response)
-                    round_data.critic_feedbacks[actor.name][critic.name] = response
-
+                for critic, response in zip(uncached_critics, responses):
+                    round_data.critic_raw_responses[actor.name][critic.name] = response
                     if ckpt_dir:
-                        ckpt_path = (ckpt_dir / f"round_{round_num}" /
-                                     f"critic_{critic.name}_for_{actor.name}.json")
+                        ckpt_path = (
+                            ckpt_dir / f"round_{round_num}" / f"critic_{critic.name}_for_{actor.name}.json"
+                        )
                         _atomic_write_json(ckpt_path, {"critic_response": response})
 
-            # ---- Step 3: Router combines feedback ----
-            critic_feedbacks = []
+            feedbacks: list[CriticFeedback] = []
             for critic in critics:
-                resp = round_data.critic_feedbacks[actor.name].get(critic.name, "")
-                fb = build_critic_feedback(
-                    critic,
-                    resp,
-                    actor_answer=round_data.actor_answers.get(actor.name),
-                )
-                critic_feedbacks.append(fb)
-            routed = router.route(critic_feedbacks)
-            round_data.routed_feedbacks[actor.name] = routed
+                raw = round_data.critic_raw_responses[actor.name].get(critic.name, "")
+                feedback = build_critic_feedback(critic, raw, task_type=task_type)
+                round_data.critic_feedbacks[actor.name][critic.name] = feedback
+                feedbacks.append(feedback)
 
-        # ---- Step 4: Inject routed feedback into actor histories for next round ----
-        # This is critical: Actors must see Critic feedback to improve their answers
-        for actor in actors:
-            routed = round_data.routed_feedbacks.get(actor.name)
-            if routed and routed.feedback_text:
-                actor_histories[actor.name].append(
-                    f"[Critic Feedback]\n{routed.feedback_text}"
-                )
+            routed = router.route(feedbacks)
+            round_data.routed_feedbacks[actor.name] = routed.selected_feedbacks
+            round_data.routed_feedback_texts[actor.name] = routed.feedback_text
+            previous_feedback[actor.name] = routed.feedback_text
 
-        # ---- Step 5: Critic-aware consensus ----
         consensus_answer, consensus_confidence, consensus_weights = _critic_aware_consensus(
             round_data,
             task_type,
@@ -670,101 +441,20 @@ def multi_agent_deliberate_single_gpu(
         round_data.consensus_answer = consensus_answer
         round_data.consensus_confidence = consensus_confidence
         round_data.consensus_weights = consensus_weights
-
         rounds.append(round_data)
 
-    # Final answers from last round
     final_round = rounds[-1]
-    final_answers = dict(final_round.actor_answers)
-    consensus_answer = final_round.consensus_answer
-    consensus_confidence = final_round.consensus_confidence
-
     return MultiDeliberationResult(
         rounds=rounds,
-        final_answers=final_answers,
-        consensus_answer=consensus_answer,
-        consensus_confidence=consensus_confidence,
+        final_answers=dict(final_round.actor_answers),
+        consensus_answer=final_round.consensus_answer,
+        consensus_confidence=final_round.consensus_confidence,
         metadata={"num_actors": len(actors), "num_critics": len(critics)},
     )
 
 
-
-# ============================================================
-# LoRA-aware generation helper
-# ============================================================
-
-def _generate_with_lora(
-    engine: Any,
-    prompts: list[str],
-    agents: list[AgentConfig],
-    lora_requests: dict[str, Any],
-    max_tokens: int = 512,
-    temperature: float = 0.7,
-) -> list[str]:
-    """Generate responses with per-agent LoRA adapters.
-
-    Groups agents by their LoRA request (or None for base model) and batches
-    each group into a single vLLM call.
-
-    Raises LoRAError if a LoRA adapter is required but cannot be used.
-    """
-    # Group agents by their LoRA request (or None for base model)
-    groups: dict[Optional[Any], list[tuple[int, str]]] = {}  # lora_req -> [(idx, prompt)]
-    for i, (prompt, agent) in enumerate(zip(prompts, agents)):
-        lora_req = lora_requests.get(agent.name)
-        groups.setdefault(lora_req, []).append((i, prompt))
-
-    results: list[Optional[str]] = [None] * len(prompts)
-
-    for lora_req, items in groups.items():
-        batch_prompts = [p for _, p in items]
-        batch_indices = [idx for idx, _ in items]
-
-        if lora_req is not None:
-            # Use vLLM's LoRA-aware generation
-            try:
-                if hasattr(engine, 'generate_with_lora'):
-                    batch_results = engine.generate_with_lora(
-                        batch_prompts, lora_req,
-                        max_tokens=max_tokens, temperature=temperature,
-                    )
-                elif hasattr(engine, '_llm') and engine._llm is not None:
-                    from vllm import SamplingParams
-                    params = SamplingParams(max_tokens=max_tokens, temperature=temperature, n=1)
-                    outputs = engine._llm.generate(batch_prompts, params, lora_request=lora_req)
-                    batch_results = [c.text for o in outputs for c in o.outputs]
-                else:
-                    raise LoRAError(
-                        f"Engine does not support LoRA generation for adapter "
-                        f"'{lora_req.lora_path}'.  The VLLMInference engine must "
-                        f"be created with enable_lora=True."
-                    )
-            except LoRAError:
-                raise
-            except Exception as e:
-                agent_names = [agents[idx].name for idx in batch_indices]
-                raise LoRAError(
-                    f"LoRA generation failed for agents {agent_names} with "
-                    f"adapter '{getattr(lora_req, 'lora_path', lora_req)}': {e}"
-                ) from e
-        else:
-            # No LoRA: use standard generate
-            batch_results = engine.generate(
-                batch_prompts, max_tokens=max_tokens, temperature=temperature,
-            )
-
-        for idx, result in zip(batch_indices, batch_results):
-            results[idx] = result if isinstance(result, str) else str(result)
-
-    return results
-
-
-# ============================================================
-# Multi-agent deliberation (batched across samples)
-# ============================================================
-
 def multi_agent_deliberate_batched_single_gpu(
-    inference_engine: Any,  # VLLMInference
+    inference_engine: Any,
     actors: list[AgentConfig],
     critics: list[AgentConfig],
     samples: list[dict],
@@ -775,331 +465,130 @@ def multi_agent_deliberate_batched_single_gpu(
     router: Optional[CriticRouter] = None,
     lora_paths: Optional[dict[str, str]] = None,
 ) -> list[MultiDeliberationResult]:
-    """Batched multi-agent deliberation across samples.
-
-    Same logic as multi_agent_deliberate_single_gpu but processes
-    multiple samples in parallel, batching vLLM calls by LoRA adapter.
-    This maximises GPU utilisation when the same actor/critic evaluates
-    many samples at once.
-
-    Returns one MultiDeliberationResult per sample, in the same order.
-    """
-    n = len(samples)
-    if n == 0:
+    """Batched natural deliberation across samples."""
+    if not samples:
         return []
-
     if router is None:
         router = CriticRouter(top_k=2)
-
     if num_rounds <= 0:
-        return [
-            MultiDeliberationResult(
-                rounds=[], final_answers={},
-                consensus_answer=None, consensus_confidence=0.0,
-                metadata={"num_actors": len(actors), "num_critics": len(critics)},
-            )
-            for _ in range(n)
-        ]
+        return [_empty_result(actors, critics) for _ in samples]
 
-    task_types = [s.get("task_type", "yes_no") for s in samples]
-    lora_paths = lora_paths or {}
-
-    # Validate LoRA support
-    agents_needing_lora = []
-    for agent in list(actors) + list(critics):
-        lora_path = lora_paths.get(agent.name, agent.lora_path)
-        if lora_path:
-            agents_needing_lora.append((agent.name, lora_path))
-
-    if agents_needing_lora:
-        engine_supports_lora = (
-            hasattr(inference_engine, 'supports_lora')
-            and inference_engine.supports_lora
-        )
-        if not engine_supports_lora:
-            agent_list = ", ".join(f"{name} ({path})" for name, path in agents_needing_lora)
-            raise LoRAError(
-                f"{len(agents_needing_lora)} agents require LoRA adapters "
-                f"but the inference engine does not have LoRA enabled.\n"
-                f"  Agents: {agent_list}"
-            )
-
-    # Pre-create LoRA request objects (once, reuse across rounds)
-    lora_requests: dict[str, Any] = {}
-    for agent in list(actors) + list(critics):
-        lora_path = lora_paths.get(agent.name, agent.lora_path)
-        if lora_path:
-            lora_req = _load_lora_adapter(inference_engine, lora_path)
-            if lora_req is not None:
-                lora_requests[agent.name] = lora_req
-
-    # Per-sample, per-actor state
-    actor_histories: dict[str, list[list[str]]] = {
-        a.name: [[] for _ in range(n)] for a in actors
-    }
-    actor_answer_state: dict[str, list[Optional[str]]] = {
-        a.name: [None] * n for a in actors
-    }
-
-    # Per-sample round accumulators
+    n = len(samples)
+    task_types = [sample.get("task_type", "yes_no") for sample in samples]
+    lora_requests = _prepare_loras(inference_engine, actors, critics, lora_paths)
     all_rounds: list[list[DeliberationRound]] = [[] for _ in range(n)]
+    previous_actor_responses = {actor.name: [""] * n for actor in actors}
+    previous_feedback = {actor.name: [""] * n for actor in actors}
 
     for round_num in range(num_rounds):
         round_start = time.time()
-
-        # Per-sample round data
         round_datas = [
             DeliberationRound(
                 round_num=round_num,
                 actor_responses={},
                 actor_answers={},
-                raw_actor_answers={},
                 actor_answer_sources={},
-                actor_format_valid={},
+                actor_parse_confidence={},
+                critic_raw_responses={},
                 critic_feedbacks={},
                 routed_feedbacks={},
             )
             for _ in range(n)
         ]
 
-        # ---- Step 1: Batch actor generation across samples ----
         for actor in actors:
-            actor_prompts = [
-                _build_actor_prompt(
-                    actor, samples[i], dataset_name, round_num,
-                    actor_histories[actor.name][i],
+            prompts = [
+                build_actor_prompt(
+                    actor,
+                    samples[i],
+                    dataset_name,
+                    round_num=round_num,
+                    previous_actor_response=previous_actor_responses[actor.name][i],
+                    critic_feedback=previous_feedback[actor.name][i],
                 )
                 for i in range(n)
             ]
-
-            actor_responses = _generate_with_lora(
+            responses = _generate_with_lora(
                 inference_engine,
-                actor_prompts,
+                prompts,
                 [actor] * n,
                 lora_requests,
                 max_tokens=max_tokens,
                 temperature=temperature,
             )
-
-            for i, response in enumerate(actor_responses):
-                response = response if isinstance(response, str) else str(response)
-                response, actor_answer, answer_source, repaired = (
-                    _repair_actor_answer_consistency(response, task_types[i])
-                )
-                resolved = resolve_answer_for_round(
-                    response=response,
-                    task_type=task_types[i],
-                    previous_answer=actor_answer_state[actor.name][i],
-                    extracted_answer=actor_answer,
-                    extraction_source=answer_source,
-                )
+            for i, response in enumerate(responses):
+                answer, source, parse_conf = _extract_actor_answer(response, task_types[i])
                 round_datas[i].actor_responses[actor.name] = response
-                round_datas[i].raw_actor_answers[actor.name] = resolved.raw_extracted_answer
-                round_datas[i].actor_answers[actor.name] = resolved.resolved_answer
-                round_datas[i].actor_answer_sources[actor.name] = resolved.extract_source
-                round_datas[i].actor_format_valid[actor.name] = resolved.format_valid
-                actor_answer_state[actor.name][i] = resolved.resolved_answer
-                actor_histories[actor.name][i].append(response)
+                round_datas[i].actor_answers[actor.name] = answer
+                round_datas[i].actor_answer_sources[actor.name] = source
+                round_datas[i].actor_parse_confidence[actor.name] = parse_conf
+                previous_actor_responses[actor.name][i] = response
 
-        # ---- Step 2: Batch critic generation ----
-        # For each critic, batch all (actor x sample) pairs into one call.
         for critic in critics:
-            critic_prompts = []
-            prompt_keys = []  # (sample_idx, actor_name)
-
+            prompts: list[str] = []
+            keys: list[tuple[int, str]] = []
             for actor in actors:
                 for i in range(n):
-                    actor_resp = round_datas[i].actor_responses[actor.name]
-                    critic_prompts.append(
-                        _build_critic_prompt(
-                            critic, samples[i], dataset_name, actor_resp,
+                    prompts.append(
+                        build_critic_feedback_prompt(
+                            critic,
+                            samples[i],
+                            dataset_name,
+                            round_datas[i].actor_responses[actor.name],
                         )
                     )
-                    prompt_keys.append((i, actor.name))
-
-            if not critic_prompts:
-                continue
-
-            critic_responses = _generate_with_lora(
+                    keys.append((i, actor.name))
+            responses = _generate_with_lora(
                 inference_engine,
-                critic_prompts,
-                [critic] * len(critic_prompts),
+                prompts,
+                [critic] * len(prompts),
                 lora_requests,
                 max_tokens=max_tokens,
                 temperature=temperature,
             )
+            for (sample_idx, actor_name), response in zip(keys, responses):
+                round_datas[sample_idx].critic_raw_responses.setdefault(actor_name, {})
+                round_datas[sample_idx].critic_raw_responses[actor_name][critic.name] = response
 
-            for (si, actor_name), resp in zip(prompt_keys, critic_responses):
-                resp = resp if isinstance(resp, str) else str(resp)
-                round_datas[si].critic_feedbacks.setdefault(actor_name, {})
-                round_datas[si].critic_feedbacks[actor_name][critic.name] = resp
-
-        # ---- Step 3: Route + consensus per sample (CPU-only, fast) ----
         for i in range(n):
             for actor in actors:
-                critic_feedbacks = []
+                round_datas[i].critic_feedbacks.setdefault(actor.name, {})
+                feedbacks: list[CriticFeedback] = []
                 for critic in critics:
-                    resp = round_datas[i].critic_feedbacks.get(
-                        actor.name, {},
-                    ).get(critic.name, "")
-                    fb = build_critic_feedback(
-                        critic, resp,
-                        actor_answer=round_datas[i].actor_answers.get(actor.name),
-                    )
-                    critic_feedbacks.append(fb)
-                routed = router.route(critic_feedbacks)
-                round_datas[i].routed_feedbacks[actor.name] = routed
+                    raw = round_datas[i].critic_raw_responses.get(actor.name, {}).get(critic.name, "")
+                    feedback = build_critic_feedback(critic, raw, task_type=task_types[i])
+                    round_datas[i].critic_feedbacks[actor.name][critic.name] = feedback
+                    feedbacks.append(feedback)
+                routed = router.route(feedbacks)
+                round_datas[i].routed_feedbacks[actor.name] = routed.selected_feedbacks
+                round_datas[i].routed_feedback_texts[actor.name] = routed.feedback_text
+                previous_feedback[actor.name][i] = routed.feedback_text
 
-                if routed and routed.feedback_text:
-                    actor_histories[actor.name][i].append(
-                        f"[Critic Feedback]\n{routed.feedback_text}"
-                    )
-
-            consensus_answer, consensus_confidence, consensus_weights = (
-                _critic_aware_consensus(round_datas[i], task_types[i])
+            consensus_answer, consensus_confidence, consensus_weights = _critic_aware_consensus(
+                round_datas[i],
+                task_types[i],
             )
             round_datas[i].consensus_answer = consensus_answer
             round_datas[i].consensus_confidence = consensus_confidence
             round_datas[i].consensus_weights = consensus_weights
-
             all_rounds[i].append(round_datas[i])
 
-        round_elapsed = time.time() - round_start
         logger.info(
-            f"  Batched round {round_num + 1}/{num_rounds} "
-            f"({n} samples, {round_elapsed:.1f}s)"
+            "  Batched round %s/%s (%s samples, %.1fs)",
+            round_num + 1,
+            num_rounds,
+            n,
+            time.time() - round_start,
         )
 
-    # Build per-sample results
     results = []
-    for i in range(n):
-        final_round = all_rounds[i][-1]
+    for sample_rounds in all_rounds:
+        final_round = sample_rounds[-1]
         results.append(MultiDeliberationResult(
-            rounds=all_rounds[i],
+            rounds=sample_rounds,
             final_answers=dict(final_round.actor_answers),
             consensus_answer=final_round.consensus_answer,
             consensus_confidence=final_round.consensus_confidence,
             metadata={"num_actors": len(actors), "num_critics": len(critics)},
         ))
-
     return results
-
-
-# ============================================================
-# Prompt builders (separated for testability and reuse)
-# ============================================================
-
-def _answer_contract(sample: dict) -> str:
-    """Backward-compatible wrapper around the shared Actor answer contract."""
-    return answer_contract(sample)
-
-
-def _build_actor_prompt(
-    actor: AgentConfig,
-    sample: dict,
-    dataset_name: str,
-    round_num: int,
-    previous_responses: list[str],
-) -> str:
-    """Build prompt for an Actor response.
-
-    For round > 0, Critic feedback is already appended to previous_responses
-    by the deliberation loop, so it will be included via the template.
-
-    Prompt structure for prefix caching (round > 0):
-      [system_prompt]  -- shared across samples for same actor
-      [question/options/passage]  -- shared across rounds for same sample
-      [deliberation context with previous responses]
-      [revision instruction]
-      [answer contract]
-    """
-    from src.prompts.templates import get_prompt_template, PromptType
-
-    sample_fields = dict(
-        question=sample.get("question", ""),
-        passage=sample.get("passage", ""),
-        responses_text="",
-        choice_a=sample.get("choices", ["", "", "", ""])[0] if len(sample.get("choices", [])) >= 1 else "",
-        choice_b=sample.get("choices", ["", "", "", ""])[1] if len(sample.get("choices", [])) >= 2 else "",
-        choice_c=sample.get("choices", ["", "", "", ""])[2] if len(sample.get("choices", [])) >= 3 else "",
-        choice_d=sample.get("choices", ["", "", "", ""])[3] if len(sample.get("choices", [])) >= 4 else "",
-    )
-
-    if round_num == 0:
-        # Round 0: SINGLE_SHOT template (question-first already)
-        template = get_prompt_template(dataset_name, PromptType.SINGLE_SHOT)
-        prompt = template.format(**sample_fields)
-    else:
-        # Round > 0: question-first structure for prefix caching.
-        # Use SINGLE_SHOT template for the question part (shared KV prefix),
-        # then append deliberation context with previous responses.
-        question_template = get_prompt_template(dataset_name, PromptType.SINGLE_SHOT)
-        prompt = question_template.format(**sample_fields)
-
-        if previous_responses:
-            intro = _DELIBERATION_INTRO.get(
-                dataset_name,
-                "Several people have provided answers to the question.",
-            )
-            responses_text = "\n\n".join(previous_responses)
-            prompt += (
-                f"\n\n{intro} Below are their responses:\n"
-                f"{responses_text}\n\n"
-                f"You should take these responses into consideration "
-                f"when answering the question above."
-            )
-
-    # Prepend actor's style-specific system prompt
-    if actor.system_prompt:
-        style_name = actor.reasoning_style.value if actor.reasoning_style else actor.name
-        prompt = (
-            f"You are Actor-{style_name}.\n"
-            "You must solve using this reasoning style.\n"
-            f"{actor.system_prompt}\n\n{prompt}"
-        )
-
-    # Revision instruction for deliberation rounds
-    if round_num > 0:
-        prompt += (
-            "\n\nRevision instruction:\n"
-            "You must make a fresh final decision for this round. "
-            "Even if you keep your previous answer, you MUST restate it on the first line as:\n"
-            "FINAL_ANSWER: <answer>\n"
-            "Then explain whether you changed or maintained the answer."
-        )
-
-    # Always append the strict output-format contract.
-    prompt = append_answer_contract(prompt, sample)
-
-    return prompt
-
-
-def _build_critic_prompt(
-    critic: AgentConfig,
-    sample: dict,
-    dataset_name: str,
-    actor_response: str,
-) -> str:
-    """Build prompt for a Critic feedback."""
-    from src.prompts.templates import get_prompt_template, PromptType
-
-    template = get_prompt_template(dataset_name, PromptType.DELIBERATION_CRITIC)
-
-    prompt = template.format(
-        question=sample.get("question", ""),
-        passage=sample.get("passage", ""),
-        actor_response=actor_response,
-        responses_text="",
-        choice_a=sample.get("choices", ["", "", "", ""])[0] if len(sample.get("choices", [])) >= 1 else "",
-        choice_b=sample.get("choices", ["", "", "", ""])[1] if len(sample.get("choices", [])) >= 2 else "",
-        choice_c=sample.get("choices", ["", "", "", ""])[2] if len(sample.get("choices", [])) >= 3 else "",
-        choice_d=sample.get("choices", ["", "", "", ""])[3] if len(sample.get("choices", [])) >= 4 else "",
-    )
-
-    if critic.system_prompt:
-        prompt = f"{critic.system_prompt}\n\n{prompt}"
-
-    if CRITIC_JUDGEMENT_CONTRACT not in prompt:
-        prompt = f"{CRITIC_JUDGEMENT_CONTRACT}\n\n{prompt}"
-
-    return prompt

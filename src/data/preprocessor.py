@@ -7,7 +7,7 @@ import logging
 import random
 from typing import Any
 
-from src.algorithms.reward import extract_balanced_braces
+from src.parsing.answer_extractor import extract_balanced_braces
 
 logger = logging.getLogger(__name__)
 

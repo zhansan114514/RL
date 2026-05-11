@@ -1,286 +1,81 @@
-"""
-Reward computation: answer extraction, accuracy, and reward delta.
+"""Reward and accuracy utilities.
 
-This is the canonical (authoritative) implementation of:
-- zeta(response): extract structured answer from LLM text
-- compute_accuracy(): batch accuracy with Wilson confidence intervals
-- compute_reward_delta(): reward difference for preference pairs
-
-All modules should import from here, not from src/reward/ or src/data/preprocessor.
+Answer extraction lives in :mod:`src.parsing.answer_extractor`.  This module
+keeps task normalization, accuracy, confidence intervals, and reward deltas.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-import re
 import logging
+import re
+from dataclasses import dataclass
 from typing import Optional
 
 import numpy as np
 from scipy import stats as scipy_stats
+
+from src.parsing.answer_extractor import ExtractedAnswer, extract_answer as _extract_answer
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
 class AnswerExtraction:
-    """Structured answer extraction result.
-
-    source is:
-      - "strict" when the answer came from the prompt contract marker FINAL_ANSWER:
-      - "fallback" when the answer came from weaker diagnostic patterns
-      - None when no answer could be extracted
-    """
+    """Compatibility-shaped extraction result backed by the new parser."""
 
     answer: Optional[str]
-    source: Optional[str]
+    source: str
+    confidence: float = 0.0
+    raw_span: str = ""
 
-
-# ============================================================
-# Answer extraction (zeta function)
-# ============================================================
 
 def extract_answer(response: str, task_type: str = "yes_no") -> Optional[str]:
-    """
-    Extract structured answer from LLM text response (zeta function).
-
-    Args:
-        response: Raw text response from the LLM.
-        task_type: "yes_no", "multiple_choice", "math", or "mixed".
-
-    Returns:
-        Extracted answer string (YES/NO for boolq, A/B/C/D for MC, numeric/math expression for math), or None.
-    """
-    return extract_answer_with_source(response, task_type).answer
+    """Extract a task answer from natural model output."""
+    return _extract_answer(response, task_type).answer
 
 
 def extract_answer_with_source(response: str, task_type: str = "yes_no") -> AnswerExtraction:
-    """
-    Extract a structured answer and record whether it followed the strict
-    FINAL_ANSWER contract or required fallback parsing.
-    """
-    if not response or not response.strip():
-        return AnswerExtraction(answer=None, source=None)
-
-    if task_type == "yes_no":
-        return _extract_yes_no_with_source(response)
-    elif task_type == "multiple_choice":
-        return _extract_mc_with_source(response)
-    elif task_type == "math":
-        return _extract_math_with_source(response)
-    elif task_type == "mixed":
-        result = _extract_mc_with_source(response)
-        if result.answer:
-            return result
-        return _extract_yes_no_with_source(response)
-    else:
-        logger.warning(f"Unknown task_type: {task_type}")
-        return AnswerExtraction(answer=None, source=None)
-
-
-def _extract_yes_no_with_source(text: str) -> AnswerExtraction:
-    """Extract Yes/No from response (returns uppercase).
-
-    Priority:
-      1. FINAL_ANSWER: marker (strict)
-      2. Final Answer / Answer near end (medium)
-      3. Last standalone Yes/No in tail (weak)
-    """
-    if not text:
-        return AnswerExtraction(answer=None, source=None)
-
-    # Layer 1: strict FINAL_ANSWER marker from the prompt contract.
-    matches = re.findall(r"(?m)^\s*FINAL_ANSWER\s*:\s*((?i:yes|no))\s*$", text)
-    if matches:
-        return AnswerExtraction(answer=matches[-1].strip().upper(), source="strict")
-
-    # Tail region for weaker patterns
-    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
-    tail = "\n".join(lines[-5:])
-
-    # Layer 2: Final Answer / Answer near end
-    medium_patterns = [
-        r"(?i)(?:final\s+answer|answer)\s*:\s*(Yes|No)",
-        r"(?i)the\s+(?:correct\s+)?answer\s+is\s*(Yes|No)",
-        r"(?i)I\s+(?:think|believe)\s+(?:the answer is\s*)?(Yes|No)",
-    ]
-    for pat in medium_patterns:
-        matches = re.findall(pat, tail, re.IGNORECASE)
-        if matches:
-            return AnswerExtraction(answer=matches[-1].strip().upper(), source="fallback")
-
-    # Layer 3: weak fallback — last Yes/No in the tail only
-    matches = re.findall(r"\b(Yes|No)\b", tail, re.IGNORECASE)
-    if matches:
-        return AnswerExtraction(answer=matches[-1].strip().upper(), source="fallback")
-
-    return AnswerExtraction(answer=None, source=None)
-
-
-def _extract_mc_with_source(text: str) -> AnswerExtraction:
-    """Extract A/B/C/D from multiple choice response.
-
-    Three-layer priority (conservative — avoids grabbing option letters
-    from reasoning / critic feedback text):
-      1. FINAL_ANSWER: X  (strict, full text scan)
-      2. Final Answer / Answer / the correct answer is X  (last 5 lines)
-      3. Very weak: standalone letter at line end (last 5 lines only)
-    """
-    if not text:
-        return AnswerExtraction(answer=None, source=None)
-
-    text = text.replace("\uff1a", ":")  # fullwidth colon
-    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
-    tail = "\n".join(lines[-5:])
-
-    # Layer 1: strict FINAL_ANSWER marker (scan full text)
-    # Only matches the exact marker injected into prompts.
-    matches = re.findall(r"(?m)^\s*FINAL_ANSWER\s*:\s*\(?\s*([A-Da-d])\s*\)?\s*$", text)
-    if matches:
-        return AnswerExtraction(answer=matches[-1].upper(), source="strict")
-
-    # Layer 2: medium-confidence patterns in tail only
-    medium_patterns = [
-        r"(?i)(?:final\s+answer|answer)\s*:\s*\(?\s*([A-D])\s*\)?",
-        r"(?i)the\s+(?:correct\s+)?(?:answer|option|choice)\s+is\s*\(?\s*([A-D])\s*\)?",
-        r"(?i)(?:option|choice)\s*([A-D])",
-        r"\(([A-D])\)",
-    ]
-    for pat in medium_patterns:
-        matches = re.findall(pat, tail, re.IGNORECASE)
-        if matches:
-            return AnswerExtraction(answer=matches[-1].upper(), source="fallback")
-
-    # Layer 3: weak fallback — restricted to tail only (last 5 lines).
-    # The old \b([A-D])\b was dangerous because it scanned the full text,
-    # but restricting to the tail avoids picking up option letters from
-    # earlier reasoning / critic feedback.
-    weak_patterns = [
-        r"(?im)^\s*\(?\s*([A-D])\s*\)?\s*$",
-        r"(?im)^\s*(?:therefore|thus|so)\s*,?\s*\(?\s*([A-D])\s*\)?\s*\.?\s*$",
-    ]
-    for pat in weak_patterns:
-        matches = re.findall(pat, tail, re.IGNORECASE)
-        if matches:
-            return AnswerExtraction(answer=matches[-1].upper(), source="fallback")
-
-    # Last resort: find the last standalone A-D letter in the tail only.
-    matches = re.findall(r"\b([A-D])\b", tail)
-    if matches:
-        return AnswerExtraction(answer=matches[-1].upper(), source="fallback")
-
-    return AnswerExtraction(answer=None, source=None)
-
-
-def extract_balanced_braces(text: str, start: int) -> Optional[str]:
-    """Extract content inside balanced curly braces starting at position start.
-
-    Handles nested braces like \\boxed{\\frac{1}{2}}.
-    """
-    if start >= len(text) or text[start] != '{':
-        return None
-    depth = 0
-    i = start
-    while i < len(text):
-        if text[i] == '{':
-            depth += 1
-        elif text[i] == '}':
-            depth -= 1
-            if depth == 0:
-                return text[start + 1:i]
-        i += 1
-    return None
-
-
-def _extract_math_with_source(text: str) -> AnswerExtraction:
-    """Extract mathematical answer from response (supports \\boxed{}, FINAL_ANSWER, and numeric answers).
-
-    Priority:
-      1. FINAL_ANSWER: marker (strict)
-      2. \\boxed{...}
-      3. Final Answer / Answer patterns
-      4. Weak fallback near end
-    """
-    if not text:
-        return AnswerExtraction(answer=None, source=None)
-
-    # Layer 1: strict FINAL_ANSWER marker (uppercase only, exact format)
-    final_answer_match = re.search(
-        r"(?m)^\s*FINAL_ANSWER\s*:\s*(.+?)\s*$", text,
+    """Extract an answer and return parser-source diagnostics."""
+    extracted: ExtractedAnswer = _extract_answer(response, task_type)
+    return AnswerExtraction(
+        answer=extracted.answer,
+        source=extracted.source,
+        confidence=extracted.confidence,
+        raw_span=extracted.raw_span,
     )
-    if final_answer_match:
-        return AnswerExtraction(answer=final_answer_match.group(1).strip(), source="strict")
-
-    # Layer 2: \boxed{...} with balanced brace matching
-    boxed_prefixes = [
-        r'\\boxed\s*\{',
-        r'boxed\s*\{',
-        r'\{\\boxed\s*\{',
-    ]
-    for prefix in boxed_prefixes:
-        for m in re.finditer(prefix, text):
-            brace_start = m.end() - 1  # position of the opening '{'
-            content = extract_balanced_braces(text, brace_start)
-            if content is not None:
-                return AnswerExtraction(answer=content.strip(), source="fallback")
-
-    # Layer 3: Answer patterns (tail only)
-    lines = [ln.strip() for ln in text.strip().splitlines() if ln.strip()]
-    tail = "\n".join(lines[-5:])
-
-    answer_patterns = [
-        r'[Ff]inal [Aa]nswer:?\s*(-?[0-9]+(?:\.[0-9]+)?)',
-        r'[Aa]nswer:?\s*(-?[0-9]+(?:\.[0-9]+)?)',
-        r'[Tt]he answer is\s+(-?[0-9]+(?:\.[0-9]+)?)',
-        r'=\s*(-?[0-9]+(?:\.[0-9]+)?)(?:\s|$|\.|,)',
-    ]
-    for pat in answer_patterns:
-        m = re.search(pat, tail)
-        if m:
-            return AnswerExtraction(answer=m.group(1).strip(), source="fallback")
-
-    # Layer 4: weak fallback
-    fallback_patterns = [
-        r'(?:therefore|so|thus|equals?|is)\s+(-?[0-9]+(?:\.[0-9]+)?|\([^)]+\))',
-        r'=\s*(-?[0-9]+(?:\.[0-9]+)?|\([^)]+\))',
-    ]
-    for pat in fallback_patterns:
-        matches = re.findall(pat, tail, re.IGNORECASE)
-        if matches:
-            return AnswerExtraction(answer=matches[-1].strip(), source="fallback")
-
-    return AnswerExtraction(answer=None, source=None)
 
 
 def normalize_answer(answer: str, task_type: str = "yes_no") -> str:
-    """Normalize answer for comparison.
-
-    For yes_no / multiple_choice: strip, upper, first char (Y/N/A/B/C/D).
-    For math: strip whitespace, normalize numeric representation.
-    """
+    """Normalize answer for comparison."""
     if not answer:
         return ""
-    s = str(answer).strip()
+    text = str(answer).strip()
     if task_type == "math":
-        return _normalize_math_answer(s)
-    return s.strip("()").strip(".").upper()[:1]
+        return _normalize_math_answer(text)
+
+    upper = text.strip("()").strip(".").upper()
+    if task_type == "yes_no":
+        if upper in {"YES", "Y"}:
+            return "Y"
+        if upper in {"NO", "N"}:
+            return "N"
+        return upper[:1]
+    if task_type == "mixed":
+        if upper in {"YES", "Y"}:
+            return "Y"
+        if upper in {"NO", "N"}:
+            return "N"
+    return upper[:1]
 
 
 def _normalize_math_answer(answer: str) -> str:
-    """Normalize a math answer for comparison.
-
-    Strips whitespace and LaTeX formatting, normalizes numeric values.
-    Handles \\frac{a}{b} and \\dfrac{a}{b} by evaluating to float.
-    """
-    s = answer.strip()
-    # Strip surrounding \text{} if present
-    text_match = re.match(r'^\\text\{(.+)\}$', s)
+    """Normalize a math answer for comparison."""
+    text = answer.strip()
+    text_match = re.match(r"^\\text\{(.+)\}$", text)
     if text_match:
-        s = text_match.group(1).strip()
+        text = text_match.group(1).strip()
 
-    # Evaluate \frac{a}{b} and \dfrac{a}{b} to a numeric string
-    # Handles nested fractions like \frac{1}{2} -> "0.5"
-    frac_match = re.match(r'^\\d?frac\{(.+?)\}\{(.+?)\}$', s)
+    frac_match = re.match(r"^\\d?frac\{(.+?)\}\{(.+?)\}$", text)
     if frac_match:
         try:
             num = float(frac_match.group(1))
@@ -293,109 +88,74 @@ def _normalize_math_answer(answer: str) -> str:
         except (ValueError, OverflowError):
             pass
 
-    # Try numeric comparison: parse as float and normalize
     try:
-        num = float(s)
-        # If it's an integer value, return as int string to avoid "42.0" vs "42"
-        if num == int(num) and '.' not in s and 'e' not in s.lower():
+        num = float(text)
+        if num == int(num) and "." not in text and "e" not in text.lower():
             return str(int(num))
         return str(num)
     except (ValueError, OverflowError):
         pass
-    # Non-numeric: normalize LaTeX whitespace
-    s = re.sub(r'\s+', ' ', s)
-    return s
+
+    return re.sub(r"\s+", " ", text)
 
 
 def math_answers_equal(pred: str, label: str) -> bool:
-    """Compare two math answers with numeric tolerance.
-
-    Handles cases like "42" vs "42.0", "\\frac{1}{2}" vs "0.5", etc.
-    """
+    """Compare two math answers with a small numeric tolerance."""
     if not pred or not label:
         return pred == label
     norm_pred = _normalize_math_answer(pred.strip())
     norm_label = _normalize_math_answer(label.strip())
-    # Direct string match after normalization
     if norm_pred == norm_label:
         return True
-    # Try numeric comparison with tolerance
     try:
-        pred_num = float(norm_pred)
-        label_num = float(norm_label)
-        return abs(pred_num - label_num) < 1e-6
+        return abs(float(norm_pred) - float(norm_label)) < 1e-6
     except (ValueError, OverflowError):
-        pass
-    return norm_pred == norm_label
+        return False
 
 
 def compute_extraction_success_rates(
     responses: list[str],
     task_type: str | list[str] = "yes_no",
-) -> dict[str, float | int]:
-    """
-    Compute answer extraction diagnostics.
-
-    strict_extract_success_rate tracks outputs that obeyed the FINAL_ANSWER
-    contract. fallback_extract_success_rate tracks outputs that were only
-    recoverable through weaker parsing and should be treated as a format warning.
-    """
+) -> dict[str, float | int | dict[str, int]]:
+    """Compute parser diagnostics by extraction source."""
     total = len(responses)
-    if total == 0:
-        return {
-            "strict_extract_success_rate": 0.0,
-            "fallback_extract_success_rate": 0.0,
-            "extract_success_rate": 0.0,
-            "strict_extract_success_count": 0,
-            "fallback_extract_success_count": 0,
-            "extract_failure_count": 0,
-        }
+    source_counts = {
+        "final_result": 0,
+        "final_answer": 0,
+        "boxed": 0,
+        "tail_claim": 0,
+        "weak_tail": 0,
+        "none": 0,
+    }
+    confidence_sum = 0.0
+    for idx, response in enumerate(responses):
+        current_task_type = task_type[idx] if isinstance(task_type, list) else task_type
+        extraction = _extract_answer(response, current_task_type)
+        source_counts[extraction.source] += 1
+        confidence_sum += extraction.confidence
 
-    strict_count = 0
-    fallback_count = 0
-
-    for i, response in enumerate(responses):
-        current_task_type = task_type[i] if isinstance(task_type, list) else task_type
-        extraction = extract_answer_with_source(response, current_task_type)
-        if extraction.source == "strict":
-            strict_count += 1
-        elif extraction.source == "fallback":
-            fallback_count += 1
-
-    extracted_count = strict_count + fallback_count
+    extracted = total - source_counts["none"]
     return {
-        "strict_extract_success_rate": strict_count / total,
-        "fallback_extract_success_rate": fallback_count / total,
-        "extract_success_rate": extracted_count / total,
-        "strict_extract_success_count": strict_count,
-        "fallback_extract_success_count": fallback_count,
-        "extract_failure_count": total - extracted_count,
+        "extract_success_rate": extracted / total if total else 0.0,
+        "extract_success_count": extracted,
+        "extract_failure_count": source_counts["none"],
+        "avg_parse_confidence": confidence_sum / total if total else 0.0,
+        "source_counts": source_counts,
+        "source_rates": {
+            key: count / total if total else 0.0
+            for key, count in source_counts.items()
+        },
     }
 
-
-# ============================================================
-# Accuracy computation
-# ============================================================
 
 def compute_accuracy(
     predictions: list[str],
     labels: list[str],
     task_type: str = "yes_no",
 ) -> float:
-    """
-    Compute simple accuracy.
-
-    Args:
-        predictions: List of predicted answers.
-        labels: List of ground truth answers.
-        task_type: Task type for answer normalization ("yes_no", "multiple_choice", "math").
-
-    Returns:
-        Accuracy as float in [0, 1].
-    """
+    """Compute simple accuracy."""
     if not predictions or not labels:
         return 0.0
-
     if task_type == "math":
         correct = sum(
             math_answers_equal(prediction, label)
@@ -415,30 +175,15 @@ def compute_accuracy_with_ci(
     confidence: float = 0.95,
     task_type: str = "yes_no",
 ) -> tuple[float, float]:
-    """
-    Compute accuracy with Wilson score confidence interval.
-
-    Args:
-        predictions: Predicted answers.
-        labels: Ground truth answers.
-        confidence: Confidence level (default 0.95).
-        task_type: Task type for answer normalization.
-
-    Returns:
-        Tuple of (accuracy, margin_of_error).
-    """
+    """Compute accuracy and Wilson score margin."""
     acc = compute_accuracy(predictions, labels, task_type=task_type)
     n = len(predictions)
-
     if n == 0:
         return 0.0, 0.0
-
     z = scipy_stats.norm.ppf(1 - (1 - confidence) / 2)
     denom = 1 + z**2 / n
     spread = z * np.sqrt(acc * (1 - acc) / n + z**2 / (4 * n**2)) / denom
-
-    margin = spread
-    return acc, margin
+    return acc, spread
 
 
 def compute_per_round_accuracy(
@@ -446,17 +191,7 @@ def compute_per_round_accuracy(
     labels: list[str],
     task_type: str = "yes_no",
 ) -> list[float]:
-    """
-    Compute accuracy at each deliberation round.
-
-    Args:
-        all_rounds_predictions: predictions[round][sample_idx].
-        labels: Ground truth answers.
-        task_type: Task type for answer normalization.
-
-    Returns:
-        List of accuracy values, one per round.
-    """
+    """Compute accuracy at each deliberation round."""
     return [
         compute_accuracy(round_preds, labels, task_type=task_type)
         for round_preds in all_rounds_predictions
@@ -464,25 +199,12 @@ def compute_per_round_accuracy(
 
 
 def compute_improvement_rate(acc_final: float, acc_initial: float) -> float:
-    """
-    Compute percent improvement: (acc_final - acc_initial) / acc_initial.
-
-    As defined in Eq. 7 of the paper.
-    """
+    """Relative improvement over initial accuracy."""
     if acc_initial == 0:
         return 0.0
     return (acc_final - acc_initial) / acc_initial
 
 
-# ============================================================
-# Reward delta
-# ============================================================
-
 def compute_reward_delta(reward_guided: float, reward_natural: float) -> float:
-    """
-    Compute delta = reward_guided - reward_natural.
-
-    For delta_y: guided towards correct answer vs natural.
-    For delta_not_y: natural vs guided away from correct answer.
-    """
+    """Preference reward delta."""
     return reward_guided - reward_natural

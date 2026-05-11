@@ -313,9 +313,12 @@ def _collect_avg_critic_confidences(result: MultiDeliberationResult) -> dict[str
     actor_confs: dict[str, float] = {}
     if result.rounds:
         last_round = result.rounds[-1]
-        for actor_name, routed in last_round.routed_feedbacks.items():
-            critic_confs = [fb.confidence for fb in routed.raw_feedbacks
-                           if fb.critic_name in routed.selected_critics]
+        for actor_name, selected_feedbacks in last_round.routed_feedbacks.items():
+            critic_confs = [
+                fb.confidence
+                for fb in selected_feedbacks
+                if fb.confidence is not None
+            ]
             actor_confs[actor_name] = (sum(critic_confs) / len(critic_confs)) if critic_confs else 0.5
     return actor_confs
 
@@ -323,38 +326,32 @@ def _collect_avg_critic_confidences(result: MultiDeliberationResult) -> dict[str
 def _collect_answer_correctness(result: MultiDeliberationResult) -> dict[str, float]:
     """Collect Critics' answer-correctness judgment per Actor from the last round.
 
-    Each Critic outputs [Answer_Correct: yes/no].  For each Actor, we count
+    Each Critic outputs "Answer correct: yes/no/uncertain". For each Actor, we count
     the fraction of selected Critics that judged the Actor's answer as correct.
     This is used by _weighted_vote as the primary voting weight.
 
-    Falls back to Critic confidence (feedback-quality proxy) when
-    answer-correctness tags are absent (backward compat).
+    Falls back to Critic confidence when answer-correctness fields are absent.
     """
     actor_scores: dict[str, float] = {}
     if result.rounds:
         last_round = result.rounds[-1]
-        for actor_name, routed in last_round.routed_feedbacks.items():
-            selected_fbs = [fb for fb in routed.raw_feedbacks
-                            if fb.critic_name in routed.selected_critics]
+        for actor_name, selected_fbs in last_round.routed_feedbacks.items():
             if not selected_fbs:
                 actor_scores[actor_name] = 0.5
                 continue
 
-            # Prefer answer_correct judgment; fall back to confidence
-            has_judgment = any(fb.answer_correct is not None for fb in selected_fbs)
+            # Prefer answer_correct judgment; fall back to confidence.
+            has_judgment = any(fb.answer_correct != "unknown" for fb in selected_fbs)
             if has_judgment:
-                # Map yes->1.0, no->0.0; skip Critics that didn't judge
                 judgments = []
                 for fb in selected_fbs:
-                    if fb.answer_correct is True:
+                    if fb.answer_correct == "yes":
                         judgments.append(1.0)
-                    elif fb.answer_correct is False:
+                    elif fb.answer_correct == "no":
                         judgments.append(0.0)
-                    # Skip None (Critic didn't output the tag)
                 actor_scores[actor_name] = (sum(judgments) / len(judgments)) if judgments else 0.5
             else:
-                # Backward compat: use confidence as proxy
-                confs = [fb.confidence for fb in selected_fbs]
+                confs = [fb.confidence for fb in selected_fbs if fb.confidence is not None]
                 actor_scores[actor_name] = sum(confs) / len(confs)
     return actor_scores
 

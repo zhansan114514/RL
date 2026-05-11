@@ -35,9 +35,15 @@ from src.society.agent_registry import (
     ACTOR_STYLE_PROMPTS,
     AgentRegistry,
     AgentConfig,
+    AgentRole,
+    resolve_critic_skill,
     ReasoningStyle,
 )
-from src.society.critic_schema import CRITIC_JUDGEMENT_CONTRACT, render_critic_judgement
+from src.prompts.critic_prompts import render_critic_judgement
+from src.prompts.prompt_builder import (
+    build_critic_feedback_prompt,
+    build_simple_actor_prompt,
+)
 from src.society.data_classifier import (
     classify_reasoning_style, ClassificationError,
 )
@@ -49,28 +55,13 @@ logger = logging.getLogger(__name__)
 
 ACTOR_STYLE_TRAINING_GUIDANCE = {
     ReasoningStyle.DIRECT: (
-        "Your RATIONALE must contain exactly this subsection:\n"
-        "Direct reason:\n"
-        "<1-3 concise sentences explaining why the answer is correct.>\n"
-        "Do not compare all options unless necessary."
+        "Keep the reasoning short and only include what is needed to justify the answer."
     ),
     ReasoningStyle.EVIDENCE: (
-        "Your RATIONALE must contain exactly these subsections:\n"
-        "Key evidence:\n"
-        "- State the key fact, definition, concept, or wording from the question.\n"
-        "Application:\n"
-        "- Explain how that evidence supports the selected answer.\n"
-        "Conclusion:\n"
-        "- Confirm the answer."
+        "Ground the reasoning in key facts, definitions, wording, or evidence from the problem."
     ),
     ReasoningStyle.ELIMINATION: (
-        "Your RATIONALE must contain exactly these subsections:\n"
-        "Option analysis:\n"
-        "- Briefly evaluate each option or each plausible option.\n"
-        "Elimination:\n"
-        "- Explain which options are ruled out and why.\n"
-        "Conclusion:\n"
-        "- State why the remaining option is best."
+        "Compare options and rule out weaker or incorrect choices before making the final decision."
     ),
 }
 
@@ -81,7 +72,7 @@ def _style_condition_actor_prompt(prompt: str, style: ReasoningStyle) -> str:
     return (
         "/no_think\n"
         f"You are Actor-{style.value}.\n"
-        "You must solve using this exact reasoning style.\n"
+        "Use this reasoning style naturally.\n"
         f"{ACTOR_STYLE_PROMPTS[style]}\n"
         f"{ACTOR_STYLE_TRAINING_GUIDANCE[style]}\n\n"
         f"{prompt}"
@@ -89,40 +80,15 @@ def _style_condition_actor_prompt(prompt: str, style: ReasoningStyle) -> str:
 
 
 def _style_output_format(style: ReasoningStyle) -> str:
-    if style == ReasoningStyle.DIRECT:
+    if style in {
+        ReasoningStyle.DIRECT,
+        ReasoningStyle.EVIDENCE,
+        ReasoningStyle.ELIMINATION,
+    }:
         return (
-            "Output format:\n"
-            "FINAL_ANSWER: <A/B/C/D>\n"
-            "RATIONALE:\n"
-            "Direct reason:\n"
-            "<1-3 concise sentences explaining why the answer is correct.>"
-        )
-    if style == ReasoningStyle.EVIDENCE:
-        return (
-            "Output format:\n"
-            "FINAL_ANSWER: <A/B/C/D>\n"
-            "RATIONALE:\n"
-            "Key evidence:\n"
-            "- <key fact / concept / definition / wording>\n\n"
-            "Application:\n"
-            "- <how the evidence supports the selected answer>\n\n"
-            "Conclusion:\n"
-            "- <why this leads to the final answer>"
-        )
-    if style == ReasoningStyle.ELIMINATION:
-        return (
-            "Output format:\n"
-            "FINAL_ANSWER: <A/B/C/D>\n"
-            "RATIONALE:\n"
-            "Option analysis:\n"
-            "- A: <brief evaluation>\n"
-            "- B: <brief evaluation>\n"
-            "- C: <brief evaluation>\n"
-            "- D: <brief evaluation>\n\n"
-            "Elimination:\n"
-            "- <which options are ruled out and why>\n\n"
-            "Conclusion:\n"
-            "- <why the selected option is best>"
+            "Reason naturally in the assigned style.\n"
+            "At the end, write one final answer sentence:\n"
+            "The final result is <answer>."
         )
     raise ValueError(f"Unsupported reasoning style: {style}")
 
@@ -132,15 +98,7 @@ def _style_condition_actor_single_shot_prompt(
     sample: dict[str, Any],
     style: ReasoningStyle,
 ) -> str:
-    from src.prompts.formatter import format_prompt
-    from src.prompts.templates import PromptType
-
-    base_prompt = format_prompt(
-        dataset_name,
-        PromptType.SINGLE_SHOT,
-        sample,
-        include_answer_contract=False,
-    )
+    base_prompt = build_simple_actor_prompt(sample, dataset_name, style=style)
     return (
         _style_condition_actor_prompt(base_prompt, style)
         + "\n\n"
@@ -221,10 +179,10 @@ def _render_structured_critic_chosen(pair: dict, profile: dict) -> str:
     evidence = str(profile.get("evidence", "")).strip()
     if not evidence:
         evidence = "The actor response is inconsistent with the verified answer and needs correction."
+    del primary
     return render_critic_judgement(
-        answer_correct=False,
-        suggested_final_answer=str(pair.get("correct_answer") or "unknown"),
-        error_type=primary,
+        answer_correct="no",
+        suggested_answer=str(pair.get("correct_answer") or "unknown"),
         confidence=confidence,
         critique=evidence,
     )
@@ -235,10 +193,10 @@ def _render_structured_critic_rejected(pair: dict, profile: dict, target_skill: 
     primary = str(profile.get("primary", target_skill)).strip().lower()
     if primary not in {"computation", "reasoning", "knowledge", "grounding", "verification"}:
         primary = target_skill
+    del primary
     return render_critic_judgement(
-        answer_correct=True,
-        suggested_final_answer=actor_answer,
-        error_type="none",
+        answer_correct="yes",
+        suggested_answer=actor_answer,
         confidence=0.80,
         critique="The actor answer is acceptable.",
     )
@@ -1603,58 +1561,55 @@ def _run_dpo_training(
     try:
         from datasets import Dataset
         from src.training.dpo_trainer import train_dpo
-        from src.prompts.formatter import format_prompt
-        from src.prompts.templates import PromptType
 
-        # Reconstruct full prompts using the same template as generation.
-        # Actor pairs  -> SINGLE_SHOT (question + passage + choices)
-        # Critic pairs -> DELIBERATION_CRITIC (question + passage + actor_response)
         prompts = []
         for p in preference_pairs:
             sample = p.get("sample", {})
             if agent_type == "critic" and p.get("actor_response"):
-                prompt = format_prompt(
-                    dataset_name,
-                    PromptType.DELIBERATION_CRITIC,
+                target_skill = p.get("metadata", {}).get("target_skill", "")
+                error_specialty = None
+                if target_skill:
+                    try:
+                        error_specialty = resolve_critic_skill(target_skill)
+                    except ValueError:
+                        error_specialty = None
+                critic_cfg = AgentConfig(
+                    name=f"critic_{target_skill or 'general'}",
+                    role=AgentRole.CRITIC,
+                    model_path=model_name,
+                    error_specialty=error_specialty,
+                )
+                prompt = build_critic_feedback_prompt(
+                    critic_cfg,
                     sample,
-                    actor_response=p["actor_response"],
+                    dataset_name,
+                    p["actor_response"],
                 )
-                target_skill = p.get("metadata", {}).get("target_skill", "general")
-                prompt = (
-                    f"You are Critic-{target_skill}. "
-                    f"Specialize in detecting {target_skill} errors.\n"
-                    f"{CRITIC_JUDGEMENT_CONTRACT}\n\n{prompt}"
-                )
-            else:
-                if agent_type == "actor":
-                    style = actor_style
-                    if style is None:
-                        style_label = (
-                            p.get("metadata", {}).get("prompted_style")
-                            or p.get("metadata", {}).get("style")
-                        )
-                        if style_label:
-                            style = ReasoningStyle(style_label)
-                    if style is not None:
-                        prompt = _style_condition_actor_single_shot_prompt(
-                            dataset_name,
-                            sample,
-                            style,
-                        )
-                    else:
-                        prompt = format_prompt(
-                            dataset_name,
-                            PromptType.SINGLE_SHOT,
-                            sample,
-                            include_answer_contract=True,
-                        )
-                else:
-                    prompt = format_prompt(
-                        dataset_name,
-                        PromptType.SINGLE_SHOT,
-                        sample,
-                        include_answer_contract=False,
+            elif agent_type == "actor":
+                style = actor_style
+                if style is None:
+                    style_label = (
+                        p.get("metadata", {}).get("prompted_style")
+                        or p.get("metadata", {}).get("style")
                     )
+                    if style_label:
+                        style = ReasoningStyle(style_label)
+                if style is not None:
+                    prompt = _style_condition_actor_single_shot_prompt(
+                        dataset_name,
+                        sample,
+                        style,
+                    )
+                else:
+                    prompt = build_simple_actor_prompt(
+                        sample,
+                        dataset_name,
+                    )
+            else:
+                prompt = build_simple_actor_prompt(
+                    sample,
+                    dataset_name,
+                )
             prompts.append(prompt)
 
         # Convert preference_pairs to HuggingFace Dataset

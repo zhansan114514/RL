@@ -122,21 +122,19 @@ def test_society_per_round_accuracy_does_not_use_future_final_answer(monkeypatch
             consensus_confidence=0.0,
             actor_answer_sources={"actor_direct": "none"},
             routed_feedbacks={},
-            raw_actor_answers={"actor_direct": None},
             actor_answers={"actor_direct": None},
-            actor_format_valid={"actor_direct": False},
+            actor_parse_confidence={"actor_direct": 0.0},
             actor_responses={"actor_direct": "No final decision."},
         )
         round1 = types.SimpleNamespace(
             round_num=1,
             consensus_answer="B",
             consensus_confidence=1.0,
-            actor_answer_sources={"actor_direct": "strict"},
+            actor_answer_sources={"actor_direct": "final_result"},
             routed_feedbacks={},
-            raw_actor_answers={"actor_direct": "B"},
             actor_answers={"actor_direct": "B"},
-            actor_format_valid={"actor_direct": True},
-            actor_responses={"actor_direct": "FINAL_ANSWER: B"},
+            actor_parse_confidence={"actor_direct": 1.0},
+            actor_responses={"actor_direct": "The final result is B."},
         )
         return types.SimpleNamespace(
             consensus_answer="B",

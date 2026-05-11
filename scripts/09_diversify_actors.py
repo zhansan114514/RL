@@ -15,8 +15,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from _utils import setup_logging
-from src.prompts.formatter import format_prompt
-from src.prompts.templates import PromptType
+from src.prompts.prompt_builder import build_simple_actor_prompt
 from src.society.agent_registry import ReasoningStyle
 from src.society.augmentation import (
     generate_style_conditioned_responses,
@@ -55,28 +54,13 @@ STEP_DEFAULTS = {
 
 ACTOR_TRAINING_STYLE_GUIDANCE = {
     ReasoningStyle.DIRECT: (
-        "Your RATIONALE must contain exactly this subsection:\n"
-        "Direct reason:\n"
-        "<1-3 concise sentences explaining why the answer is correct.>\n"
-        "Do not compare all options unless necessary."
+        "Keep the reasoning short and only include what is needed to justify the answer."
     ),
     ReasoningStyle.EVIDENCE: (
-        "Your RATIONALE must contain exactly these subsections:\n"
-        "Key evidence:\n"
-        "- State the key fact, definition, concept, or wording from the question.\n"
-        "Application:\n"
-        "- Explain how that evidence supports the selected answer.\n"
-        "Conclusion:\n"
-        "- Confirm the answer."
+        "Ground the reasoning in key facts, definitions, wording, or evidence from the problem."
     ),
     ReasoningStyle.ELIMINATION: (
-        "Your RATIONALE must contain exactly these subsections:\n"
-        "Option analysis:\n"
-        "- Briefly evaluate each option or each plausible option.\n"
-        "Elimination:\n"
-        "- Explain which options are ruled out and why.\n"
-        "Conclusion:\n"
-        "- State why the remaining option is best."
+        "Compare options and rule out weaker or incorrect choices before making the final decision."
     ),
 }
 
@@ -108,8 +92,8 @@ def load_classified_data(input_dir: str) -> dict[str, Any]:
 
 
 def _format_valid(response: str) -> bool:
-    lines = [line.strip() for line in (response or "").splitlines() if line.strip()]
-    return bool(lines and lines[0].startswith("FINAL_ANSWER:") and "RATIONALE:" in lines[:4])
+    from src.parsing.answer_extractor import extract_answer
+    return extract_answer(response, "multiple_choice").answer is not None
 
 
 def build_response_index(
@@ -433,16 +417,11 @@ def _actor_training_prompt(dataset_name: str, thinking_style: str, sample: dict[
     from src.society.agent_registry import ACTOR_STYLE_PROMPTS
 
     style = ReasoningStyle(thinking_style)
-    base_prompt = format_prompt(
-        dataset_name,
-        PromptType.SINGLE_SHOT,
-        sample,
-        include_answer_contract=False,
-    )
+    base_prompt = build_simple_actor_prompt(sample, dataset_name, style=style)
     return (
         "/no_think\n"
         f"You are Actor-{thinking_style}.\n"
-        "You must solve using this reasoning style.\n"
+        "Use this reasoning style naturally.\n"
         f"{ACTOR_STYLE_PROMPTS[style]}\n"
         f"{ACTOR_TRAINING_STYLE_GUIDANCE[style]}\n\n"
         f"{base_prompt}\n\n"
@@ -451,40 +430,15 @@ def _actor_training_prompt(dataset_name: str, thinking_style: str, sample: dict[
 
 
 def _style_output_format(style: ReasoningStyle) -> str:
-    if style == ReasoningStyle.DIRECT:
+    if style in {
+        ReasoningStyle.DIRECT,
+        ReasoningStyle.EVIDENCE,
+        ReasoningStyle.ELIMINATION,
+    }:
         return (
-            "Output format:\n"
-            "FINAL_ANSWER: <A/B/C/D>\n"
-            "RATIONALE:\n"
-            "Direct reason:\n"
-            "<1-3 concise sentences explaining why the answer is correct.>"
-        )
-    if style == ReasoningStyle.EVIDENCE:
-        return (
-            "Output format:\n"
-            "FINAL_ANSWER: <A/B/C/D>\n"
-            "RATIONALE:\n"
-            "Key evidence:\n"
-            "- <key fact / concept / definition / wording>\n\n"
-            "Application:\n"
-            "- <how the evidence supports the selected answer>\n\n"
-            "Conclusion:\n"
-            "- <why this leads to the final answer>"
-        )
-    if style == ReasoningStyle.ELIMINATION:
-        return (
-            "Output format:\n"
-            "FINAL_ANSWER: <A/B/C/D>\n"
-            "RATIONALE:\n"
-            "Option analysis:\n"
-            "- A: <brief evaluation>\n"
-            "- B: <brief evaluation>\n"
-            "- C: <brief evaluation>\n"
-            "- D: <brief evaluation>\n\n"
-            "Elimination:\n"
-            "- <which options are ruled out and why>\n\n"
-            "Conclusion:\n"
-            "- <why the selected option is best>"
+            "Reason naturally in the requested style.\n"
+            "At the end, write one final answer sentence:\n"
+            "The final result is <answer>."
         )
     raise ValueError(f"Unsupported reasoning style: {style}")
 

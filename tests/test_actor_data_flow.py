@@ -54,7 +54,7 @@ def test_actor_pairs_use_only_accepted_target_style_chosen():
         "per_response_labels": [
             {
                 "response_id": "chosen",
-                "response": "FINAL_ANSWER: A\nRATIONALE:\nLet x = 1.",
+                "response": "The question states the key fact, so A follows.\nThe final result is A.",
                 "answer": "A",
                 "is_correct": True,
                 "primary_style": "evidence",
@@ -66,7 +66,7 @@ def test_actor_pairs_use_only_accepted_target_style_chosen():
             },
             {
                 "response_id": "wrong",
-                "response": "FINAL_ANSWER: B\nRATIONALE:\nWrong.",
+                "response": "This chooses the wrong option.\nThe final result is B.",
                 "answer": "B",
                 "is_correct": False,
                 "format_status": "valid",
@@ -75,7 +75,7 @@ def test_actor_pairs_use_only_accepted_target_style_chosen():
             },
             {
                 "response_id": "other_style",
-                "response": "FINAL_ANSWER: A\nRATIONALE:\nDirect.",
+                "response": "A.\nThe final result is A.",
                 "answer": "A",
                 "is_correct": True,
                 "primary_style": "direct",
@@ -87,7 +87,7 @@ def test_actor_pairs_use_only_accepted_target_style_chosen():
             },
             {
                 "response_id": "answer_only",
-                "response": "FINAL_ANSWER: A",
+                "response": "A",
                 "answer": "A",
                 "is_correct": True,
                 "primary_style": "evidence",
@@ -144,7 +144,7 @@ def test_society_actor_style_prompt_wrapper_conditions_generation():
     adapter.generate(["Solve Q"], max_tokens=8, temperature=0.3)
 
     assert "You are Actor-elimination" in model.prompts[0]
-    assert "Option analysis:" in model.prompts[0]
+    assert "Compare options and rule out" in model.prompts[0]
     assert model.prompts[0].endswith("Solve Q")
 
 
@@ -176,8 +176,8 @@ def test_society_actor_dpo_prompt_is_style_conditioned(monkeypatch, tmp_path):
                 "answer": "A",
                 "task_type": "multiple_choice",
             },
-            "chosen": "FINAL_ANSWER: A\nRATIONALE:\nDirect.",
-            "rejected": "FINAL_ANSWER: B\nRATIONALE:\nWrong.",
+            "chosen": "Short reasoning.\nThe final result is A.",
+            "rejected": "Wrong reasoning.\nThe final result is B.",
             "metadata": {"prompted_style": "direct"},
         }],
         output_dir=str(tmp_path),
@@ -190,9 +190,9 @@ def test_society_actor_dpo_prompt_is_style_conditioned(monkeypatch, tmp_path):
     prompt = captured["dataset"][0]["prompt"]
     assert checkpoint == str(tmp_path / "adapter")
     assert "You are Actor-direct" in prompt
-    assert "Solve the question concisely" in prompt
-    assert "Direct reason:" in prompt
-    assert "FINAL_ANSWER: <A/B/C/D>" in prompt
+    assert "shortest sufficient reasoning" in prompt
+    assert "The final result is <answer>." in prompt
+    assert "FINAL_ANSWER" not in prompt
 
 
 def test_society_actor_acceptance_requires_style_format_confidence_and_correctness(monkeypatch):
@@ -215,36 +215,36 @@ def test_society_actor_acceptance_requires_style_format_confidence_and_correctne
     raw_pairs = [
         {
             "sample": sample,
-            "positive": "FINAL_ANSWER: A\nRATIONALE:\nEvidence.",
-            "negative": "FINAL_ANSWER: B\nRATIONALE:\nWrong.",
+            "positive": "The question states the key evidence.\nThe final result is A.",
+            "negative": "Wrong reasoning.\nThe final result is B.",
             "delta": 1.0,
             "direction": "towards",
         },
         {
             "sample": sample,
-            "positive": "FINAL_ANSWER: A\nRATIONALE:\nLow confidence.",
-            "negative": "FINAL_ANSWER: B\nRATIONALE:\nWrong.",
+            "positive": "Low confidence evidence.\nThe final result is A.",
+            "negative": "Wrong reasoning.\nThe final result is B.",
             "delta": 1.0,
             "direction": "towards",
         },
         {
             "sample": sample,
-            "positive": "FINAL_ANSWER: A",
-            "negative": "FINAL_ANSWER: B\nRATIONALE:\nWrong.",
+            "positive": "A",
+            "negative": "Wrong reasoning.\nThe final result is B.",
             "delta": 1.0,
             "direction": "towards",
         },
         {
             "sample": sample,
-            "positive": "FINAL_ANSWER: B\nRATIONALE:\nEvidence but wrong.",
-            "negative": "FINAL_ANSWER: C\nRATIONALE:\nWrong.",
+            "positive": "Evidence but wrong.\nThe final result is B.",
+            "negative": "Wrong reasoning.\nThe final result is C.",
             "delta": 1.0,
             "direction": "towards",
         },
         {
             "sample": sample,
-            "positive": "FINAL_ANSWER: A\nRATIONALE:\nDirect.",
-            "negative": "FINAL_ANSWER: B\nRATIONALE:\nWrong.",
+            "positive": "Direct.\nThe final result is A.",
+            "negative": "Wrong reasoning.\nThe final result is B.",
             "delta": 1.0,
             "direction": "towards",
         },
@@ -272,13 +272,13 @@ def test_society_actor_acceptance_requires_style_format_confidence_and_correctne
         return [[{
             "round": 0,
             "actor_prompt": "prompt",
-            "actor_response": "FINAL_ANSWER: A\nRATIONALE:\nNatural.",
+            "actor_response": "Natural.\nThe final result is A.",
             "critic_prompt": "critic prompt",
             "critic_response": "critic",
         }, {
             "round": 1,
             "actor_prompt": "prompt",
-            "actor_response": "FINAL_ANSWER: A\nRATIONALE:\nNatural.",
+            "actor_response": "Natural.\nThe final result is A.",
             "critic_prompt": "critic prompt",
             "critic_response": "critic",
         }]]
@@ -294,7 +294,7 @@ def test_society_actor_acceptance_requires_style_format_confidence_and_correctne
                 format_status="valid",
                 confidence=0.9,
             )
-        if response.strip() == "FINAL_ANSWER: A":
+        if response.strip() == "A":
             return ReasoningStyleResult(
                 primary_style=ReasoningStyle.EVIDENCE,
                 secondary_styles=[],
@@ -374,7 +374,7 @@ def test_society_actor_acceptance_requires_style_format_confidence_and_correctne
     )
 
     assert len(pairs) == 1
-    assert pairs[0]["chosen"] == "FINAL_ANSWER: A\nRATIONALE:\nEvidence."
+    assert pairs[0]["chosen"] == "The question states the key evidence.\nThe final result is A."
     assert pairs[0]["metadata"]["prompted_style"] == "evidence"
     assert pairs[0]["metadata"]["classified_style"] == "evidence"
     assert pairs[0]["metadata"]["format_status"] == "valid"

@@ -75,32 +75,32 @@ class TestExtractAnswer:
         result = extract_answer("The answer is Yes.", task_type="mixed")
         assert result == "YES"
 
-    def test_strict_extraction_source(self):
-        result = extract_answer_with_source("FINAL_ANSWER: B", task_type="multiple_choice")
+    def test_final_result_extraction_source(self):
+        result = extract_answer_with_source("The final result is B.", task_type="multiple_choice")
         assert result.answer == "B"
-        assert result.source == "strict"
+        assert result.source == "final_result"
 
-    def test_fallback_extraction_source(self):
+    def test_tail_claim_extraction_source(self):
         result = extract_answer_with_source(
-            "Therefore, B.",
+            "Therefore, the answer is B.",
             task_type="multiple_choice",
         )
         assert result.answer == "B"
-        assert result.source == "fallback"
+        assert result.source == "tail_claim"
 
-    def test_extraction_success_rates_split_strict_and_fallback(self):
+    def test_extraction_success_rates_report_source_diagnostics(self):
         rates = compute_extraction_success_rates(
             [
-                "FINAL_ANSWER: Yes",
+                "The final result is Yes.",
                 "The answer is No.",
                 "Unrecoverable output.",
             ],
             task_type="yes_no",
         )
-        assert rates["strict_extract_success_rate"] == pytest.approx(1 / 3)
-        assert rates["fallback_extract_success_rate"] == pytest.approx(1 / 3)
         assert rates["extract_success_rate"] == pytest.approx(2 / 3)
         assert rates["extract_failure_count"] == 1
+        assert rates["source_counts"]["final_result"] == 1
+        assert rates["source_counts"]["tail_claim"] == 1
 
 
 class TestNormalizeAnswer:
@@ -180,16 +180,15 @@ class TestImprovementRate:
 
 
 class TestStatefulAnswerResolution:
-    def test_actor_carry_forward_when_maintains_previous_answer(self):
+    def test_no_implicit_carry_forward_when_actor_omits_answer(self):
         resolved = resolve_answer_for_round(
             response="I think my previous answer remains correct.",
             extracted_answer=None,
             previous_answer="A",
             task_type="multiple_choice",
         )
-        assert resolved.resolved_answer == "A"
-        assert resolved.extract_source == "carried_forward"
-        assert resolved.format_valid is False
+        assert resolved.resolved_answer is None
+        assert resolved.extract_source == "none"
 
     def test_no_carry_forward_without_previous_answer(self):
         resolved = resolve_answer_for_round(
@@ -243,15 +242,15 @@ class TestEvaluateBenchmark:
             assert "dataset" in results
             assert "final_accuracy" in results
             assert "per_round_accuracy" in results
-            assert "strict_extract_success_rate" in results
-            assert "fallback_extract_success_rate" in results
+            assert "parse_success_rate" in results
+            assert "actor_answer_sources" in results
             assert "improvement_rate" in results
             assert results["num_samples"] == 2
             assert results["num_rounds"] == 3
             assert len(results["per_round_accuracy"]) == 3
             mock_deliberate_batch.assert_called_once()
 
-    def test_stateful_final_answer_does_not_become_empty(self):
+    def test_final_answer_requires_fresh_extractable_anchor(self):
         from unittest.mock import MagicMock, patch
         from src.evaluation.benchmarks import evaluate_benchmark
 
@@ -262,7 +261,7 @@ class TestEvaluateBenchmark:
             mock_deliberate_batch.return_value = [[
                 {
                     "round": 0,
-                    "actor_response": "FINAL_ANSWER: A\nReasoning.",
+                    "actor_response": "Reasoning.\nThe final result is A.",
                     "critic_response": "Feedback",
                 },
                 {
@@ -286,12 +285,12 @@ class TestEvaluateBenchmark:
                 num_rounds=2,
             )
 
-            assert results["final_accuracy"] == 1.0
-            assert results["per_round_accuracy"] == [1.0, 1.0]
-            assert results["sample_details"][0]["final_answer"] == "A"
+            assert results["final_accuracy"] == 0.0
+            assert results["per_round_accuracy"] == [1.0, 0.0]
+            assert results["sample_details"][0]["final_answer"] is None
             assert (
                 results["sample_details"][0]["round_answer_sources"]
-                == ["strict", "carried_forward"]
+                == ["final_result", "none"]
             )
 
 

@@ -49,10 +49,10 @@ def test_style_prompt_contains_style_guidance_and_contract():
     )
 
     assert "Actor-evidence" in prompt
-    assert "Key evidence:" in prompt
-    assert "Application:" in prompt
+    assert "Ground the reasoning in key facts" in prompt
     assert "independent generation attempt 3" in prompt
-    assert "FINAL_ANSWER: <A/B/C/D>" in prompt
+    assert "The final result is <answer>." in prompt
+    assert "FINAL_ANSWER" not in prompt
 
 
 def test_style_prompted_generation_batches_samples_styles_and_attempts():
@@ -89,7 +89,8 @@ def test_style_prompted_generation_batches_samples_styles_and_attempts():
     assert kwargs["max_tokens"] == 32
     assert kwargs["temperature"] == 0.5
     assert kwargs["top_p"] == 0.9
-    assert all("FINAL_ANSWER:" in prompt for prompt in prompts)
+    assert all("The final result is <answer>." in prompt for prompt in prompts)
+    assert all("FINAL_ANSWER:" not in prompt for prompt in prompts)
 
     assert len(records) == 2
     first = records[0]

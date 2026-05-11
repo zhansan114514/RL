@@ -466,10 +466,12 @@ def _run_deliberation_on_samples(
     }
     per_round_confidences: Dict[int, List[float]] = {r: [] for r in range(num_rounds)}
     actor_sources_by_round: Dict[int, List[str]] = {r: [] for r in range(num_rounds)}
-    critic_schema_valid = 0
+    critic_confidence_parsed = 0
+    critic_suggested_parsed = 0
+    critic_answer_correct_parsed = 0
     critic_total = 0
     critic_selected_total = 0
-    critic_invalid_errors: Counter[str] = Counter()
+    critic_parse_errors: Counter[str] = Counter()
     all_final_answers: List[Optional[str]] = []
     all_initial_answers: List[Optional[str]] = []
     final_actor_correct_counts = [0 for _ in samples]
@@ -539,15 +541,25 @@ def _run_deliberation_on_samples(
                     rnd.actor_answer_sources.values()
                 )
 
-            for routed in rnd.routed_feedbacks.values():
-                selected = set(routed.selected_critics)
+            routed_feedbacks = getattr(rnd, "routed_feedbacks", {}) or {}
+            critic_feedbacks = getattr(rnd, "critic_feedbacks", {}) or {}
+            selected_by_actor = {
+                actor_name: {
+                    getattr(fb, "critic_name", "")
+                    for fb in selected_feedbacks
+                }
+                for actor_name, selected_feedbacks in routed_feedbacks.items()
+                if isinstance(selected_feedbacks, list)
+            }
+            for actor_name, feedbacks in critic_feedbacks.items():
+                selected = selected_by_actor.get(actor_name, set())
                 critic_selected_total += len(selected)
-                for feedback in routed.raw_feedbacks:
+                for feedback in feedbacks.values():
                     critic_total += 1
-                    if feedback.schema_valid:
-                        critic_schema_valid += 1
-                    else:
-                        critic_invalid_errors.update(feedback.schema_errors)
+                    critic_confidence_parsed += int(feedback.confidence is not None)
+                    critic_suggested_parsed += int(feedback.suggested_answer is not None)
+                    critic_answer_correct_parsed += int(feedback.answer_correct != "unknown")
+                    critic_parse_errors.update(feedback.parse_errors)
 
         # Compute initial answer as majority vote across all actors (not just first)
         initial_answer = None
@@ -596,10 +608,13 @@ def _run_deliberation_on_samples(
                     "consensus_confidence": rnd.consensus_confidence,
                     "actor_answers": {
                         name: {
-                            "raw": rnd.raw_actor_answers.get(name),
                             "resolved": rnd.actor_answers.get(name),
                             "source": rnd.actor_answer_sources.get(name, "none"),
-                            "format_valid": rnd.actor_format_valid.get(name, False),
+                            "parse_confidence": getattr(
+                                rnd,
+                                "actor_parse_confidence",
+                                {},
+                            ).get(name, 0.0),
                         }
                         for name in rnd.actor_responses
                     },
@@ -642,16 +657,12 @@ def _run_deliberation_on_samples(
             str(r): source_rates(actor_sources_by_round[r])
             for r in range(num_rounds)
         },
-        "actor_strict_format_rate_by_round": [
-            source_rates(actor_sources_by_round[r])["strict_rate"]
+        "actor_final_result_rate_by_round": [
+            source_rates(actor_sources_by_round[r])["final_result_rate"]
             for r in range(num_rounds)
         ],
-        "actor_fallback_rate_by_round": [
-            source_rates(actor_sources_by_round[r])["fallback_rate"]
-            for r in range(num_rounds)
-        ],
-        "actor_carried_forward_rate_by_round": [
-            source_rates(actor_sources_by_round[r])["carried_forward_rate"]
+        "actor_flexible_parse_rate_by_round": [
+            source_rates(actor_sources_by_round[r])["flexible_parse_rate"]
             for r in range(num_rounds)
         ],
         "actor_unresolved_rate_by_round": [
@@ -672,15 +683,23 @@ def _run_deliberation_on_samples(
     }
 
     critic_metrics = {
-        "critic_schema_valid_rate": (
-            critic_schema_valid / critic_total if critic_total else 0.0
+        "critic_confidence_parse_rate": (
+            critic_confidence_parsed / critic_total if critic_total else 0.0
+        ),
+        "critic_suggested_answer_parse_rate": (
+            critic_suggested_parsed / critic_total if critic_total else 0.0
+        ),
+        "critic_answer_correct_parse_rate": (
+            critic_answer_correct_parsed / critic_total if critic_total else 0.0
         ),
         "critic_selected_rate": (
             critic_selected_total / critic_total if critic_total else 0.0
         ),
         "critic_total_count": critic_total,
-        "critic_schema_valid_count": critic_schema_valid,
-        "critic_invalid_count_by_error": dict(critic_invalid_errors),
+        "critic_confidence_parsed_count": critic_confidence_parsed,
+        "critic_suggested_answer_parsed_count": critic_suggested_parsed,
+        "critic_answer_correct_parsed_count": critic_answer_correct_parsed,
+        "critic_parse_error_counts": dict(critic_parse_errors),
     }
 
     return EvalResult(
@@ -808,12 +827,24 @@ def _aggregate_source_metric_dicts(items: List[Dict[str, Any]]) -> Dict[str, Any
     aggregate: Dict[str, Any] = {}
     total = sum(int(item.get("total", 0)) for item in items)
     aggregate["total"] = total
-    for key in ("strict", "fallback", "carried_forward", "none"):
+    source_keys = (
+        "final_result",
+        "final_answer",
+        "boxed",
+        "tail_claim",
+        "weak_tail",
+        "none",
+        "flexible_parse",
+    )
+    for key in source_keys:
         count_key = f"{key}_count"
         rate_key = f"{key}_rate"
         count = sum(int(item.get(count_key, 0)) for item in items)
         aggregate[count_key] = count
         aggregate[rate_key] = count / total if total else 0.0
+    parse_success_count = sum(int(item.get("parse_success_count", 0)) for item in items)
+    aggregate["parse_success_count"] = parse_success_count
+    aggregate["parse_success_rate"] = parse_success_count / total if total else 0.0
     return aggregate
 
 
@@ -838,16 +869,12 @@ def _aggregate_format_metrics(results: List[EvalResult]) -> Dict[str, Any]:
 
     return {
         "actor_answer_sources_by_round": sources_by_round,
-        "actor_strict_format_rate_by_round": [
-            sources_by_round[str(r)].get("strict_rate", 0.0)
+        "actor_final_result_rate_by_round": [
+            sources_by_round[str(r)].get("final_result_rate", 0.0)
             for r in round_keys
         ],
-        "actor_fallback_rate_by_round": [
-            sources_by_round[str(r)].get("fallback_rate", 0.0)
-            for r in round_keys
-        ],
-        "actor_carried_forward_rate_by_round": [
-            sources_by_round[str(r)].get("carried_forward_rate", 0.0)
+        "actor_flexible_parse_rate_by_round": [
+            sources_by_round[str(r)].get("flexible_parse_rate", 0.0)
             for r in round_keys
         ],
         "actor_unresolved_rate_by_round": [
@@ -862,8 +889,16 @@ def _aggregate_critic_metrics(results: List[EvalResult]) -> Dict[str, Any]:
         int(result.critic_metrics.get("critic_total_count", 0))
         for result in results
     )
-    critic_schema_valid = sum(
-        int(result.critic_metrics.get("critic_schema_valid_count", 0))
+    confidence_parsed = sum(
+        int(result.critic_metrics.get("critic_confidence_parsed_count", 0))
+        for result in results
+    )
+    suggested_parsed = sum(
+        int(result.critic_metrics.get("critic_suggested_answer_parsed_count", 0))
+        for result in results
+    )
+    answer_correct_parsed = sum(
+        int(result.critic_metrics.get("critic_answer_correct_parsed_count", 0))
         for result in results
     )
     selected_rate_sum = sum(
@@ -872,16 +907,24 @@ def _aggregate_critic_metrics(results: List[EvalResult]) -> Dict[str, Any]:
         for result in results
     )
     return {
-        "critic_schema_valid_rate": (
-            critic_schema_valid / critic_total if critic_total else 0.0
+        "critic_confidence_parse_rate": (
+            confidence_parsed / critic_total if critic_total else 0.0
+        ),
+        "critic_suggested_answer_parse_rate": (
+            suggested_parsed / critic_total if critic_total else 0.0
+        ),
+        "critic_answer_correct_parse_rate": (
+            answer_correct_parsed / critic_total if critic_total else 0.0
         ),
         "critic_selected_rate": (
             selected_rate_sum / critic_total if critic_total else 0.0
         ),
         "critic_total_count": critic_total,
-        "critic_schema_valid_count": critic_schema_valid,
-        "critic_invalid_count_by_error": _sum_counter_dicts([
-            result.critic_metrics.get("critic_invalid_count_by_error", {})
+        "critic_confidence_parsed_count": confidence_parsed,
+        "critic_suggested_answer_parsed_count": suggested_parsed,
+        "critic_answer_correct_parsed_count": answer_correct_parsed,
+        "critic_parse_error_counts": _sum_counter_dicts([
+            result.critic_metrics.get("critic_parse_error_counts", {})
             for result in results
         ]),
     }

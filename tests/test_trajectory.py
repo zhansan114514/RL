@@ -9,14 +9,12 @@ from src.trajectory.preference import build_preference_dataset
 class TestBatchedTrajectoryGeneration:
     """Test batched Algorithm 1 trajectory generation."""
 
-    @patch("src.algorithms.trajectory.format_prompt", return_value="rollout prompt")
     @patch("src.algorithms.trajectory.deliberate_batch")
     @patch("src.algorithms.trajectory._make_guided_prompt")
     def test_guided_and_mc_rollout_are_cross_sample_batched(
         self,
         mock_guided,
         mock_deliberate_batch,
-        mock_format_prompt,
     ):
         mock_guided.side_effect = lambda *args, **kwargs: f"{kwargs.get('agent', 'actor')} prompt"
         samples = [
