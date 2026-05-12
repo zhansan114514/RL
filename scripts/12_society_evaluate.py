@@ -455,7 +455,6 @@ def _run_deliberation_on_samples(
     start_time = time.time()
     from src.evaluation.answer_resolution import (
         answers_match,
-        compute_accuracy_mixed,
         source_rates,
     )
 
@@ -1081,9 +1080,6 @@ def run_all_evaluations(
         critic_phase_dir=phase_critic_dir,
         base_model=base_model,
     )
-    phase_actor_names = [a.name for a in phase_actors]
-    phase_critic_names = [c.name for c in phase_critics]
-
     final_lora_paths = [
         info.get("model_path", "")
         for info in list(registry.get("actors", {}).values())

@@ -1,3 +1,3 @@
-"""ACC-Collab: Actor-Critic Collaboration for Multi-Agent LLM Training."""
+"""Diverse Actor-Critic Society experiment package."""
 
 __version__ = "0.1.0"

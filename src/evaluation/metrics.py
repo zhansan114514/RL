@@ -73,6 +73,34 @@ def summarize_deliberation_results(
     }
 
 
+def compute_group_metrics(
+    sample_details: list[dict],
+    group_key: str = "subject",
+) -> dict[str, dict]:
+    """Compute per-group accuracy metrics from sample-level evaluation details."""
+    groups: dict[str, list[dict]] = {}
+    for item in sample_details:
+        groups.setdefault(item.get(group_key) or "unknown", []).append(item)
+
+    result: dict[str, dict] = {}
+    for group, items in sorted(groups.items()):
+        n = len(items)
+        initial_correct = sum(1 for item in items if item["initially_correct"])
+        final_correct = sum(1 for item in items if item["finally_correct"])
+        result[group] = {
+            "num_samples": n,
+            "initial_accuracy": initial_correct / n if n else 0.0,
+            "final_accuracy": final_correct / n if n else 0.0,
+            "absolute_improvement": (
+                final_correct / n - initial_correct / n
+                if n else 0.0
+            ),
+            "flipped_to_correct": sum(1 for item in items if item["flipped_to_correct"]),
+            "flipped_to_wrong": sum(1 for item in items if item["flipped_to_wrong"]),
+        }
+    return result
+
+
 def compute_actor_metrics(
     results: list[MultiDeliberationResult],
     samples: list[dict],

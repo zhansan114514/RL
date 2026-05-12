@@ -1,12 +1,12 @@
-.PHONY: setup install test test-data test-prompts test-deliberation test-evaluation lint clean
+.PHONY: setup install test test-data test-prompts test-society test-evaluation lint clean
 
 # 项目根目录
 PROJECT_DIR := $(shell dirname $(realpath $(lastword $(MAKEFILE_LIST))))
 
 # 创建 conda 环境
 setup:
-	conda create -n acc-collab python=3.10 -y
-	@echo "Run: conda activate acc-collab && pip install -e '.[dev]'"
+	conda create -n society-rl python=3.10 -y
+	@echo "Run: conda activate society-rl && pip install -e '.[dev]'"
 
 # 安装项目
 install:
@@ -23,8 +23,8 @@ test-data:
 test-prompts:
 	python -m pytest tests/test_prompts.py -v
 
-test-deliberation:
-	python -m pytest tests/test_deliberation.py -v
+test-society:
+	python -m pytest tests/test_society.py tests/test_society_pipeline.py -v
 
 test-evaluation:
 	python -m pytest tests/test_evaluation.py -v

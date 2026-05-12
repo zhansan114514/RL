@@ -3,15 +3,11 @@ Diversify Critics by training specialized LoRA adapters for each critic skill.
 
 For each Critic:
 1. Load trained Actor LoRA adapters (from Step 09)
-2. Run Algorithm 1 (generate_trajectories) with Actor + base Critic
-3. Extract Critic preference pairs (chosen=positive_critic, rejected=negative_critic)
+2. Generate Society-native pairwise guided rollout data with Actor + base Critic
+3. Extract Critic preference pairs from structured Critic candidates
 4. Route by error profile and build a skill-specific training mixture
 5. Train with DPO
 6. Save to output/society/critics/{agent_id}/
-
-This uses the same Algorithm 1 approach as society_trainer.py's
-_generate_critic_pairs_algorithm1(), ensuring data consistency across
-the bootstrap diversification phase and later alternating training.
 
 Usage:
     python scripts/10_diversify_critics.py \
@@ -207,16 +203,16 @@ def build_critic_raw_pairs(
     engine=None,
 ) -> List[Dict[str, Any]]:
     """
-    Build the shared raw Critic-pair pool using Algorithm 1.
+    Build the shared raw Critic-pair pool with Society pairwise rollouts.
 
     This work is independent of the target critic skill.  Generate it once,
     route it once, then sample skill-specific mixtures from the routed pool.
     """
     from src.inference.vllm_server import VLLMInference
-    from src.algorithms.trajectory import generate_trajectories_batch
     from src.algorithms.reward import extract_answer, math_answers_equal, normalize_answer
+    from src.society.pair_generation import build_pairwise_training_pairs_batch
 
-    logger.info("  Generating shared Critic raw-pair pool via Algorithm 1")
+    logger.info("  Generating shared Critic raw-pair pool via Society pairwise rollouts")
 
     all_lora_paths = {k: v for k, v in actor_lora_paths.items() if v}
     max_loras = len(all_lora_paths) if all_lora_paths else 0
@@ -252,11 +248,11 @@ def build_critic_raw_pairs(
         for actor_name, group_samples in actor_groups.items():
             actor_adapter = adapters[actor_name]
             logger.info(
-                "    Algorithm 1 shared batch with actor "
+                "    Pairwise rollout shared batch with actor "
                 f"{actor_name}: {len(group_samples)} samples"
             )
 
-            algo_pairs = generate_trajectories_batch(
+            rollout_pairs = build_pairwise_training_pairs_batch(
                 actor_model=actor_adapter,
                 critic_model=critic_adapter,
                 samples=group_samples,
@@ -269,26 +265,28 @@ def build_critic_raw_pairs(
                 batch_size=len(group_samples),
             )
             logger.info(
-                f"    Algorithm 1 batch for actor {actor_name} produced "
-                f"{len(algo_pairs)} pairs"
+                f"    Pairwise rollout batch for actor {actor_name} produced "
+                f"{len(rollout_pairs)} pairs"
             )
 
-            for pair in algo_pairs:
+            for pair in rollout_pairs:
                 sample = pair.get("sample", {})
                 task_type = sample.get("task_type", "math")
                 correct_answer = sample.get("answer", "")
-                negative_actor = pair["negative"]
-                negative_answer = extract_answer(negative_actor, task_type)
+                actor_candidate = pair["actor_candidate"]
+                critic_candidate = pair["critic_candidate"]
+                rejected_actor_response = actor_candidate["rejected"]
+                rejected_answer = extract_answer(rejected_actor_response, task_type)
 
-                # Only keep pairs where the actor's negative response was wrong
+                # Only keep pairs where the actor's rejected response was wrong
                 # (error scenario — this is where Critic feedback matters)
                 if task_type == "math":
                     is_wrong = not math_answers_equal(
-                        negative_answer or "", correct_answer,
+                        rejected_answer or "", correct_answer,
                     )
                 else:
                     is_wrong = normalize_answer(
-                        negative_answer or "", task_type,
+                        rejected_answer or "", task_type,
                     ) != normalize_answer(correct_answer, task_type)
 
                 if is_wrong:
@@ -297,14 +295,15 @@ def build_critic_raw_pairs(
                         "raw_pair_id": raw_pair_id,
                         "actor_name": actor_name,
                         "sample": sample,
-                        "chosen": pair["positive_critic"],
-                        "rejected": pair["negative_critic"],
-                        "actor_response": negative_actor,
-                        "actor_answer": negative_answer,
+                        "critic_pair": critic_candidate,
+                        "actor_pair": actor_candidate,
+                        "actor_response": rejected_actor_response,
+                        "actor_answer": rejected_answer,
                         "correct_answer": correct_answer,
                         "task_type": task_type,
-                        "delta": pair["delta"],
-                        "direction": pair["direction"],
+                        "delta": pair["comparison"]["delta"],
+                        "comparison_mode": pair["comparison"]["mode"],
+                        "rollout_scores": pair["rollout_scores"],
                     })
 
         if _owns_engine:
@@ -317,7 +316,7 @@ def build_critic_raw_pairs(
             _cleanup_gpu()
         raise
 
-    logger.info(f"  Algorithm 1 produced {len(raw_pairs)} shared raw critic pairs")
+    logger.info(f"  Pairwise rollouts produced {len(raw_pairs)} shared raw critic pairs")
     return raw_pairs
 
 
@@ -437,8 +436,8 @@ def select_critic_preference_pairs(
             continue
         preference_pairs.append({
             "sample": p["sample"],
-            "chosen": p["chosen"],
-            "rejected": p["rejected"],
+            "chosen": p["critic_pair"]["chosen"],
+            "rejected": p["critic_pair"]["rejected"],
             "actor_response": p.get("actor_response", ""),
             "metadata": {
                 "target_skill": skill.value,
@@ -449,7 +448,8 @@ def select_critic_preference_pairs(
                 "raw_pair_id": p.get("raw_pair_id", ""),
                 "actor_name": p.get("actor_name", ""),
                 "delta": p["delta"],
-                "direction": p["direction"],
+                "comparison_mode": p["comparison_mode"],
+                "rollout_scores": p.get("rollout_scores", {}),
             },
         })
 
@@ -639,14 +639,6 @@ def _render_rejected_judgement(
 ) -> str:
     actor_answer = str(pair.get("actor_answer") or "unknown")
     correct_answer = str(pair.get("correct_answer") or "unknown")
-    primary = str(profile.get("primary", "verification")).strip().lower()
-    wrong_error_type = {
-        "computation": "knowledge",
-        "reasoning": "verification",
-        "knowledge": "grounding",
-        "grounding": "knowledge",
-        "verification": "reasoning",
-    }.get(primary, "reasoning")
 
     if negative_kind == "schema_malformed":
         return (
@@ -866,7 +858,7 @@ def main():
     else:
         logger.warning(
             "GLM_API_KEY not set (neither config nor env var). "
-            "Unseen raw pairs from Algorithm 1 will be routed to general pool."
+            "Unseen raw pairs from pairwise rollouts will be routed to general pool."
         )
     api_base = getattr(args, "api_base", "https://api.labforge.top")
     api_model = getattr(args, "api_model", "gpt5.5")
@@ -878,7 +870,7 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
 
     logger.info("=" * 60)
-    logger.info("Diversify Critics (Algorithm 1 trajectory-based)")
+    logger.info("Diversify Critics (Society pairwise rollout-based)")
     logger.info(f"  Model: {args.model_name}")
     logger.info(f"  Input dir: {input_dir}")
     logger.info(f"  Actor dir: {actor_dir}")
@@ -920,8 +912,8 @@ def main():
         if has_incorrect:
             incorrect_sample_ids.append(r["sample_id"])
 
-    # Load original dataset for Algorithm 1 input
-    logger.info("[Step 2] Loading dataset for Algorithm 1...")
+    # Load original dataset for pairwise rollout input
+    logger.info("[Step 2] Loading dataset for pairwise rollouts...")
     from src.data.loader import load_dataset
     dataset = load_dataset(
         args.dataset,

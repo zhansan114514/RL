@@ -3,9 +3,9 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "acc-collab"
+name = "diverse-actor-critic-society"
 version = "0.1.0"
-description = "ACC-Collab: Actor-Critic Approach to Multi-Agent LLM Collaboration"
+description = "Diverse Actor-Critic Society experiment pipeline"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}

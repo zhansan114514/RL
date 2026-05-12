@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
 from pathlib import Path
 
@@ -215,38 +214,53 @@ def test_society_actor_acceptance_requires_style_format_confidence_and_correctne
     raw_pairs = [
         {
             "sample": sample,
-            "positive": "The question states the key evidence.\nThe final result is A.",
-            "negative": "Wrong reasoning.\nThe final result is B.",
-            "delta": 1.0,
-            "direction": "towards",
+            "actor_candidate": {
+                "chosen": "The question states the key evidence.\nThe final result is A.",
+                "rejected": "Wrong reasoning.\nThe final result is B.",
+            },
+            "critic_candidate": {"chosen": "critic chosen", "rejected": "critic rejected"},
+            "comparison": {"delta": 1.0, "mode": "towards_correct"},
+            "rollout_scores": {"natural": 0.0, "guided_correct": 1.0, "guided_wrong": 0.0},
         },
         {
             "sample": sample,
-            "positive": "Low confidence evidence.\nThe final result is A.",
-            "negative": "Wrong reasoning.\nThe final result is B.",
-            "delta": 1.0,
-            "direction": "towards",
+            "actor_candidate": {
+                "chosen": "Low confidence evidence.\nThe final result is A.",
+                "rejected": "Wrong reasoning.\nThe final result is B.",
+            },
+            "critic_candidate": {"chosen": "critic chosen", "rejected": "critic rejected"},
+            "comparison": {"delta": 1.0, "mode": "towards_correct"},
+            "rollout_scores": {"natural": 0.0, "guided_correct": 1.0, "guided_wrong": 0.0},
         },
         {
             "sample": sample,
-            "positive": "A",
-            "negative": "Wrong reasoning.\nThe final result is B.",
-            "delta": 1.0,
-            "direction": "towards",
+            "actor_candidate": {
+                "chosen": "A",
+                "rejected": "Wrong reasoning.\nThe final result is B.",
+            },
+            "critic_candidate": {"chosen": "critic chosen", "rejected": "critic rejected"},
+            "comparison": {"delta": 1.0, "mode": "towards_correct"},
+            "rollout_scores": {"natural": 0.0, "guided_correct": 1.0, "guided_wrong": 0.0},
         },
         {
             "sample": sample,
-            "positive": "Evidence but wrong.\nThe final result is B.",
-            "negative": "Wrong reasoning.\nThe final result is C.",
-            "delta": 1.0,
-            "direction": "towards",
+            "actor_candidate": {
+                "chosen": "Evidence but wrong.\nThe final result is B.",
+                "rejected": "Wrong reasoning.\nThe final result is C.",
+            },
+            "critic_candidate": {"chosen": "critic chosen", "rejected": "critic rejected"},
+            "comparison": {"delta": 1.0, "mode": "towards_correct"},
+            "rollout_scores": {"natural": 0.0, "guided_correct": 1.0, "guided_wrong": 0.0},
         },
         {
             "sample": sample,
-            "positive": "Direct.\nThe final result is A.",
-            "negative": "Wrong reasoning.\nThe final result is B.",
-            "delta": 1.0,
-            "direction": "towards",
+            "actor_candidate": {
+                "chosen": "Direct.\nThe final result is A.",
+                "rejected": "Wrong reasoning.\nThe final result is B.",
+            },
+            "critic_candidate": {"chosen": "critic chosen", "rejected": "critic rejected"},
+            "comparison": {"delta": 1.0, "mode": "towards_correct"},
+            "rollout_scores": {"natural": 0.0, "guided_correct": 1.0, "guided_wrong": 0.0},
         },
     ]
 
@@ -325,11 +339,13 @@ def test_society_actor_acceptance_requires_style_format_confidence_and_correctne
         fake_build_lora_adapters,
     )
     monkeypatch.setattr(
-        "src.algorithms.deliberation.deliberate_batch",
+        society_trainer,
+        "run_pairwise_deliberation_batch",
         fake_deliberate_batch,
     )
     monkeypatch.setattr(
-        "src.algorithms.trajectory._generate_guided_pairs_for_batch",
+        society_trainer,
+        "build_guided_rollout_pairs",
         fake_guided_pairs,
     )
     monkeypatch.setattr(
@@ -353,7 +369,7 @@ def test_society_actor_acceptance_requires_style_format_confidence_and_correctne
         error_specialty=CriticSkill.COMPUTATION,
     )
 
-    pairs = society_trainer._generate_actor_pairs_algorithm1(
+    pairs = society_trainer._generate_actor_pairs_pairwise(
         actor=actor,
         critics=[critic],
         dataset=[sample],

@@ -12,7 +12,7 @@ from src.utils.runtime_env import configure_runtime_libraries
 
 configure_runtime_libraries()
 
-import torch
+import torch  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +38,7 @@ def train_dpo(
     weight_decay: float = 0.01,
     seed: int = 42,
     use_wandb: bool = False,
-    wandb_project: str = "acc-collab",
+    wandb_project: str = "diverse-actor-critic-society",
     gradient_checkpointing: bool = True,
     merge_lora: bool = False,
     device: int = 0,

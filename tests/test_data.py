@@ -733,7 +733,7 @@ class TestEvaluationMetrics:
 
     def test_compute_group_metrics_basic(self):
         """compute_group_metrics should produce per-subject stats."""
-        from src.evaluation.benchmarks import compute_group_metrics
+        from src.evaluation.metrics import compute_group_metrics
 
         details = [
             {"subject": "math", "initially_correct": True, "finally_correct": True,
@@ -759,13 +759,13 @@ class TestEvaluationMetrics:
 
     def test_compute_group_metrics_empty(self):
         """Empty details should return empty dict."""
-        from src.evaluation.benchmarks import compute_group_metrics
+        from src.evaluation.metrics import compute_group_metrics
         result = compute_group_metrics([], "subject")
         assert result == {}
 
     def test_compute_group_metrics_missing_key(self):
         """Missing group key should use 'unknown'."""
-        from src.evaluation.benchmarks import compute_group_metrics
+        from src.evaluation.metrics import compute_group_metrics
 
         details = [
             {"subject": "", "initially_correct": True, "finally_correct": True,

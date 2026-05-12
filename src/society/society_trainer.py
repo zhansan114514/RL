@@ -1,9 +1,6 @@
 """
 Society trainer: Multi-Agent alternating training scheduler.
 
-Extends ACC-Collab's alternating training from 1 Actor + 1 Critic
-to N Actors + M Critics with data-level diversification.
-
 For each iteration:
   Phase A: Fix all Actors -> Train each Critic on a mixture of general,
            specialty, and calibration data routed by multi-dimensional error profiles.
@@ -15,8 +12,9 @@ in metadata reflects the mixture sampling probability — it is NOT applied
 directly to the DPO loss.  Actual DPO training uses unweighted loss on the
 mixture dataset.
 
-Preference pairs are generated using the LLM itself (guided vs natural trajectories),
-following the ACC-Collab paper's approach, NOT hardcoded template strings.
+Preference pairs are generated with Society-native pairwise dialogues, guided
+counterfactual responses, and rollout scoring.  The training path does not
+depend on the removed standalone 1 Actor + 1 Critic experiment stack.
 """
 
 from __future__ import annotations
@@ -25,7 +23,6 @@ import gc
 import json
 import logging
 import os
-import random
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,6 +46,10 @@ from src.society.data_classifier import (
 )
 from src.society.diversity_split import DiversitySplit, summarize_critic_training_pairs
 from src.algorithms.reward import extract_answer, math_answers_equal, normalize_answer
+from src.society.pair_generation import (
+    build_guided_rollout_pairs,
+    run_pairwise_deliberation_batch,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -264,9 +265,6 @@ def _load_pairs_json(path: str) -> list[dict]:
     import json
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
-    """Get a numpy random generator for sampling."""
-    import numpy as np
-    return np.random.default_rng(seed)
 
 
 @dataclass
@@ -350,7 +348,7 @@ def society_alternating_train(
         num_iterations: Number of alternating iterations.
         num_rounds: Deliberation rounds for trajectory generation.
         num_simulations: MC roll-out simulations.
-        trajectory_max_tokens: Max tokens for Algorithm 1 trajectory generation.
+        trajectory_max_tokens: Max tokens for Society pairwise rollout generation.
         reward_threshold: Preference pair filtering threshold.
         lora_r: LoRA rank (default 256).
         lora_alpha: LoRA alpha (default 512).
@@ -464,7 +462,7 @@ def society_alternating_train(
                 f"(specialty: {critic.error_specialty.value})"
             )
 
-            preference_pairs = _generate_critic_pairs_algorithm1(
+            preference_pairs = _generate_critic_pairs_pairwise(
                 actors=actors,
                 critic=critic,
                 dataset=dataset,
@@ -658,7 +656,7 @@ def society_alternating_train(
                 f"(style: {actor.reasoning_style.value})"
             )
 
-            preference_pairs = _generate_actor_pairs_algorithm1(
+            preference_pairs = _generate_actor_pairs_pairwise(
                 actor=actor,
                 critics=critics,
                 dataset=dataset,
@@ -820,17 +818,15 @@ def society_alternating_train(
 
 
 # ============================================================
-# LoRA Model Adapter — bridges shared VLLMInference + LoRA to
-# the interface expected by trajectory.py's generate_trajectories()
+# LoRA Model Adapter — bridges shared VLLMInference + LoRA to the simple
+# generation interface used by Society pair generation.
 # ============================================================
 
 class LoRAModelAdapter:
     """Wraps a shared VLLMInference engine with an optional LoRA adapter.
 
-    Provides the ``generate()`` and ``generate_single()`` interface that
-    ``generate_trajectories`` (trajectory.py) and ``deliberate()``
-    (deliberation.py) expect, while routing generation calls through
-    the single shared engine with per-agent LoRA requests.
+    Provides ``generate()`` and ``generate_single()`` while routing generation
+    calls through the single shared engine with per-agent LoRA requests.
     """
 
     def __init__(self, engine: Any, lora_request: Any = None):
@@ -904,10 +900,10 @@ def _build_lora_adapters(
 
 
 # ============================================================
-# Phase A: Critic preference pairs via Algorithm 1
+# Phase A: Critic preference pairs via Society pairwise rollouts
 # ============================================================
 
-def _generate_critic_pairs_algorithm1(
+def _generate_critic_pairs_pairwise(
     actors: list[AgentConfig],
     critic: AgentConfig,
     dataset: list[dict],
@@ -940,16 +936,12 @@ def _generate_critic_pairs_algorithm1(
     general_ratio: float = 0.2,
     calibration_ratio: float = 0.1,
 ) -> list[dict]:
-    """Generate Critic DPO preference pairs using Algorithm 1 from trajectory.py.
+    """Generate Critic DPO pairs from Society pairwise guided rollouts.
 
     Round-robins across all available actors (one per sample) so the critic
     learns to give feedback for diverse actor styles, matching the multi-actor
-    inference setting.  Each ``generate_trajectories`` call still uses only
-    1 actor + 1 critic LoRA concurrently.
-
-    The critic preference pairs use:
-      chosen  = positive_critic (guided toward correct answer)
-      rejected = negative_critic (natural / guided toward wrong answer)
+    inference setting. Each pairwise rollout uses one Actor adapter and one
+    Critic adapter concurrently.
 
     Error-profile routing via DiversitySplit constructs a critic-specific mixture
     dataset (general/specialty/calibration).  The routing_weight stored in
@@ -957,8 +949,6 @@ def _generate_critic_pairs_algorithm1(
     weighting — actual DPO training uses unweighted loss on the mixture.
     """
     from src.inference.vllm_server import VLLMInference
-    from src.algorithms.deliberation import deliberate_batch
-    from src.algorithms.trajectory import _generate_guided_pairs_for_batch, generate_wrong_answer
 
     model_name = registry.base_model_path or "Qwen/Qwen3-14B"
     specialty = critic.error_specialty
@@ -1010,8 +1000,7 @@ def _generate_critic_pairs_algorithm1(
                 f"{len(group_samples)} samples"
             )
 
-            # Batched natural deliberation (biggest speedup: N*2*T → 2*T calls)
-            trajectories = deliberate_batch(
+            trajectories = run_pairwise_deliberation_batch(
                 actor_adapter, critic_adapter, group_samples, dataset_name,
                 num_rounds=num_rounds, max_tokens=max_tokens, temperature=0.7,
             )
@@ -1019,6 +1008,8 @@ def _generate_critic_pairs_algorithm1(
             correct_answers: list[str] = []
             wrong_answers: list[str] = []
             for j, sample in enumerate(group_samples):
+                import random
+                from src.data.preprocessor import generate_wrong_answer
                 rng = random.Random(seed + indexed_samples[j][0])
                 task_type = sample.get("task_type", "math")
                 correct_answer = sample.get("answer", "")
@@ -1028,7 +1019,7 @@ def _generate_critic_pairs_algorithm1(
                     task_type=task_type, rng=rng,
                 ))
 
-            algo_pairs = _generate_guided_pairs_for_batch(
+            rollout_pairs = build_guided_rollout_pairs(
                 actor_adapter, critic_adapter, group_samples, trajectories,
                 dataset_name, correct_answers, wrong_answers,
                 reward_threshold=reward_threshold,
@@ -1037,41 +1028,44 @@ def _generate_critic_pairs_algorithm1(
                 temperature=0.7,
             )
             logger.info(
-                f"  [{critic.name}] Guided+MC batch with actor {actor_name}: "
-                f"{len(algo_pairs)} Algorithm 1 pairs"
+                f"  [{critic.name}] Guided rollout batch with actor {actor_name}: "
+                f"{len(rollout_pairs)} candidate pairs"
             )
 
-            for pair in algo_pairs:
+            for pair in rollout_pairs:
                 sample = pair["sample"]
-                negative_actor = pair["negative"]
+                actor_candidate = pair["actor_candidate"]
+                critic_candidate = pair["critic_candidate"]
+                rejected_actor_response = actor_candidate["rejected"]
                 task_type = sample.get("task_type", "math")
                 correct_answer = sample.get("answer", "")
-                negative_answer = extract_answer(negative_actor, task_type)
+                rejected_answer = extract_answer(rejected_actor_response, task_type)
 
                 if task_type == "math":
                     is_wrong = not math_answers_equal(
-                        negative_answer or "", correct_answer,
+                        rejected_answer or "", correct_answer,
                     )
                 else:
                     is_wrong = normalize_answer(
-                        negative_answer or "", task_type,
+                        rejected_answer or "", task_type,
                     ) != normalize_answer(correct_answer, task_type)
 
                 if is_wrong:
                     raw_pairs.append({
                         "sample": sample,
-                        "chosen": pair["positive_critic"],
-                        "rejected": pair["negative_critic"],
-                        "actor_response": negative_actor,
-                        "actor_answer": negative_answer,
+                        "critic_pair": critic_candidate,
+                        "actor_pair": actor_candidate,
+                        "actor_response": rejected_actor_response,
+                        "actor_answer": rejected_answer,
                         "correct_answer": correct_answer,
                         "task_type": task_type,
-                        "delta": pair["delta"],
-                        "direction": pair["direction"],
+                        "delta": pair["comparison"]["delta"],
+                        "comparison_mode": pair["comparison"]["mode"],
+                        "rollout_scores": pair["rollout_scores"],
                     })
 
         logger.info(
-            f"  [{critic.name}] Algorithm 1 produced {len(raw_pairs)} raw critic pairs"
+            f"  [{critic.name}] Pairwise rollouts produced {len(raw_pairs)} raw critic pairs"
         )
 
         # Routing below is API-bound and can take several minutes. Release the
@@ -1164,7 +1158,8 @@ def _generate_critic_pairs_algorithm1(
                             "routing_weight": item.weight,
                             "error_profile": profile,
                             "delta": p["delta"],
-                            "direction": p["direction"],
+                            "comparison_mode": p["comparison_mode"],
+                            "rollout_scores": p.get("rollout_scores", {}),
                             "actor_answer": p.get("actor_answer", ""),
                             "correct_answer": p.get("correct_answer", ""),
                             "structured_judgement": True,
@@ -1219,10 +1214,10 @@ def _generate_critic_pairs_algorithm1(
 
 
 # ============================================================
-# Phase B: Actor preference pairs via Algorithm 1
+# Phase B: Actor preference pairs via Society pairwise rollouts
 # ============================================================
 
-def _generate_actor_pairs_algorithm1(
+def _generate_actor_pairs_pairwise(
     actor: AgentConfig,
     critics: list[AgentConfig],
     dataset: list[dict],
@@ -1251,22 +1246,16 @@ def _generate_actor_pairs_algorithm1(
     max_retries: int = 5,
     retry_delay: int | float = 5,
 ) -> list[dict]:
-    """Generate Actor DPO preference pairs using Algorithm 1 from trajectory.py.
+    """Generate Actor DPO pairs from Society pairwise guided rollouts.
 
     Round-robins across all available critics (one per sample) so the actor
     learns from diverse critic feedback styles, matching the MoE Top-K
-    routing at inference.  Each ``generate_trajectories`` call still uses
-    only 1 actor + 1 critic LoRA concurrently.
-
-    The actor preference pairs use:
-      chosen  = positive (guided-toward-correct actor response)
-      rejected = negative (natural / guided-toward-wrong actor response)
+    routing at inference. Each pairwise rollout uses one Actor adapter and one
+    Critic adapter concurrently.
 
     Reasoning-style filtering ensures data-level diversification.
     """
     from src.inference.vllm_server import VLLMInference
-    from src.algorithms.deliberation import deliberate_batch
-    from src.algorithms.trajectory import _generate_guided_pairs_for_batch, generate_wrong_answer
 
     model_name = registry.base_model_path or "Qwen/Qwen3-14B"
 
@@ -1323,8 +1312,7 @@ def _generate_actor_pairs_algorithm1(
                 f"{len(group_samples)} samples"
             )
 
-            # Batched natural deliberation
-            trajectories = deliberate_batch(
+            trajectories = run_pairwise_deliberation_batch(
                 actor_adapter, critic_adapter, group_samples, dataset_name,
                 num_rounds=num_rounds, max_tokens=max_tokens, temperature=0.7,
             )
@@ -1332,6 +1320,8 @@ def _generate_actor_pairs_algorithm1(
             correct_answers: list[str] = []
             wrong_answers: list[str] = []
             for j, sample in enumerate(group_samples):
+                import random
+                from src.data.preprocessor import generate_wrong_answer
                 rng = random.Random(seed + indexed_samples[j][0])
                 correct_answer = sample.get("answer", "")
                 task_type = sample.get("task_type", "math")
@@ -1341,7 +1331,7 @@ def _generate_actor_pairs_algorithm1(
                     task_type=task_type, rng=rng,
                 ))
 
-            algo_pairs = _generate_guided_pairs_for_batch(
+            rollout_pairs = build_guided_rollout_pairs(
                 actor_adapter, critic_adapter, group_samples, trajectories,
                 dataset_name, correct_answers, wrong_answers,
                 reward_threshold=reward_threshold,
@@ -1350,21 +1340,22 @@ def _generate_actor_pairs_algorithm1(
                 temperature=0.7,
             )
             logger.info(
-                f"  [{actor.name}] Guided+MC batch with critic {critic_name}: "
-                f"{len(algo_pairs)} Algorithm 1 pairs"
+                f"  [{actor.name}] Guided rollout batch with critic {critic_name}: "
+                f"{len(rollout_pairs)} candidate pairs"
             )
 
-            for pair in algo_pairs:
+            for pair in rollout_pairs:
                 raw_pairs.append({
                     "sample": pair["sample"],
-                    "chosen": pair["positive"],
-                    "rejected": pair["negative"],
-                    "delta": pair["delta"],
-                    "direction": pair["direction"],
+                    "actor_pair": pair["actor_candidate"],
+                    "critic_pair": pair["critic_candidate"],
+                    "delta": pair["comparison"]["delta"],
+                    "comparison_mode": pair["comparison"]["mode"],
+                    "rollout_scores": pair["rollout_scores"],
                 })
 
         logger.info(
-            f"  [{actor.name}] Algorithm 1 produced {len(raw_pairs)} raw actor pairs"
+            f"  [{actor.name}] Pairwise rollouts produced {len(raw_pairs)} raw actor pairs"
         )
 
         # Style filtering is API-bound; release vLLM before classification to
@@ -1385,7 +1376,7 @@ def _generate_actor_pairs_algorithm1(
             for p in raw_pairs:
                 sample = p["sample"]
                 question = sample.get("question", "")
-                chosen = p["chosen"]
+                chosen = p["actor_pair"]["chosen"]
                 correct_answer = sample.get("answer", "")
                 key = (question, chosen)
                 if key not in style_cache:
@@ -1457,7 +1448,7 @@ def _generate_actor_pairs_algorithm1(
             for p in raw_pairs:
                 sample = p["sample"]
                 question = sample.get("question", "")
-                chosen = p["chosen"]
+                chosen = p["actor_pair"]["chosen"]
                 key = (question, chosen)
                 task_type = sample.get("task_type", "math")
                 correct_answer = sample.get("answer", "")
@@ -1488,7 +1479,7 @@ def _generate_actor_pairs_algorithm1(
                     preference_pairs.append({
                         "sample": sample,
                         "chosen": chosen,
-                        "rejected": p["rejected"],
+                        "rejected": p["actor_pair"]["rejected"],
                         "metadata": {
                             "style": target_style.value,
                             "prompted_style": prompt_style,
@@ -1499,7 +1490,8 @@ def _generate_actor_pairs_algorithm1(
                             "chosen_answer": chosen_answer,
                             "accepted_for_actor": True,
                             "delta": p["delta"],
-                            "direction": p["direction"],
+                            "comparison_mode": p["comparison_mode"],
+                            "rollout_scores": p.get("rollout_scores", {}),
                         },
                     })
 
@@ -1615,8 +1607,8 @@ def _run_dpo_training(
         # Convert preference_pairs to HuggingFace Dataset
         hf_data = {
             "prompt": prompts,
-            "chosen": [p.get("chosen", "") for p in preference_pairs],
-            "rejected": [p.get("rejected", "") for p in preference_pairs],
+            "chosen": [p["chosen"] for p in preference_pairs],
+            "rejected": [p["rejected"] for p in preference_pairs],
         }
         preference_dataset = Dataset.from_dict(hf_data)
 

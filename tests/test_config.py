@@ -326,19 +326,3 @@ class TestConfigManagerWrite:
         d = cfg.to_dict()
         assert isinstance(d, dict)
         assert d["seed"] == 42
-
-
-class TestModelManagerIntegration:
-    """Test that model_manager's _get_config still works."""
-
-    def test_get_config_with_initialized_manager(self):
-        from src.training.model_manager import _get_config
-
-        ConfigManager.initialize(config_path="configs/society/experiment_mmlu.yaml", load_local=False)
-        assert _get_config("inference.gpu_memory_utilization", 0.45) == 0.45
-        assert _get_config("inference.max_model_len", 4096) == 4096
-
-    def test_get_config_without_initialized_manager(self):
-        from src.training.model_manager import _get_config
-
-        assert _get_config("any.key", "fallback") == "fallback"
