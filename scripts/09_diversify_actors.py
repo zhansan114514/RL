@@ -39,7 +39,7 @@ STEP_DEFAULTS = {
     "max_pairs_per_sample": 4,
     "augment_when_below": 256,
     "max_synthetic_ratio": 0.7,
-    "pair_mix": {"correctness": 0.6, "style": 0.3, "format": 0.1},
+    "pair_mix": {"correctness": 0.7, "style": 0.3},
     "lora_r": 256,
     "lora_alpha": 512,
     "learning_rate": 5e-5,
@@ -91,11 +91,6 @@ def load_classified_data(input_dir: str) -> dict[str, Any]:
     return data
 
 
-def _format_valid(response: str) -> bool:
-    from src.parsing.answer_extractor import extract_answer
-    return extract_answer(response, "multiple_choice").answer is not None
-
-
 def build_response_index(
     classified_results: list[dict[str, Any]],
 ) -> dict[str, list[dict[str, Any]]]:
@@ -114,7 +109,6 @@ def build_response_index(
                 "primary_style": label.get("primary_style") or label.get("reasoning_style"),
                 "secondary_styles": label.get("secondary_styles", []),
                 "style_confidence": label.get("reasoning_style_confidence", 0.0),
-                "format_status": label.get("format_status") or ("valid" if _format_valid(response_text) else "answer_only"),
                 "prompted_style": label.get("prompted_style", ""),
                 "style_match": bool(label.get("style_match")),
                 "accepted_for_actor": bool(label.get("accepted_for_actor")),
@@ -156,7 +150,6 @@ def build_preference_pairs_for_style(
 
     correctness_candidates = []
     style_candidates = []
-    format_candidates = []
 
     for sample_id, responses in by_sample.items():
         style_correct = [
@@ -183,11 +176,6 @@ def build_preference_pairs_for_style(
             )
         ]
         incorrect = [r for r in responses if not r["is_correct"]]
-        malformed = [
-            r for r in responses
-            if r.get("format_status") in {"answer_only", "empty_or_invalid"}
-            or not _format_valid(r.get("response", ""))
-        ]
 
         for chosen in style_correct:
             for rejected in incorrect:
@@ -198,16 +186,12 @@ def build_preference_pairs_for_style(
                 if rejected["response_id"] == chosen["response_id"]:
                     continue
                 style_candidates.append(_make_pair(chosen, rejected, "style"))
-            for rejected in malformed:
-                if rejected["response_id"] != chosen["response_id"]:
-                    format_candidates.append(_make_pair(chosen, rejected, "format"))
 
     pairs: list[dict[str, Any]] = []
     per_sample_counter: Counter[str] = Counter()
     for kind, pool in (
         ("correctness", correctness_candidates),
         ("style", style_candidates),
-        ("format", format_candidates),
     ):
         selected = _take_limited(
             pool,
@@ -218,7 +202,7 @@ def build_preference_pairs_for_style(
         pairs.extend(selected)
 
     if len(pairs) < target_pairs:
-        filler = correctness_candidates + style_candidates + format_candidates
+        filler = correctness_candidates + style_candidates
         existing = {
             (
                 p["metadata"].get("chosen_response_id"),
@@ -253,7 +237,6 @@ def build_preference_pairs_for_style(
         "candidate_counts": {
             "correctness": len(correctness_candidates),
             "style": len(style_candidates),
-            "format": len(format_candidates),
         },
     })
     return pairs, metrics
@@ -325,7 +308,7 @@ def augment_pairs_if_needed(
 
 
 def _pair_quotas(target_pairs: int, mix: dict[str, float]) -> dict[str, int]:
-    defaults = {"correctness": 0.6, "style": 0.3, "format": 0.1}
+    defaults = {"correctness": 0.7, "style": 0.3}
     ratios = {k: float(mix.get(k, defaults[k])) for k in defaults}
     total = sum(ratios.values()) or 1.0
     quotas = {k: int(round(target_pairs * ratios[k] / total)) for k in ratios}
@@ -351,7 +334,6 @@ def _make_pair(chosen: dict[str, Any], rejected: dict[str, Any], pair_type: str)
             "chosen_style_confidence": chosen.get("style_confidence", 0.0),
             "rejected_prompted_style": rejected.get("prompted_style", ""),
             "rejected_primary_style": rejected.get("primary_style", ""),
-            "rejected_format_status": rejected.get("format_status", ""),
         },
     }
 

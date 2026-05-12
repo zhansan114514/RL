@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from _utils import setup_logging
 from src.society.agent_registry import ReasoningStyle
+from src.society.actor_response_quality import is_trainable_actor_response
 from src.society.data_classifier import (
     ERROR_PROFILE_DIMENSIONS,
     ERROR_PROFILE_PRIMARY_LABELS,
@@ -212,6 +213,7 @@ def build_per_response_labels(traj: dict[str, Any]) -> list[dict[str, Any]]:
             "agent_id": resp.get("agent_id", 0),
             "agent_name": resp.get("agent_name", ""),
             "prompted_style": resp.get("prompted_style", ""),
+            "task_type": task_type,
             "generation_index": resp.get("generation_index"),
             "response": resp.get("response", ""),
             "answer": answer,
@@ -233,12 +235,13 @@ def update_actor_acceptance(label: dict[str, Any], args: Any) -> None:
     """Populate actor-training gate fields for one classified label."""
     prompted_style = str(label.get("prompted_style") or "")
     primary_style = str(label.get("primary_style") or "")
+    task_type = str(label.get("task_type") or "multiple_choice")
     style_match = bool(prompted_style and primary_style == prompted_style)
     label["style_match"] = style_match
     label["accepted_for_actor"] = (
         bool(label.get("is_correct"))
-        and label.get("format_status") == "valid"
         and style_match
+        and is_trainable_actor_response(label.get("response", ""), task_type)
         and float(label.get("reasoning_style_confidence", 0.0) or 0.0)
         >= float(getattr(args, "min_style_confidence", 0.65))
     )

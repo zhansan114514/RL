@@ -99,8 +99,8 @@ def test_actor_pairs_use_only_accepted_target_style_chosen():
         ],
     }]
     args = type("Args", (), {
-        "pair_mix": {"correctness": 0.34, "style": 0.33, "format": 0.33},
-        "target_pairs_per_actor": 3,
+        "pair_mix": {"correctness": 0.7, "style": 0.3},
+        "target_pairs_per_actor": 2,
         "max_pairs_per_actor": 10,
         "max_pairs_per_sample": 10,
     })()
@@ -112,16 +112,11 @@ def test_actor_pairs_use_only_accepted_target_style_chosen():
         args,
     )
 
-    assert {p["metadata"]["pair_type"] for p in pairs} == {
-        "correctness",
-        "style",
-        "format",
-    }
+    assert {p["metadata"]["pair_type"] for p in pairs} == {"correctness", "style"}
     assert all(p["metadata"]["chosen_response_id"] == "chosen" for p in pairs)
     assert metrics["candidate_counts"] == {
         "correctness": 1,
         "style": 2,
-        "format": 1,
     }
 
 
@@ -194,7 +189,7 @@ def test_society_actor_dpo_prompt_is_style_conditioned(monkeypatch, tmp_path):
     assert "FINAL_ANSWER" not in prompt
 
 
-def test_society_actor_acceptance_requires_style_format_confidence_and_correctness(monkeypatch):
+def test_society_actor_acceptance_requires_style_confidence_and_correctness(monkeypatch):
     from src.society import society_trainer
     from src.society.agent_registry import (
         AgentConfig,
@@ -390,9 +385,11 @@ def test_society_actor_acceptance_requires_style_format_confidence_and_correctne
     )
 
     assert len(pairs) == 1
-    assert pairs[0]["chosen"] == "The question states the key evidence.\nThe final result is A."
-    assert pairs[0]["metadata"]["prompted_style"] == "evidence"
-    assert pairs[0]["metadata"]["classified_style"] == "evidence"
-    assert pairs[0]["metadata"]["format_status"] == "valid"
-    assert pairs[0]["metadata"]["style_confidence"] == 0.9
-    assert pairs[0]["metadata"]["is_correct"] is True
+    chosen_texts = {pair["chosen"] for pair in pairs}
+    assert "The question states the key evidence.\nThe final result is A." in chosen_texts
+    assert "A" not in chosen_texts
+    assert all(pair["metadata"]["prompted_style"] == "evidence" for pair in pairs)
+    assert all(pair["metadata"]["classified_style"] == "evidence" for pair in pairs)
+    assert all("format_status" not in pair["metadata"] for pair in pairs)
+    assert all(pair["metadata"]["style_confidence"] >= 0.65 for pair in pairs)
+    assert all(pair["metadata"]["is_correct"] is True for pair in pairs)

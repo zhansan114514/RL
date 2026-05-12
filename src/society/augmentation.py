@@ -99,7 +99,6 @@ def generate_style_conditioned_responses(
 
         if (
             label.primary_style != style
-            or label.format_status != "valid"
             or label.confidence < style_confidence_threshold
         ):
             continue
@@ -110,7 +109,6 @@ def generate_style_conditioned_responses(
             "primary_style": style.value,
             "secondary_styles": [s.value for s in label.secondary_styles],
             "style_confidence": label.confidence,
-            "format_status": label.format_status,
             "synthetic": True,
         })
 
@@ -118,7 +116,7 @@ def generate_style_conditioned_responses(
 
 
 def make_synthetic_rejected_response(sample: dict[str, Any]) -> str:
-    """Create a simple wrong-format/wrong-answer rejected response."""
+    """Create a simple wrong-answer rejected response."""
 
     task_type = sample.get("task_type", "multiple_choice")
     correct = normalize_answer(str(sample.get("answer", "")), task_type)

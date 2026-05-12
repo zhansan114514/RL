@@ -62,7 +62,7 @@ STEP_DEFAULTS = {
     "max_pairs_per_critic": 1024,
     "min_pairs_per_critic": 64,
     "allow_synthetic_critique": True,
-    "pair_mix": {"specialty": 0.7, "general": 0.2, "format": 0.1},
+    "pair_mix": {"specialty": 0.75, "general": 0.25},
     "seed": 42,
     "device": 0,
     "dtype": "bfloat16",
@@ -502,7 +502,7 @@ def build_structured_critic_pairs(
 
     rng = np.random.default_rng(seed)
     skill = resolve_critic_skill(critic_skill)
-    pair_mix = pair_mix or {"specialty": 0.7, "general": 0.2, "format": 0.1}
+    pair_mix = pair_mix or {"specialty": 0.75, "general": 0.25}
 
     pair_by_id = {
         p.get("raw_pair_id"): p
@@ -525,12 +525,11 @@ def build_structured_critic_pairs(
 
     general_items = [item for item in routed_items if item.skill is None]
     other_items = [item for item in routed_items if item.skill is not None and item.skill != skill]
-    specialty_quota, general_quota, format_quota = _critic_pair_quotas(max_pairs, pair_mix)
+    specialty_quota, general_quota = _critic_pair_quotas(max_pairs, pair_mix)
 
     selected: list[tuple[Any, str]] = []
     selected.extend((item, "specialty") for item in _sample_items(rng, specialty_items, specialty_quota))
     selected.extend((item, "general") for item in _sample_items(rng, general_items or routed_items, general_quota))
-    selected.extend((item, "format") for item in _sample_items(rng, specialty_items + other_items + general_items, format_quota))
 
     structured_pairs: List[Dict[str, Any]] = []
     for idx, (item, source_bucket) in enumerate(selected):
@@ -640,12 +639,6 @@ def _render_rejected_judgement(
     actor_answer = str(pair.get("actor_answer") or "unknown")
     correct_answer = str(pair.get("correct_answer") or "unknown")
 
-    if negative_kind == "schema_malformed":
-        return (
-            "The response may have an issue, but I am not sure.\n"
-            f"Suggested answer: {correct_answer}\n"
-            "Confidence is medium."
-        )
     if negative_kind == "answer_correct_wrong":
         return render_critic_judgement(
             answer_correct="yes",
@@ -660,12 +653,19 @@ def _render_rejected_judgement(
             confidence=0.75,
             critique="The critique identifies a problem but repeats the actor's wrong answer.",
         )
-    if negative_kind == "error_type_wrong":
+    if negative_kind == "confidence_badly_calibrated":
         return render_critic_judgement(
             answer_correct="no",
             suggested_answer=correct_answer,
-            confidence=0.75,
-            critique="The suggested answer may be right, but the error type is misdiagnosed.",
+            confidence=0.05,
+            critique="The actor response has a clear issue, but this judgement is under-confident.",
+        )
+    if negative_kind == "critique_misses_core_error":
+        return render_critic_judgement(
+            answer_correct="no",
+            suggested_answer=correct_answer,
+            confidence=0.70,
+            critique="The response could be improved, but this critique does not identify the key reasoning problem.",
         )
     return render_critic_judgement(
         answer_correct="no",
@@ -676,27 +676,23 @@ def _render_rejected_judgement(
 
 
 def _negative_kind(idx: int, source_bucket: str) -> str:
-    if source_bucket == "format":
-        return "schema_malformed"
     kinds = (
-        ["schema_malformed"] * 2
-        + ["answer_correct_wrong"] * 3
-        + ["suggested_answer_wrong"] * 2
-        + ["error_type_wrong"] * 3
+        ["answer_correct_wrong"] * 3
+        + ["suggested_answer_wrong"] * 3
+        + ["confidence_badly_calibrated"] * 2
+        + ["critique_misses_core_error"] * 2
         + ["critique_weak"]
     )
     return kinds[idx % len(kinds)]
 
 
-def _critic_pair_quotas(max_pairs: int, pair_mix: Dict[str, float]) -> tuple[int, int, int]:
-    specialty = float(pair_mix.get("specialty", 0.7))
-    general = float(pair_mix.get("general", 0.2))
-    fmt = float(pair_mix.get("format", 0.1))
-    total = specialty + general + fmt or 1.0
+def _critic_pair_quotas(max_pairs: int, pair_mix: Dict[str, float]) -> tuple[int, int]:
+    specialty = float(pair_mix.get("specialty", 0.75))
+    general = float(pair_mix.get("general", 0.25))
+    total = specialty + general or 1.0
     specialty_q = int(round(max_pairs * specialty / total))
-    general_q = int(round(max_pairs * general / total))
-    format_q = max_pairs - specialty_q - general_q
-    return specialty_q, general_q, format_q
+    general_q = max_pairs - specialty_q
+    return specialty_q, general_q
 
 
 def _sample_items(rng, items: list[Any], n: int) -> list[Any]:
@@ -890,7 +886,7 @@ def main():
         )
     logger.info(
         "  Training pair mix: "
-        f"{getattr(args, 'pair_mix', {'specialty': 0.7, 'general': 0.2, 'format': 0.1})}"
+        f"{getattr(args, 'pair_mix', {'specialty': 0.75, 'general': 0.25})}"
     )
     logger.info("=" * 60)
 
@@ -1093,7 +1089,7 @@ def main():
                 max_pairs=getattr(args, "max_pairs_per_critic", getattr(args, "target_pairs_per_critic", args.max_delib_samples)),
                 seed=args.seed,
                 min_real_specialty_items=getattr(args, "min_real_specialty_items", 16),
-                pair_mix=getattr(args, "pair_mix", {"specialty": 0.7, "general": 0.2, "format": 0.1}),
+                pair_mix=getattr(args, "pair_mix", {"specialty": 0.75, "general": 0.25}),
             )
 
             if preference_pairs:
@@ -1239,7 +1235,7 @@ def main():
                     "max_pairs_per_critic": getattr(args, "max_pairs_per_critic", args.max_delib_samples),
                 },
                 "training_mix": {
-                    "pair_mix": getattr(args, "pair_mix", {"specialty": 0.7, "general": 0.2, "format": 0.1}),
+                    "pair_mix": getattr(args, "pair_mix", {"specialty": 0.75, "general": 0.25}),
                 },
                 "strict_classification": getattr(args, "strict_classification", True),
                 "max_classification_failure_rate": getattr(args, "max_classification_failure_rate", 0.0),

@@ -88,7 +88,7 @@ class EvalResult:
     num_samples: int
     eval_time_seconds: float
     sample_details: List[Dict[str, Any]]
-    format_metrics: Dict[str, Any] = field(default_factory=dict)
+    parsing_diagnostics: Dict[str, Any] = field(default_factory=dict)
     deliberation_dynamics: Dict[str, int] = field(default_factory=dict)
     per_round_consensus_confidence: List[float] = field(default_factory=list)
     critic_metrics: Dict[str, Any] = field(default_factory=dict)
@@ -651,7 +651,7 @@ def _run_deliberation_on_samples(
         if samples else 0.0
     )
 
-    format_metrics = {
+    parsing_diagnostics = {
         "actor_answer_sources_by_round": {
             str(r): source_rates(actor_sources_by_round[r])
             for r in range(num_rounds)
@@ -714,7 +714,7 @@ def _run_deliberation_on_samples(
         num_samples=len(samples),
         eval_time_seconds=time.time() - start_time,
         sample_details=details,
-        format_metrics=format_metrics,
+        parsing_diagnostics=parsing_diagnostics,
         deliberation_dynamics=deliberation_dynamics,
         per_round_consensus_confidence=per_round_consensus_confidence,
         critic_metrics=critic_metrics,
@@ -728,7 +728,7 @@ def _build_results_payload(
     first_result = list(ablation_results.values())[0] if ablation_results else None
     main_result = ablation_results.get("A5_full_system") or first_result
     main_metrics = {}
-    format_metrics = {}
+    parsing_diagnostics = {}
     deliberation_dynamics = {}
     critic_metrics = {}
     if main_result:
@@ -741,12 +741,12 @@ def _build_results_payload(
             "mean_actor_final_accuracy": main_result.mean_actor_final_accuracy,
             "best_actor_oracle_accuracy": main_result.best_actor_oracle_accuracy,
         }
-        format_metrics = main_result.format_metrics
+        parsing_diagnostics = main_result.parsing_diagnostics
         deliberation_dynamics = main_result.deliberation_dynamics
         critic_metrics = main_result.critic_metrics
     return {
         "main_metrics": main_metrics,
-        "format_metrics": format_metrics,
+        "parsing_diagnostics": parsing_diagnostics,
         "deliberation_dynamics": deliberation_dynamics,
         "critic_metrics": critic_metrics,
         "per_round_accuracy": main_result.per_round_accuracy if main_result else [],
@@ -766,7 +766,7 @@ def _build_results_payload(
                 "ci_95": list(r.ci_95),
                 "num_samples": r.num_samples,
                 "eval_time_seconds": r.eval_time_seconds,
-                "format_metrics": r.format_metrics,
+                "parsing_diagnostics": r.parsing_diagnostics,
                 "deliberation_dynamics": r.deliberation_dynamics,
                 "critic_metrics": r.critic_metrics,
                 "ablation_metadata": r.ablation_metadata,
@@ -847,19 +847,19 @@ def _aggregate_source_metric_dicts(items: List[Dict[str, Any]]) -> Dict[str, Any
     return aggregate
 
 
-def _aggregate_format_metrics(results: List[EvalResult]) -> Dict[str, Any]:
+def _aggregate_parsing_diagnostics(results: List[EvalResult]) -> Dict[str, Any]:
     if not results:
         return {}
 
     round_keys = sorted({
         int(key)
         for result in results
-        for key in result.format_metrics.get("actor_answer_sources_by_round", {})
+        for key in result.parsing_diagnostics.get("actor_answer_sources_by_round", {})
     })
     sources_by_round = {}
     for round_key in round_keys:
         sources_by_round[str(round_key)] = _aggregate_source_metric_dicts([
-            result.format_metrics.get("actor_answer_sources_by_round", {}).get(
+            result.parsing_diagnostics.get("actor_answer_sources_by_round", {}).get(
                 str(round_key),
                 {},
             )
@@ -982,7 +982,7 @@ def _aggregate_eval_results(
         num_samples=results[0].num_samples,
         eval_time_seconds=sum(r.eval_time_seconds for r in results),
         sample_details=[],
-        format_metrics=_aggregate_format_metrics(results),
+        parsing_diagnostics=_aggregate_parsing_diagnostics(results),
         deliberation_dynamics={
             key: sum(result.deliberation_dynamics.get(key, 0) for result in results)
             for key in (

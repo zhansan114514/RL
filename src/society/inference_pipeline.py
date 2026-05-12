@@ -363,7 +363,7 @@ def _weighted_vote(
 ) -> tuple[str, float]:
     """Weighted voting: each Actor's vote is weighted by Critics' correctness judgment.
 
-    This leverages the Critics' [Answer_Correct: yes/no] tags -- Actors whose
+    This leverages the Critics' Answer correct: yes/no judgements -- Actors whose
     answers were judged correct by more Critics receive higher voting weight.
     Falls back to Critic confidence when answer-correctness tags are absent.
 

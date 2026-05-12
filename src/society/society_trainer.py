@@ -44,6 +44,7 @@ from src.prompts.prompt_builder import (
 from src.society.data_classifier import (
     classify_reasoning_style, ClassificationError,
 )
+from src.society.actor_response_quality import is_trainable_actor_response
 from src.society.diversity_split import DiversitySplit, summarize_critic_training_pairs
 from src.algorithms.reward import extract_answer, math_answers_equal, normalize_answer
 from src.society.pair_generation import (
@@ -1407,7 +1408,6 @@ def _generate_actor_pairs_pairwise(
                     )
                     return key, {
                         "style": result.style,
-                        "format_status": result.format_status,
                         "confidence": result.confidence,
                     }, None
                 except ClassificationError:
@@ -1466,13 +1466,12 @@ def _generate_actor_pairs_pairwise(
 
                 result = style_cache.get(key)
                 classified_style = result.get("style") if result else None
-                format_status = result.get("format_status") if result else None
                 style_confidence = float(result.get("confidence", 0.0)) if result else 0.0
                 accepted_for_actor = (
                     is_correct
                     and prompt_style == target_style.value
                     and classified_style == target_style
-                    and format_status == "valid"
+                    and is_trainable_actor_response(chosen, task_type)
                     and style_confidence >= min_conf
                 )
                 if accepted_for_actor:
@@ -1485,7 +1484,6 @@ def _generate_actor_pairs_pairwise(
                             "prompted_style": prompt_style,
                             "classified_style": target_style.value,
                             "style_confidence": style_confidence,
-                            "format_status": format_status,
                             "is_correct": True,
                             "chosen_answer": chosen_answer,
                             "accepted_for_actor": True,

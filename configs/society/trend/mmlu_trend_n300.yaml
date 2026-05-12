@@ -76,9 +76,8 @@ step03_diversify_actors:
   augment_when_below: 256
   max_synthetic_ratio: 0.7
   pair_mix:
-    correctness: 0.6
+    correctness: 0.7
     style: 0.3
-    format: 0.1
   lora_r: 256
   lora_alpha: 512
   learning_rate: 5.0e-5
@@ -113,9 +112,8 @@ step04_diversify_critics:
   min_pairs_per_critic: 32
   allow_synthetic_critique: true
   pair_mix:
-    specialty: 0.7
-    general: 0.2
-    format: 0.1
+    specialty: 0.75
+    general: 0.25
   max_lora_rank: 256
   strict_classification: true
   max_classification_failure_rate: 0.0
@@ -185,11 +183,9 @@ step06_evaluate:
   max_lora_rank: 256
   router_top_k: 2
   router_min_confidence: 0.1
-  router_require_schema_valid: true
   router_fallback_to_uniform: false
 
 router:
   top_k: 2
   min_confidence: 0.1
-  require_schema_valid: true
   fallback_to_uniform: false
