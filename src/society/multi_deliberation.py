@@ -129,6 +129,7 @@ def _extract_actor_answer(response: str, task_type: str) -> tuple[Optional[str],
 def _critic_aware_consensus(
     round_data: DeliberationRound,
     task_type: str,
+    consensus_uses_selected_critics_only: bool = False,
 ) -> tuple[Optional[str], float, dict[str, float]]:
     """Consensus from Actor votes plus Critic judgement signals."""
     weights: dict[str, float] = {}
@@ -140,7 +141,12 @@ def _critic_aware_consensus(
 
     for actor_name, feedbacks in round_data.critic_feedbacks.items():
         actor_answer = _normalize_vote_answer(round_data.actor_answers.get(actor_name), task_type)
-        for feedback in feedbacks.values():
+        consensus_feedbacks = (
+            round_data.routed_feedbacks.get(actor_name, [])
+            if consensus_uses_selected_critics_only
+            else list(feedbacks.values())
+        )
+        for feedback in consensus_feedbacks:
             if feedback.confidence is None:
                 continue
             if feedback.answer_correct == "yes" and actor_answer:
@@ -310,6 +316,8 @@ def multi_agent_deliberate_single_gpu(
     router: Optional[CriticRouter] = None,
     checkpoint_dir: Optional[str] = None,
     lora_paths: Optional[dict[str, str]] = None,
+    route_feedback_to_actor: bool = True,
+    consensus_uses_selected_critics_only: bool = False,
 ) -> MultiDeliberationResult:
     """Run natural multi-Actor, multi-Critic deliberation for one sample."""
     if router is None:
@@ -431,12 +439,14 @@ def multi_agent_deliberate_single_gpu(
 
             routed = router.route(feedbacks)
             round_data.routed_feedbacks[actor.name] = routed.selected_feedbacks
-            round_data.routed_feedback_texts[actor.name] = routed.feedback_text
-            previous_feedback[actor.name] = routed.feedback_text
+            feedback_text = routed.feedback_text if route_feedback_to_actor else ""
+            round_data.routed_feedback_texts[actor.name] = feedback_text
+            previous_feedback[actor.name] = feedback_text
 
         consensus_answer, consensus_confidence, consensus_weights = _critic_aware_consensus(
             round_data,
             task_type,
+            consensus_uses_selected_critics_only=consensus_uses_selected_critics_only,
         )
         round_data.consensus_answer = consensus_answer
         round_data.consensus_confidence = consensus_confidence
@@ -449,7 +459,12 @@ def multi_agent_deliberate_single_gpu(
         final_answers=dict(final_round.actor_answers),
         consensus_answer=final_round.consensus_answer,
         consensus_confidence=final_round.consensus_confidence,
-        metadata={"num_actors": len(actors), "num_critics": len(critics)},
+        metadata={
+            "num_actors": len(actors),
+            "num_critics": len(critics),
+            "route_feedback_to_actor": route_feedback_to_actor,
+            "consensus_uses_selected_critics_only": consensus_uses_selected_critics_only,
+        },
     )
 
 
@@ -464,6 +479,8 @@ def multi_agent_deliberate_batched_single_gpu(
     temperature: float = 0.7,
     router: Optional[CriticRouter] = None,
     lora_paths: Optional[dict[str, str]] = None,
+    route_feedback_to_actor: bool = True,
+    consensus_uses_selected_critics_only: bool = False,
 ) -> list[MultiDeliberationResult]:
     """Batched natural deliberation across samples."""
     if not samples:
@@ -561,12 +578,14 @@ def multi_agent_deliberate_batched_single_gpu(
                     feedbacks.append(feedback)
                 routed = router.route(feedbacks)
                 round_datas[i].routed_feedbacks[actor.name] = routed.selected_feedbacks
-                round_datas[i].routed_feedback_texts[actor.name] = routed.feedback_text
-                previous_feedback[actor.name][i] = routed.feedback_text
+                feedback_text = routed.feedback_text if route_feedback_to_actor else ""
+                round_datas[i].routed_feedback_texts[actor.name] = feedback_text
+                previous_feedback[actor.name][i] = feedback_text
 
             consensus_answer, consensus_confidence, consensus_weights = _critic_aware_consensus(
                 round_datas[i],
                 task_types[i],
+                consensus_uses_selected_critics_only=consensus_uses_selected_critics_only,
             )
             round_datas[i].consensus_answer = consensus_answer
             round_datas[i].consensus_confidence = consensus_confidence
@@ -589,6 +608,11 @@ def multi_agent_deliberate_batched_single_gpu(
             final_answers=dict(final_round.actor_answers),
             consensus_answer=final_round.consensus_answer,
             consensus_confidence=final_round.consensus_confidence,
-            metadata={"num_actors": len(actors), "num_critics": len(critics)},
+            metadata={
+                "num_actors": len(actors),
+                "num_critics": len(critics),
+                "route_feedback_to_actor": route_feedback_to_actor,
+                "consensus_uses_selected_critics_only": consensus_uses_selected_critics_only,
+            },
         ))
     return results

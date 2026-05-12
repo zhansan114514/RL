@@ -4,6 +4,7 @@ from src.prompts.actor_prompts import build_initial_actor_prompt, build_revision
 from src.prompts.critic_prompts import build_critic_prompt
 from src.prompts.prompt_builder import (
     build_guided_actor_prompt,
+    build_guided_critic_prompt,
     build_problem_text,
     build_simple_actor_prompt,
     build_simple_critic_prompt,
@@ -95,7 +96,22 @@ def test_guided_actor_prompt_keeps_natural_protocol():
 
     assert "reason toward the answer Yes" in prompt
     assert "The final result is <answer>." in prompt
+    assert prompt.endswith("The final result is <answer>.")
     assert "FINAL_ANSWER" not in prompt
+
+
+def test_guided_critic_prompt_keeps_judgement_protocol_at_end():
+    prompt = build_guided_critic_prompt(
+        {"question": "Q?", "task_type": "yes_no"},
+        "boolq",
+        actor_response="The final result is No.",
+        target_answer="Yes",
+        skill=CriticSkill.VERIFICATION,
+    )
+
+    assert "evaluate whether the answer should be Yes" in prompt
+    assert "Judgement:" in prompt
+    assert prompt.endswith("Confidence: 0.0-1.0")
 
 
 def test_critic_prompt_uses_natural_critique_and_judgement_block():

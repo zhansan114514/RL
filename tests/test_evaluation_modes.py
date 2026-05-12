@@ -68,6 +68,28 @@ def test_evaluation_mode_rejects_mismatched_tensor_parallel_size():
         evaluate.resolve_evaluation_runtime(args)
 
 
+def test_router_config_fallbacks_fill_missing_step_args():
+    evaluate = _load_society_evaluate_module()
+    args = Namespace(router_top_k=3)
+
+    evaluate._apply_router_config_fallbacks(
+        args,
+        {
+            "top_k": 5,
+            "min_confidence": 0.25,
+            "fallback_to_uniform": True,
+            "route_feedback_to_actor": False,
+            "consensus_uses_selected_critics_only": True,
+        },
+    )
+
+    assert args.router_top_k == 3
+    assert args.router_min_confidence == 0.25
+    assert args.router_fallback_to_uniform is True
+    assert args.route_feedback_to_actor is False
+    assert args.consensus_uses_selected_critics_only is True
+
+
 def test_vllm_inference_accepts_cuda_device_list():
     from src.inference.vllm_server import VLLMInference
 

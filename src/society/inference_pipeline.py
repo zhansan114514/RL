@@ -94,6 +94,8 @@ def society_inference(
     router_uniform: bool = False,
     router_min_confidence: float = 0.1,
     router_fallback_to_uniform: bool = False,
+    route_feedback_to_actor: bool = True,
+    consensus_uses_selected_critics_only: bool = False,
     checkpoint_dir: Optional[str] = None,
     ablation_label: Optional[str] = None,
 ) -> InferenceResult:
@@ -172,6 +174,8 @@ def society_inference(
         temperature=temperature,
         router=router,
         checkpoint_dir=checkpoint_dir,
+        route_feedback_to_actor=route_feedback_to_actor,
+        consensus_uses_selected_critics_only=consensus_uses_selected_critics_only,
     )
 
     # Apply voting strategy
@@ -191,6 +195,8 @@ def society_inference(
             "router_top_k": router_top_k,
             "router_min_confidence": router_min_confidence,
             "router_fallback_to_uniform": router_fallback_to_uniform,
+            "route_feedback_to_actor": route_feedback_to_actor,
+            "consensus_uses_selected_critics_only": consensus_uses_selected_critics_only,
             "num_rounds": num_rounds,
             "lora_enabled": any(a.lora_path for a in actors + critics),
         },
@@ -446,6 +452,8 @@ def run_ablation(
     num_rounds: int = 5,
     router_min_confidence: float = 0.1,
     router_fallback_to_uniform: bool = False,
+    route_feedback_to_actor: bool = True,
+    consensus_uses_selected_critics_only: bool = False,
     checkpoint_dir: Optional[str] = None,
 ) -> dict[str, list[InferenceResult]]:
     """
@@ -493,6 +501,8 @@ def run_ablation(
                 router_uniform=config.get("router_uniform", False),
                 router_min_confidence=router_min_confidence,
                 router_fallback_to_uniform=router_fallback_to_uniform,
+                route_feedback_to_actor=route_feedback_to_actor,
+                consensus_uses_selected_critics_only=consensus_uses_selected_critics_only,
                 voting_strategy=voting_strategy,
                 checkpoint_dir=checkpoint_dir,
                 ablation_label=config_name,

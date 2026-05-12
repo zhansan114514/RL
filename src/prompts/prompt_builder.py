@@ -117,21 +117,14 @@ def build_guided_actor_prompt(
         f"For this training rollout, reason toward the answer {target_answer} "
         "when it is defensible from the problem."
     )
+    guided_problem_text = f"{problem_text}\n\n{guide}".strip()
     if round_num <= 0:
-        return (
-            build_initial_actor_prompt(style, problem_text)
-            + "\n\n"
-            + guide
-        )
-    return (
-        build_revision_actor_prompt(
-            style,
-            problem_text,
-            previous_actor_response=previous_actor_response,
-            critic_feedback=critic_feedback,
-        )
-        + "\n\n"
-        + guide
+        return build_initial_actor_prompt(style, guided_problem_text)
+    return build_revision_actor_prompt(
+        style,
+        guided_problem_text,
+        previous_actor_response=previous_actor_response,
+        critic_feedback=critic_feedback,
     )
 
 
@@ -143,8 +136,9 @@ def build_guided_critic_prompt(
     skill: CriticSkill | None = None,
 ) -> str:
     """Build a guided Critic prompt for preference-pair generation."""
-    base = build_critic_prompt(skill, build_problem_text(sample, dataset_name), actor_response)
-    return (
-        f"{base}\n\n"
+    problem_text = build_problem_text(sample, dataset_name)
+    guide = (
         f"For this training rollout, evaluate whether the answer should be {target_answer}."
     )
+    guided_problem_text = f"{problem_text}\n\n{guide}".strip()
+    return build_critic_prompt(skill, guided_problem_text, actor_response)

@@ -178,6 +178,76 @@ def test_critic_aware_consensus_uses_actor_votes_and_critic_signals():
     assert confidence > 0.5
 
 
+def test_critic_aware_consensus_can_use_selected_critics_only():
+    selected = CriticFeedback(
+        critic_name="critic_selected",
+        skill="verification",
+        critique="Actor answer is acceptable.",
+        confidence=0.2,
+        answer_correct="yes",
+        suggested_answer="A",
+        usable_for_feedback=True,
+        usable_for_routing=True,
+        usable_for_consensus=True,
+    )
+    unselected_1 = CriticFeedback(
+        critic_name="critic_unselected_1",
+        skill="reasoning",
+        critique="Actor should switch to C.",
+        confidence=0.9,
+        answer_correct="no",
+        suggested_answer="C",
+        usable_for_feedback=True,
+        usable_for_routing=True,
+        usable_for_consensus=True,
+    )
+    unselected_2 = CriticFeedback(
+        critic_name="critic_unselected_2",
+        skill="grounding",
+        critique="C is better supported.",
+        confidence=0.8,
+        answer_correct="no",
+        suggested_answer="C",
+        usable_for_feedback=True,
+        usable_for_routing=True,
+        usable_for_consensus=True,
+    )
+    round_data = DeliberationRound(
+        round_num=0,
+        actor_responses={"actor_direct": "The final result is A."},
+        actor_answers={"actor_direct": "A"},
+        actor_answer_sources={"actor_direct": "final_result"},
+        actor_parse_confidence={"actor_direct": 1.0},
+        critic_raw_responses={
+            "actor_direct": {
+                "critic_selected": selected.raw_response,
+                "critic_unselected_1": unselected_1.raw_response,
+                "critic_unselected_2": unselected_2.raw_response,
+            }
+        },
+        critic_feedbacks={
+            "actor_direct": {
+                "critic_selected": selected,
+                "critic_unselected_1": unselected_1,
+                "critic_unselected_2": unselected_2,
+            }
+        },
+        routed_feedbacks={"actor_direct": [selected]},
+    )
+
+    all_answer, _, all_weights = _critic_aware_consensus(round_data, "multiple_choice")
+    selected_answer, _, selected_weights = _critic_aware_consensus(
+        round_data,
+        "multiple_choice",
+        consensus_uses_selected_critics_only=True,
+    )
+
+    assert all_answer == "C"
+    assert abs(all_weights["C"] - 1.7) < 1e-12
+    assert selected_answer == "A"
+    assert selected_weights == {"A": 1.2}
+
+
 def test_multi_agent_deliberation_keeps_raw_actor_response_and_routes_feedback():
     actors = [
         AgentConfig(
@@ -236,3 +306,62 @@ Confidence: 0.9""",
     assert result.rounds[1].consensus_weights["A"] == 0.9
     assert result.rounds[1].consensus_weights["B"] == 1.0
     assert result.consensus_answer == "B"
+
+
+def test_route_feedback_to_actor_can_be_disabled_without_disabling_routing():
+    actors = [
+        AgentConfig(
+            name="actor_direct",
+            role=AgentRole.ACTOR,
+            model_path="base",
+            reasoning_style=ReasoningStyle.DIRECT,
+        )
+    ]
+    critics = [
+        AgentConfig(
+            name="critic_verification",
+            role=AgentRole.CRITIC,
+            model_path="base",
+            error_specialty=CriticSkill.VERIFICATION,
+        )
+    ]
+    engine = FakeEngine([
+        "Initial reasoning.\nThe final result is A.",
+        """The option mapping is wrong; compare B and C.
+
+Judgement:
+Answer correct: no
+Suggested answer: C
+Confidence: 0.9""",
+        "Revision without feedback.\nThe final result is A.",
+        """The actor stayed with A.
+
+Judgement:
+Answer correct: no
+Suggested answer: C
+Confidence: 0.8""",
+    ])
+
+    result = multi_agent_deliberate_single_gpu(
+        inference_engine=engine,
+        actors=actors,
+        critics=critics,
+        sample={
+            "question": "Pick C.",
+            "choices": ["A", "B", "C", "D"],
+            "answer": "C",
+            "task_type": "multiple_choice",
+        },
+        dataset_name="mmlu",
+        num_rounds=2,
+        max_tokens=16,
+        temperature=0.0,
+        route_feedback_to_actor=False,
+    )
+
+    assert result.rounds[0].routed_feedbacks["actor_direct"][0].critique.startswith(
+        "The option mapping is wrong"
+    )
+    assert result.rounds[0].routed_feedback_texts["actor_direct"] == ""
+    assert "The option mapping is wrong" not in engine.prompts[2]
+    assert "No critic feedback was selected." in engine.prompts[2]

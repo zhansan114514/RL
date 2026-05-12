@@ -67,9 +67,29 @@ STEP_DEFAULTS = {
     "router_top_k": 2,
     "router_min_confidence": 0.1,
     "router_fallback_to_uniform": False,
+    "route_feedback_to_actor": True,
+    "consensus_uses_selected_critics_only": False,
     "sampling": None,
     "mmlu_load_mode": "by_subject",
     "eval_batch_size": 1,
+}
+
+
+ROUTER_CONFIG_FALLBACKS = {
+    "router_top_k": ("top_k", STEP_DEFAULTS["router_top_k"]),
+    "router_min_confidence": ("min_confidence", STEP_DEFAULTS["router_min_confidence"]),
+    "router_fallback_to_uniform": (
+        "fallback_to_uniform",
+        STEP_DEFAULTS["router_fallback_to_uniform"],
+    ),
+    "route_feedback_to_actor": (
+        "route_feedback_to_actor",
+        STEP_DEFAULTS["route_feedback_to_actor"],
+    ),
+    "consensus_uses_selected_critics_only": (
+        "consensus_uses_selected_critics_only",
+        STEP_DEFAULTS["consensus_uses_selected_critics_only"],
+    ),
 }
 
 
@@ -149,6 +169,14 @@ def resolve_evaluation_runtime(args) -> EvaluationRuntime:
     )
 
 
+def _apply_router_config_fallbacks(args, router_cfg: Dict[str, Any]) -> None:
+    """Fill evaluation router args from top-level router config when step fields are absent."""
+    router_cfg = router_cfg if isinstance(router_cfg, dict) else {}
+    for arg_name, (router_key, default) in ROUTER_CONFIG_FALLBACKS.items():
+        if not hasattr(args, arg_name):
+            setattr(args, arg_name, router_cfg.get(router_key, default))
+
+
 def parse_args():
     parser = __import__("argparse").ArgumentParser(
         description="Society evaluation",
@@ -164,7 +192,15 @@ def parse_args():
     cli_args = parser.parse_args()
 
     cfg = ConfigManager.initialize(config_path=cli_args.config)
-    args = cfg.step("step06_evaluate", defaults=STEP_DEFAULTS).to_namespace()
+    args = cfg.step(
+        "step06_evaluate",
+        defaults={
+            key: value
+            for key, value in STEP_DEFAULTS.items()
+            if key not in ROUTER_CONFIG_FALLBACKS
+        },
+    ).to_namespace()
+    _apply_router_config_fallbacks(args, cfg.section("router"))
 
     # Preserve config path for logging
     args.config = cli_args.config
@@ -437,6 +473,8 @@ def _run_deliberation_on_samples(
     router_uniform: bool = False,
     router_min_confidence: float = 0.1,
     router_fallback_to_uniform: bool = False,
+    route_feedback_to_actor: bool = True,
+    consensus_uses_selected_critics_only: bool = False,
     eval_batch_size: int = 1,
 ) -> EvalResult:
     """Run deliberation on samples with a shared vLLM engine. No model loading."""
@@ -502,6 +540,8 @@ def _run_deliberation_on_samples(
                 max_tokens=max_tokens,
                 temperature=temperature,
                 router=router,
+                route_feedback_to_actor=route_feedback_to_actor,
+                consensus_uses_selected_critics_only=consensus_uses_selected_critics_only,
             )
             for j, result in enumerate(batch_results):
                 all_results[batch_start + j] = result
@@ -524,6 +564,8 @@ def _run_deliberation_on_samples(
                 max_tokens=max_tokens,
                 temperature=temperature,
                 router=router,
+                route_feedback_to_actor=route_feedback_to_actor,
+                consensus_uses_selected_critics_only=consensus_uses_selected_critics_only,
             )
             all_results.append(result)
 
@@ -1035,6 +1077,8 @@ def run_all_evaluations(
     router_top_k: int = 2,
     router_min_confidence: float = 0.1,
     router_fallback_to_uniform: bool = False,
+    route_feedback_to_actor: bool = True,
+    consensus_uses_selected_critics_only: bool = False,
     phase_actor_dir: str = "output/society/actors",
     phase_critic_dir: str = "output/society/critics",
     results_file: Optional[str] = None,
@@ -1122,6 +1166,8 @@ def run_all_evaluations(
                 router_top_k=1,
                 router_min_confidence=router_min_confidence,
                 router_fallback_to_uniform=router_fallback_to_uniform,
+                route_feedback_to_actor=route_feedback_to_actor,
+                consensus_uses_selected_critics_only=consensus_uses_selected_critics_only,
             )
             logger.info(
                 "  A0: initial="
@@ -1158,6 +1204,8 @@ def run_all_evaluations(
                             router_top_k=1,
                             router_min_confidence=router_min_confidence,
                             router_fallback_to_uniform=router_fallback_to_uniform,
+                            route_feedback_to_actor=route_feedback_to_actor,
+                            consensus_uses_selected_critics_only=consensus_uses_selected_critics_only,
                         )
                         component_results.append((
                             {"actor": actor.name, "critic": critic.name},
@@ -1186,6 +1234,8 @@ def run_all_evaluations(
                             router_top_k=1,
                             router_min_confidence=router_min_confidence,
                             router_fallback_to_uniform=router_fallback_to_uniform,
+                            route_feedback_to_actor=route_feedback_to_actor,
+                            consensus_uses_selected_critics_only=consensus_uses_selected_critics_only,
                         )
                         component_results.append((
                             {"actor": actor.name, "critic": critic.name},
@@ -1232,6 +1282,8 @@ def run_all_evaluations(
                         router_top_k=1,
                         router_min_confidence=router_min_confidence,
                         router_fallback_to_uniform=router_fallback_to_uniform,
+                        route_feedback_to_actor=route_feedback_to_actor,
+                        consensus_uses_selected_critics_only=consensus_uses_selected_critics_only,
                     )
                     component_results.append((
                         {
@@ -1265,6 +1317,8 @@ def run_all_evaluations(
                         router_top_k=1,
                         router_min_confidence=router_min_confidence,
                         router_fallback_to_uniform=router_fallback_to_uniform,
+                        route_feedback_to_actor=route_feedback_to_actor,
+                        consensus_uses_selected_critics_only=consensus_uses_selected_critics_only,
                     )
                     component_results.append((
                         {
@@ -1314,6 +1368,8 @@ def run_all_evaluations(
                         router_top_k=min(2, len(phase_critics)),
                         router_min_confidence=router_min_confidence,
                         router_fallback_to_uniform=router_fallback_to_uniform,
+                        route_feedback_to_actor=route_feedback_to_actor,
+                        consensus_uses_selected_critics_only=consensus_uses_selected_critics_only,
                     )
                     component_results.append((
                         {
@@ -1345,6 +1401,8 @@ def run_all_evaluations(
                         router_top_k=min(2, len(c_configs)),
                         router_min_confidence=router_min_confidence,
                         router_fallback_to_uniform=router_fallback_to_uniform,
+                        route_feedback_to_actor=route_feedback_to_actor,
+                        consensus_uses_selected_critics_only=consensus_uses_selected_critics_only,
                     )
                     component_results.append((
                         {
@@ -1385,6 +1443,8 @@ def run_all_evaluations(
                 router_uniform=True,  # Equal weights (no softmax)
                 router_min_confidence=router_min_confidence,
                 router_fallback_to_uniform=router_fallback_to_uniform,
+                route_feedback_to_actor=route_feedback_to_actor,
+                consensus_uses_selected_critics_only=consensus_uses_selected_critics_only,
             )
             logger.info(
                 "  A4: initial="
@@ -1409,6 +1469,8 @@ def run_all_evaluations(
                 router_uniform=False,       # Softmax confidence weighting
                 router_min_confidence=router_min_confidence,
                 router_fallback_to_uniform=router_fallback_to_uniform,
+                route_feedback_to_actor=route_feedback_to_actor,
+                consensus_uses_selected_critics_only=consensus_uses_selected_critics_only,
             )
             logger.info(
                 "  A5: initial="
@@ -1428,6 +1490,8 @@ def run_all_evaluations(
                 router_top_k=router_top_k,
                 router_min_confidence=router_min_confidence,
                 router_fallback_to_uniform=router_fallback_to_uniform,
+                route_feedback_to_actor=route_feedback_to_actor,
+                consensus_uses_selected_critics_only=consensus_uses_selected_critics_only,
             )
 
     finally:
@@ -1522,6 +1586,12 @@ def main():
         router_top_k=args.router_top_k,
         router_min_confidence=getattr(args, "router_min_confidence", 0.1),
         router_fallback_to_uniform=getattr(args, "router_fallback_to_uniform", False),
+        route_feedback_to_actor=getattr(args, "route_feedback_to_actor", True),
+        consensus_uses_selected_critics_only=getattr(
+            args,
+            "consensus_uses_selected_critics_only",
+            False,
+        ),
         phase_actor_dir=phase_actor_dir,
         phase_critic_dir=phase_critic_dir,
         results_file=results_file,
