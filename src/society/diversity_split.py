@@ -36,7 +36,6 @@ logger = logging.getLogger(__name__)
 
 
 PROFILE_TO_SKILL = {
-    "computation": CriticSkill.COMPUTATION,
     "reasoning": CriticSkill.REASONING,
     "knowledge": CriticSkill.KNOWLEDGE,
     "grounding": CriticSkill.GROUNDING,

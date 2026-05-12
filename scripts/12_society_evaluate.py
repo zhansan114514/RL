@@ -1092,11 +1092,11 @@ def run_all_evaluations(
           → Isolates basic diversification effect vs base model
       A2: diverse Actors (phase 3) + 1 Critic (phase 4) — Actor diversity only
           → Isolates Actor diversity contribution vs A1
-      A3: 1 Actor (phase 3) + 5 Critics (phase 4) + Router — Critic specialization only
+      A3: 1 Actor (phase 3) + 4 Critics (phase 4) + Router — Critic specialization only
           → Isolates Critic specialization contribution vs A1
-      A4: Actors + 5 Critics from FINAL registry, uniform weights — full agents, no routing
+      A4: Actors + 4 Critics from FINAL registry, uniform weights — full agents, no routing
           → Shows society training + diversity effect without Router
-      A5: Actors + 5 Critics from FINAL registry + Router — complete system
+      A5: Actors + 4 Critics from FINAL registry + Router — complete system
           → Full system with all components
 
     Key: A1-A3 use pre-society-training LoRA (phase 3/4 registries),
@@ -1342,7 +1342,7 @@ def run_all_evaluations(
             if results_file:
                 _save_results(results_file, results)
 
-            # A3: 1 Actor (phase 3) + 5 Critics (phase 4) + Router — Critic specialization only
+            # A3: 1 Actor (phase 3) + 4 Critics (phase 4) + Router — Critic specialization only
             # Uses PRE-society-training LoRA from phase 3/4 diversification.
             # Causal question: does Critic specialization + Router improve over 1 Critic?
             logger.info(
@@ -1426,11 +1426,11 @@ def run_all_evaluations(
             if results_file:
                 _save_results(results_file, results)
 
-            # A4: Actors + 5 Critics from FINAL registry, uniform weights (no routing)
+            # A4: Actors + 4 Critics from FINAL registry, uniform weights (no routing)
             # Uses POST-society-training LoRA — shows joint training + diversity effect.
             # Key difference from A5: uniform_weights=True means all critics
             # contribute equally (no softmax confidence gating)
-            logger.info("[A4] Actors + 5 Critics from final registry (no routing, uniform weights)...")
+            logger.info("[A4] Actors + 4 Critics from final registry (no routing, uniform weights)...")
             a_configs, c_configs, lora = _build_agent_configs(
                 registry,
                 actor_names=all_actor_names,
@@ -1455,8 +1455,8 @@ def run_all_evaluations(
             if results_file:
                 _save_results(results_file, results)
 
-            # A5: Actors + 5 Critics from FINAL registry + Router (full system)
-            logger.info("[A5] Actors + 5 Critics + Router (full system)...")
+            # A5: Actors + 4 Critics from FINAL registry + Router (full system)
+            logger.info("[A5] Actors + 4 Critics + Router (full system)...")
             a_configs, c_configs, lora = _build_agent_configs(
                 registry,
                 actor_names=all_actor_names,

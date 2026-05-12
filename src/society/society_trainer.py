@@ -171,7 +171,7 @@ def _release_vllm_engine(engine: Any, adapters: Optional[dict[str, Any]] = None)
 
 def _render_structured_critic_chosen(pair: dict, profile: dict) -> str:
     primary = str(profile.get("primary", "verification")).strip().lower()
-    if primary not in {"computation", "reasoning", "knowledge", "grounding", "verification"}:
+    if primary not in {"reasoning", "knowledge", "grounding", "verification"}:
         primary = "verification"
     confidence = profile.get("confidence", 0.8)
     try:
@@ -193,7 +193,7 @@ def _render_structured_critic_chosen(pair: dict, profile: dict) -> str:
 def _render_structured_critic_rejected(pair: dict, profile: dict, target_skill: str) -> str:
     actor_answer = str(pair.get("actor_answer") or "unknown")
     primary = str(profile.get("primary", target_skill)).strip().lower()
-    if primary not in {"computation", "reasoning", "knowledge", "grounding", "verification"}:
+    if primary not in {"reasoning", "knowledge", "grounding", "verification"}:
         primary = target_skill
     del primary
     return render_critic_judgement(

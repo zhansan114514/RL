@@ -44,7 +44,6 @@ def test_agent_registry_builds_default_society():
         ReasoningStyle.ELIMINATION,
     ]
     assert [critic.error_specialty for critic in registry.list_critics()] == [
-        CriticSkill.COMPUTATION,
         CriticSkill.REASONING,
         CriticSkill.KNOWLEDGE,
         CriticSkill.GROUNDING,

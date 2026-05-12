@@ -43,7 +43,7 @@ STEP_DEFAULTS = {
     "input_dir": "output/society/classified",
     "actor_base_dir": "output/society/actors",
     "output_dir": "output/society/critics",
-    "critic_skills": ["computation", "reasoning", "knowledge", "grounding", "verification"],
+    "critic_skills": ["reasoning", "knowledge", "grounding", "verification"],
     "max_delib_samples": 300,
     "num_rounds": 5,
     "num_simulations": 5,
@@ -617,7 +617,7 @@ def summarize_structured_critic_pairs(
 def _render_chosen_judgement(pair: Dict[str, Any], profile: Dict[str, Any]) -> str:
     confidence = float(profile.get("confidence", 0.8) or 0.8)
     primary = str(profile.get("primary", "")).strip().lower()
-    if primary not in {"computation", "reasoning", "knowledge", "grounding", "verification"}:
+    if primary not in {"reasoning", "knowledge", "grounding", "verification"}:
         primary = "verification"
     evidence = str(profile.get("evidence", "")).strip()
     if not evidence:
@@ -994,6 +994,7 @@ def main():
             "version": 3,
             "model_name": args.model_name,
             "dataset": args.dataset,
+            "critic_skills": list(args.critic_skills),
             "actor_lora_fingerprints": fingerprint_lora_paths(actor_lora_paths),
             "source_sample_ids": sample_ids,
             "max_delib_samples": args.max_delib_samples,

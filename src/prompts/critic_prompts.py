@@ -6,10 +6,6 @@ from src.society.agent_registry import CriticSkill
 
 
 CRITIC_SKILL_INSTRUCTIONS = {
-    CriticSkill.COMPUTATION: (
-        "Focus on calculation errors, formula use, symbolic manipulation, signs, "
-        "units, and numerical consistency."
-    ),
     CriticSkill.REASONING: (
         "Focus on invalid inference, missing reasoning steps, wrong causal or "
         "logical jumps, and misuse of rules."

@@ -59,7 +59,7 @@ step02_classify:
   batch_api_max_responses: 1
   max_workers: 8
   reasoning_styles: ["direct", "evidence", "elimination"]
-  error_dimensions: ["computation", "reasoning", "knowledge", "grounding", "verification"]
+  error_dimensions: ["reasoning", "knowledge", "grounding", "verification"]
   min_style_confidence: 0.60
   min_error_confidence: 0.5
 
@@ -91,7 +91,7 @@ step04_diversify_critics:
   input_dir: "output/society_mmlu_smoke_n50_style3_qwen3/classified"
   actor_base_dir: "output/society_mmlu_smoke_n50_style3_qwen3/actors"
   output_dir: "output/society_mmlu_smoke_n50_style3_qwen3/critics"
-  critic_skills: ["computation", "reasoning", "knowledge", "grounding", "verification"]
+  critic_skills: ["reasoning", "knowledge", "grounding", "verification"]
   max_delib_samples: 30
   num_rounds: 2
   num_simulations: 1

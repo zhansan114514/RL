@@ -123,6 +123,7 @@ def checkpoint_metadata(args: Any) -> dict[str, Any]:
         "input_dir": str(getattr(args, "input_dir", "")),
         "input_file": fingerprint_file(trajectory_file),
         "reasoning_styles": sorted(VALID_STYLES),
+        "error_profile_dimensions": list(ERROR_PROFILE_DIMENSIONS),
         "min_style_confidence": float(getattr(args, "min_style_confidence", 0.65)),
     }
 
@@ -667,6 +668,7 @@ def main() -> None:
                 "max_classification_failure_rate": max_failure_rate,
                 "max_workers": max_workers,
                 "min_style_confidence": float(getattr(args, "min_style_confidence", 0.65)),
+                "error_profile_dimensions": list(ERROR_PROFILE_DIMENSIONS),
             },
         }, f, indent=2, ensure_ascii=False)
 

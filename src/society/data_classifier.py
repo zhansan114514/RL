@@ -7,7 +7,7 @@ instead of silently falling back to unreliable heuristics.
 
 From experiment plan:
 - Reasoning styles (for correct responses): direct/evidence/elimination
-- Error profiles (for incorrect responses): computation/reasoning/knowledge/grounding/verification
+- Error profiles (for incorrect responses): reasoning/knowledge/grounding/verification
   plus format_failure/ambiguous routing labels
 """
 
@@ -138,7 +138,6 @@ Correct Answer: {correct_answer}
 
 Score each error dimension from 0.0 to 1.0:
 
-- computation: numerical calculation, algebra, symbolic manipulation, formula computation
 - reasoning: flawed reasoning chain, invalid inference, wrong rule application
 - knowledge: wrong factual/domain knowledge, concept confusion
 - grounding: ignores or contradicts the question/options, invents unsupported assumptions
@@ -148,21 +147,19 @@ Return JSON only (pick ONE value for each field, do NOT use "|"):
 {{
   "format_status": "one of: valid, answer_only, empty_or_invalid",
   "scores": {{
-    "computation": float,
     "reasoning": float,
     "knowledge": float,
     "grounding": float,
     "verification": float
   }},
-  "primary": "one of: computation, reasoning, knowledge, grounding, verification, format_failure, ambiguous",
-  "secondary": ["subset of: computation, reasoning, knowledge, grounding, verification"],
+  "primary": "one of: reasoning, knowledge, grounding, verification, format_failure, ambiguous",
+  "secondary": ["subset of: reasoning, knowledge, grounding, verification"],
   "confidence": float,
   "evidence": "short reason"
 }}
 """
 
 ERROR_PROFILE_DIMENSIONS = (
-    "computation",
     "reasoning",
     "knowledge",
     "grounding",
@@ -727,7 +724,7 @@ def classify_error_profile(
         choices=choices_text,
         dataset_name=dataset_name,
         task_type=task_type,
-        subject=subject,
+        subject=f"{subject}|dims={','.join(ERROR_PROFILE_DIMENSIONS)}",
     )
     cache_path = Path(cache_dir) / f"error_profile_{sample_hash}.json"
 

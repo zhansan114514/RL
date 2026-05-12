@@ -61,7 +61,7 @@ step02_classify:
   batch_api_max_responses: 20
   max_workers: 4
   reasoning_styles: ["direct", "evidence", "elimination"]
-  error_dimensions: ["computation", "reasoning", "knowledge", "grounding", "verification"]
+  error_dimensions: ["reasoning", "knowledge", "grounding", "verification"]
   min_style_confidence: 0.60
   min_error_confidence: 0.5
 
@@ -99,7 +99,7 @@ step04_diversify_critics:
   retry_delay: 5
   max_retries: 5
   api_temperature: 0.1
-  critic_skills: ["computation", "reasoning", "knowledge", "grounding", "verification"]
+  critic_skills: ["reasoning", "knowledge", "grounding", "verification"]
   max_delib_samples: 100
   num_rounds: 3
   num_simulations: 2

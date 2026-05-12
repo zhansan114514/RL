@@ -3,7 +3,7 @@ Agent Registry for managing diverse Actor-Critic Society.
 
 Defines agent types with specialized roles:
 - 3 Actors with MMLU-native reasoning styles (DIRECT, EVIDENCE, ELIMINATION)
-- 5 Critics with critic-skill specialties (COMPUTATION, REASONING, KNOWLEDGE, GROUNDING, VERIFICATION)
+- 4 Critics with critic-skill specialties (REASONING, KNOWLEDGE, GROUNDING, VERIFICATION)
 
 Each Agent has its own LoRA adapter on top of a shared base model.
 """
@@ -46,7 +46,6 @@ class CriticSkill(Enum):
     These skills are dataset-independent.  They avoid using a single "logic"
     label as the catch-all bucket for broad knowledge and multiple-choice tasks.
     """
-    COMPUTATION = "computation"        # Calculation, symbolic manipulation, formula computation
     REASONING = "reasoning"            # Inference chain, rule application, causal/logical jumps
     KNOWLEDGE = "knowledge"            # Factual/domain knowledge and concepts
     GROUNDING = "grounding"            # Support from question, choices, passage, or context
@@ -99,9 +98,9 @@ def resolve_critic_skill(value: str) -> CriticSkill:
     """Resolve a string to CriticSkill with robust case-insensitive matching.
 
     Matching priority:
-      1. Exact value match  (e.g. "computation")
-      2. Exact name match   (e.g. "COMPUTATION")
-      3. Case-insensitive value match (e.g. "Computation")
+      1. Exact value match  (e.g. "reasoning")
+      2. Exact name match   (e.g. "REASONING")
+      3. Case-insensitive value match (e.g. "Reasoning")
 
     Raises ValueError (never silently falls back to a default).
     """
@@ -123,8 +122,6 @@ def resolve_critic_skill(value: str) -> CriticSkill:
     # 3. Case-insensitive value match
     lower = value.lower()
     aliases = {
-        "calculation": CriticSkill.COMPUTATION,
-        "calculus": CriticSkill.COMPUTATION,
         "factual": CriticSkill.KNOWLEDGE,
     }
     if lower in aliases:
@@ -160,11 +157,6 @@ ACTOR_STYLE_PROMPTS = {
 }
 
 CRITIC_SPECIALTY_PROMPTS = {
-    CriticSkill.COMPUTATION: (
-        "You are a critic specializing in computation errors. "
-        "Carefully check numerical calculations, algebra, symbolic manipulation, "
-        "formula use, sign errors, units, and quantity-scale mistakes."
-    ),
     CriticSkill.REASONING: (
         "You are a critic specializing in reasoning errors. "
         "Check the response for invalid inferences, missing steps, causal mistakes, "
@@ -269,7 +261,7 @@ class AgentRegistry:
     Registry for managing the Actor-Critic Society's agents.
 
     Tracks 3 Actors (DIRECT, EVIDENCE, ELIMINATION) and
-    5 Critics (COMPUTATION, REASONING, KNOWLEDGE, GROUNDING, VERIFICATION),
+    4 Critics (REASONING, KNOWLEDGE, GROUNDING, VERIFICATION),
     each with their own LoRA adapter path.
     """
 
@@ -351,7 +343,7 @@ class AgentRegistry:
         base_model_path: str = "Qwen/Qwen3-14B",
         cache_dir: str = "cache/society",
     ) -> "AgentRegistry":
-        """Create a registry with the default 3-Actor + 5-Critic setup."""
+        """Create a registry with the default 3-Actor + 4-Critic setup."""
         registry = cls(base_model_path=base_model_path)
 
         # 3 Actors with distinct reasoning styles
@@ -366,7 +358,7 @@ class AgentRegistry:
                 reasoning_style=style,
             ))
 
-        # 5 Critics with distinct skill specialties
+        # 4 Critics with distinct skill specialties
         for specialty in CriticSkill:
             agent_name = f"critic_{specialty.value}"
             lora_path = f"{cache_dir}/critics/{agent_name}/adapter"

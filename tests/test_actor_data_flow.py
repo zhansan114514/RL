@@ -274,7 +274,7 @@ def test_society_actor_acceptance_requires_style_confidence_and_correctness(monk
     def fake_build_lora_adapters(engine, agents):
         return {
             "actor_evidence": FakeActorAdapter(),
-            "critic_computation": FakeCriticAdapter(),
+            "critic_reasoning": FakeCriticAdapter(),
         }
 
     def fake_deliberate_batch(*args, **kwargs):
@@ -358,10 +358,10 @@ def test_society_actor_acceptance_requires_style_confidence_and_correctness(monk
         reasoning_style=ReasoningStyle.EVIDENCE,
     )
     critic = AgentConfig(
-        name="critic_computation",
+        name="critic_reasoning",
         role=AgentRole.CRITIC,
         model_path="/models/base",
-        error_specialty=CriticSkill.COMPUTATION,
+        error_specialty=CriticSkill.REASONING,
     )
 
     pairs = society_trainer._generate_actor_pairs_pairwise(
