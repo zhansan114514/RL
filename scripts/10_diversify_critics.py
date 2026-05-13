@@ -211,6 +211,7 @@ def build_critic_raw_pairs(
     from src.inference.vllm_server import VLLMInference
     from src.algorithms.reward import extract_answer, math_answers_equal, normalize_answer
     from src.society.pair_generation import build_pairwise_training_pairs_batch
+    from src.society.agent_registry import ReasoningStyle
 
     logger.info("  Generating shared Critic raw-pair pool via Society pairwise rollouts")
 
@@ -247,6 +248,15 @@ def build_critic_raw_pairs(
 
         for actor_name, group_samples in actor_groups.items():
             actor_adapter = adapters[actor_name]
+            actor_style = None
+            try:
+                actor_style = ReasoningStyle(actor_name)
+            except ValueError:
+                if actor_name.startswith("actor_"):
+                    try:
+                        actor_style = ReasoningStyle(actor_name.removeprefix("actor_"))
+                    except ValueError:
+                        actor_style = None
             logger.info(
                 "    Pairwise rollout shared batch with actor "
                 f"{actor_name}: {len(group_samples)} samples"
@@ -263,6 +273,7 @@ def build_critic_raw_pairs(
                 max_tokens=max_tokens,
                 seed=seed,
                 batch_size=len(group_samples),
+                actor_style=actor_style,
             )
             logger.info(
                 f"    Pairwise rollout batch for actor {actor_name} produced "
@@ -781,6 +792,7 @@ def train_critic_dpo(
     from src.training.dpo_trainer import train_dpo
     from src.utils.model_utils import detect_model_type
     from src.prompts.prompt_builder import build_simple_actor_prompt, build_simple_critic_prompt
+    from src.society.agent_registry import resolve_critic_skill
 
     model_type = detect_model_type(model_name)
 
@@ -793,18 +805,23 @@ def train_critic_dpo(
     logger.info(f"    Output: {critic_output_dir}")
 
     prompts = []
+    skill = resolve_critic_skill(critic_skill)
     for p in preference_pairs:
         sample = p.get("sample", {})
         actor_resp = p.get("actor_response", "")
-        skill_instruction = (
-            f"You are Critic-{critic_skill}. "
-            f"Specialize in detecting {critic_skill} errors.\n"
-        )
-        if actor_resp:
-            prompt = build_simple_critic_prompt(sample, dataset_name, actor_resp)
+        stored_prompt = str(p.get("prompt") or "").strip()
+        if stored_prompt:
+            prompt = stored_prompt
+        elif actor_resp:
+            prompt = build_simple_critic_prompt(
+                sample,
+                dataset_name,
+                actor_resp,
+                skill=skill,
+            )
         else:
             prompt = build_simple_actor_prompt(sample, dataset_name)
-        prompts.append(f"{skill_instruction}\n{prompt}")
+        prompts.append(prompt)
 
     # Convert preference_pairs to HuggingFace Dataset
     hf_data = {

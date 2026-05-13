@@ -29,16 +29,15 @@ from pathlib import Path
 from typing import Any, Optional
 
 from src.society.agent_registry import (
-    ACTOR_STYLE_PROMPTS,
     AgentRegistry,
     AgentConfig,
     AgentRole,
     resolve_critic_skill,
     ReasoningStyle,
 )
-from src.prompts.control_tokens import ensure_no_think, strip_no_think
 from src.prompts.critic_prompts import render_critic_judgement
 from src.prompts.prompt_builder import (
+    build_actor_prompt,
     build_critic_feedback_prompt,
     build_simple_actor_prompt,
 )
@@ -54,95 +53,6 @@ from src.society.pair_generation import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-ACTOR_STYLE_TRAINING_GUIDANCE = {
-    ReasoningStyle.DIRECT: (
-        "Keep the reasoning short and only include what is needed to justify the answer."
-    ),
-    ReasoningStyle.EVIDENCE: (
-        "Ground the reasoning in key facts, definitions, wording, or evidence from the problem."
-    ),
-    ReasoningStyle.ELIMINATION: (
-        "Compare options and rule out weaker or incorrect choices before making the final decision."
-    ),
-}
-
-
-def _style_condition_actor_prompt(prompt: str, style: ReasoningStyle) -> str:
-    """Prefix an Actor prompt with the requested reasoning style."""
-
-    body = (
-        f"You are Actor-{style.value}.\n"
-        "Use this reasoning style naturally.\n"
-        f"{ACTOR_STYLE_PROMPTS[style]}\n"
-        f"{ACTOR_STYLE_TRAINING_GUIDANCE[style]}\n\n"
-        f"{strip_no_think(prompt)}"
-    )
-    return ensure_no_think(body)
-
-
-def _style_output_format(style: ReasoningStyle) -> str:
-    if style in {
-        ReasoningStyle.DIRECT,
-        ReasoningStyle.EVIDENCE,
-        ReasoningStyle.ELIMINATION,
-    }:
-        return (
-            "Reason naturally in the assigned style.\n"
-            "At the end, write one final answer sentence:\n"
-            "The final result is <answer>."
-        )
-    raise ValueError(f"Unsupported reasoning style: {style}")
-
-
-def _style_condition_actor_single_shot_prompt(
-    dataset_name: str,
-    sample: dict[str, Any],
-    style: ReasoningStyle,
-) -> str:
-    base_prompt = build_simple_actor_prompt(
-        sample,
-        dataset_name,
-        style=style,
-        no_think=False,
-    )
-    return (
-        _style_condition_actor_prompt(base_prompt, style)
-        + "\n\n"
-        + _style_output_format(style)
-    )
-
-
-class StyleConditionedActorAdapter:
-    """Wrap an actor model so every generated Actor prompt is style-conditioned."""
-
-    def __init__(self, model: Any, style: ReasoningStyle):
-        self._model = model
-        self._style = style
-
-    def generate(self, prompts, max_tokens=256, temperature=0.7, **kwargs):
-        if isinstance(prompts, str):
-            prompts = [prompts]
-        styled_prompts = [
-            _style_condition_actor_prompt(prompt, self._style)
-            for prompt in prompts
-        ]
-        return self._model.generate(
-            styled_prompts,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            **kwargs,
-        )
-
-    def generate_single(self, prompt, max_tokens=256, temperature=0.7, **kwargs):
-        results = self.generate(
-            [prompt],
-            max_tokens=max_tokens,
-            temperature=temperature,
-            **kwargs,
-        )
-        return results[0] if results else ""
 
 
 def _cleanup_gpu():
@@ -1074,6 +984,7 @@ def _generate_critic_pairs_pairwise(
 
         actors_with_lora = [a for a in actors if a.lora_path]
         actors_pool = actors_with_lora if actors_with_lora else actors
+        actors_by_name = {a.name: a for a in actors_pool}
 
         samples_subset = dataset[:n_samples]
 
@@ -1086,6 +997,7 @@ def _generate_critic_pairs_pairwise(
         raw_pairs: list[dict] = []
 
         for actor_name, indexed_samples in actor_groups.items():
+            ref_actor = actors_by_name[actor_name]
             actor_adapter = adapters[actor_name]
             group_samples = [s for _, s in indexed_samples]
 
@@ -1097,6 +1009,8 @@ def _generate_critic_pairs_pairwise(
             trajectories = run_pairwise_deliberation_batch(
                 actor_adapter, critic_adapter, group_samples, dataset_name,
                 num_rounds=num_rounds, max_tokens=max_tokens, temperature=0.7,
+                actor_style=ref_actor.reasoning_style,
+                critic_skill=critic.error_specialty,
             )
 
             correct_answers: list[str] = []
@@ -1120,6 +1034,8 @@ def _generate_critic_pairs_pairwise(
                 num_simulations=num_simulations,
                 max_tokens=max_tokens,
                 temperature=0.7,
+                actor_style=ref_actor.reasoning_style,
+                critic_skill=critic.error_specialty,
             )
             logger.info(
                 f"  [{critic.name}] Guided rollout batch with actor {actor_name}: "
@@ -1381,13 +1297,11 @@ def _generate_actor_pairs_pairwise(
         if actor.reasoning_style is None:
             raise ValueError(f"Actor '{actor.name}' has no reasoning_style set")
 
-        actor_adapter = StyleConditionedActorAdapter(
-            adapters[actor.name],
-            actor.reasoning_style,
-        )
+        actor_adapter = adapters[actor.name]
 
         critics_with_lora = [c for c in critics if c.lora_path]
         critics_pool = critics_with_lora if critics_with_lora else critics
+        critics_by_name = {c.name: c for c in critics_pool}
 
         samples_subset = dataset[:n_samples]
 
@@ -1400,6 +1314,7 @@ def _generate_actor_pairs_pairwise(
         raw_pairs: list[dict] = []
 
         for critic_name, indexed_samples in critic_groups.items():
+            ref_critic = critics_by_name[critic_name]
             critic_adapter = adapters[critic_name]
             group_samples = [s for _, s in indexed_samples]
 
@@ -1411,6 +1326,8 @@ def _generate_actor_pairs_pairwise(
             trajectories = run_pairwise_deliberation_batch(
                 actor_adapter, critic_adapter, group_samples, dataset_name,
                 num_rounds=num_rounds, max_tokens=max_tokens, temperature=0.7,
+                actor_style=actor.reasoning_style,
+                critic_skill=ref_critic.error_specialty,
             )
 
             correct_answers: list[str] = []
@@ -1434,6 +1351,8 @@ def _generate_actor_pairs_pairwise(
                 num_simulations=num_simulations,
                 max_tokens=max_tokens,
                 temperature=0.7,
+                actor_style=actor.reasoning_style,
+                critic_skill=ref_critic.error_specialty,
             )
             logger.info(
                 f"  [{actor.name}] Guided rollout batch with critic {critic_name}: "
@@ -1445,6 +1364,7 @@ def _generate_actor_pairs_pairwise(
                     "sample": pair["sample"],
                     "actor_pair": pair["actor_candidate"],
                     "critic_pair": pair["critic_candidate"],
+                    "actor_prompt": pair.get("natural_seed", {}).get("actor_prompt", ""),
                     "delta": pair["comparison"]["delta"],
                     "comparison_mode": pair["comparison"]["mode"],
                     "rollout_scores": pair["rollout_scores"],
@@ -1585,6 +1505,7 @@ def _generate_actor_pairs_pairwise(
                     gate_counts[pair_source] += 1
                     pair = {
                         "sample": sample,
+                        "prompt": p.get("actor_prompt", ""),
                         "chosen": chosen,
                         "rejected": p["actor_pair"]["rejected"],
                         "metadata": {
@@ -1683,7 +1604,10 @@ def _run_dpo_training(
         prompts = []
         for p in preference_pairs:
             sample = p.get("sample", {})
-            if agent_type == "critic" and p.get("actor_response"):
+            stored_prompt = str(p.get("prompt") or "").strip()
+            if agent_type == "actor" and stored_prompt:
+                prompt = stored_prompt
+            elif agent_type == "critic" and p.get("actor_response"):
                 target_skill = p.get("metadata", {}).get("target_skill", "")
                 error_specialty = None
                 if target_skill:
@@ -1713,11 +1637,13 @@ def _run_dpo_training(
                     if style_label:
                         style = ReasoningStyle(style_label)
                 if style is not None:
-                    prompt = _style_condition_actor_single_shot_prompt(
-                        dataset_name,
-                        sample,
-                        style,
+                    actor_cfg = AgentConfig(
+                        name=agent_name,
+                        role=AgentRole.ACTOR,
+                        model_path=model_name,
+                        reasoning_style=style,
                     )
+                    prompt = build_actor_prompt(actor_cfg, sample, dataset_name)
                 else:
                     prompt = build_simple_actor_prompt(
                         sample,

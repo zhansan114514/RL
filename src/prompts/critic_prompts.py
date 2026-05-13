@@ -30,7 +30,7 @@ JUDGEMENT_INSTRUCTION = """At the end, write a short judgement block:
 
 Judgement:
 Answer correct: yes/no/uncertain
-Suggested answer: A/B/C/D/Yes/No/unknown
+Suggested answer: A/B/C/D/Yes/No, a math result, or unknown
 Confidence: 0.0-1.0"""
 
 

@@ -15,7 +15,6 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from _utils import setup_logging
-from src.prompts.control_tokens import ensure_no_think
 from src.prompts.prompt_builder import build_simple_actor_prompt
 from src.society.agent_registry import ReasoningStyle
 from src.society.augmentation import (
@@ -53,19 +52,6 @@ STEP_DEFAULTS = {
     "seed": 42,
     "device": 0,
 }
-
-ACTOR_TRAINING_STYLE_GUIDANCE = {
-    ReasoningStyle.DIRECT: (
-        "Keep the reasoning short and only include what is needed to justify the answer."
-    ),
-    ReasoningStyle.EVIDENCE: (
-        "Ground the reasoning in key facts, definitions, wording, or evidence from the problem."
-    ),
-    ReasoningStyle.ELIMINATION: (
-        "Compare options and rule out weaker or incorrect choices before making the final decision."
-    ),
-}
-
 
 def parse_args():
     import argparse
@@ -486,38 +472,13 @@ def train_actor_dpo(
 
 
 def _actor_training_prompt(dataset_name: str, thinking_style: str, sample: dict[str, Any]) -> str:
-    from src.society.agent_registry import ACTOR_STYLE_PROMPTS
-
     style = ReasoningStyle(thinking_style)
-    base_prompt = build_simple_actor_prompt(
+    return build_simple_actor_prompt(
         sample,
         dataset_name,
         style=style,
-        no_think=False,
+        no_think=True,
     )
-    prompt = (
-        f"You are Actor-{thinking_style}.\n"
-        "Use this reasoning style naturally.\n"
-        f"{ACTOR_STYLE_PROMPTS[style]}\n"
-        f"{ACTOR_TRAINING_STYLE_GUIDANCE[style]}\n\n"
-        f"{base_prompt}\n\n"
-        f"{_style_output_format(style)}"
-    )
-    return ensure_no_think(prompt)
-
-
-def _style_output_format(style: ReasoningStyle) -> str:
-    if style in {
-        ReasoningStyle.DIRECT,
-        ReasoningStyle.EVIDENCE,
-        ReasoningStyle.ELIMINATION,
-    }:
-        return (
-            "Reason naturally in the requested style.\n"
-            "At the end, write one final answer sentence:\n"
-            "The final result is <answer>."
-        )
-    raise ValueError(f"Unsupported reasoning style: {style}")
 
 
 def main() -> None:

@@ -48,10 +48,10 @@ def test_style_prompt_contains_style_guidance_and_contract():
         generation_index=2,
     )
 
-    assert "Actor-evidence" in prompt
-    assert "Ground the reasoning in key facts" in prompt
+    assert prompt.count("Actor-evidence") == 1
+    assert "key facts, definitions" in prompt
     assert "independent generation attempt 3" in prompt
-    assert "The final result is <answer>." in prompt
+    assert prompt.count("The final result is <answer>.") == 1
     assert "FINAL_ANSWER" not in prompt
 
 

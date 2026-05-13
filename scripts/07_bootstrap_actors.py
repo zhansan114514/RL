@@ -20,8 +20,8 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from _utils import setup_logging
-from src.prompts.control_tokens import ensure_no_think
-from src.society.agent_registry import ACTOR_STYLE_PROMPTS, ReasoningStyle
+from src.prompts.control_tokens import ensure_no_think, strip_no_think
+from src.society.agent_registry import ReasoningStyle
 from src.utils.config import ConfigManager
 
 setup_logging()
@@ -46,19 +46,6 @@ STEP_DEFAULTS = {
     "sampling": None,
     "mmlu_load_mode": "by_subject",
 }
-
-STYLE_BOOTSTRAP_GUIDANCE = {
-    ReasoningStyle.DIRECT: (
-        "Keep the reasoning short and only include what is needed to justify the answer."
-    ),
-    ReasoningStyle.EVIDENCE: (
-        "Ground the reasoning in key facts, definitions, wording, or evidence from the problem."
-    ),
-    ReasoningStyle.ELIMINATION: (
-        "Compare options and rule out weaker or incorrect choices before making the final decision."
-    ),
-}
-
 
 def expected_bootstrap_metadata(args: Any, styles: list[ReasoningStyle]) -> dict[str, Any]:
     """Metadata that must match before resuming a style-prompted bootstrap file."""
@@ -111,37 +98,18 @@ def build_style_prompt(
 ) -> str:
     from src.prompts.prompt_builder import build_simple_actor_prompt
 
-    base_prompt = build_simple_actor_prompt(
+    base_prompt = strip_no_think(build_simple_actor_prompt(
         sample,
         dataset_name,
         style=style,
-        no_think=False,
-    )
+        no_think=True,
+    ))
     prompt = (
-        f"You are Actor-{style.value}.\n"
-        "Use this reasoning style naturally.\n"
-        f"{ACTOR_STYLE_PROMPTS[style]}\n"
-        f"{STYLE_BOOTSTRAP_GUIDANCE[style]}\n\n"
         f"This is independent generation attempt {generation_index + 1}. "
         "Produce a complete response in the requested style.\n\n"
-        f"{base_prompt}\n\n"
-        f"{style_output_format(style)}"
+        f"{base_prompt}"
     )
     return ensure_no_think(prompt)
-
-
-def style_output_format(style: ReasoningStyle) -> str:
-    if style in {
-        ReasoningStyle.DIRECT,
-        ReasoningStyle.EVIDENCE,
-        ReasoningStyle.ELIMINATION,
-    }:
-        return (
-            "Reason naturally in the requested style.\n"
-            "At the end, write one final answer sentence:\n"
-            "The final result is <answer>."
-        )
-    raise ValueError(f"Unsupported reasoning style: {style}")
 
 
 def coerce_generation_results(results: Any, expected: int) -> list[str]:

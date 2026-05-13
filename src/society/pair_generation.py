@@ -14,6 +14,7 @@ from src.prompts.prompt_builder import (
     build_simple_actor_prompt,
     build_simple_critic_prompt,
 )
+from src.society.agent_registry import CriticSkill, ReasoningStyle
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,8 @@ def run_pairwise_deliberation(
     num_rounds: int = 5,
     max_tokens: int = 512,
     temperature: float = 0.7,
+    actor_style: ReasoningStyle | None = None,
+    critic_skill: CriticSkill | None = None,
 ) -> list[dict]:
     """Run one natural Actor/Critic dialogue used as a pairwise training seed."""
     trajectory = []
@@ -39,6 +42,7 @@ def run_pairwise_deliberation(
             round_num=round_idx,
             previous_actor_response=previous_actor_response,
             critic_feedback=critic_feedback,
+            style=actor_style,
         )
         actor_response = actor_model.generate_single(
             actor_prompt,
@@ -51,6 +55,7 @@ def run_pairwise_deliberation(
             sample,
             dataset_name,
             actor_response=actor_response,
+            skill=critic_skill,
         )
         critic_response = critic_model.generate_single(
             critic_prompt,
@@ -81,6 +86,8 @@ def run_pairwise_deliberation_batch(
     num_rounds: int = 5,
     max_tokens: int = 512,
     temperature: float = 0.7,
+    actor_style: ReasoningStyle | None = None,
+    critic_skill: CriticSkill | None = None,
 ) -> list[list[dict]]:
     """Run batched natural Actor/Critic dialogues for Society DPO data."""
     if not samples:
@@ -95,6 +102,8 @@ def run_pairwise_deliberation_batch(
                 num_rounds=num_rounds,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                actor_style=actor_style,
+                critic_skill=critic_skill,
             )
         ]
 
@@ -110,6 +119,7 @@ def run_pairwise_deliberation_batch(
                 round_num=round_idx,
                 previous_actor_response=previous_actor_responses[i],
                 critic_feedback=critic_feedbacks[i],
+                style=actor_style,
             )
             for i, sample in enumerate(samples)
         ]
@@ -124,6 +134,7 @@ def run_pairwise_deliberation_batch(
                 sample,
                 dataset_name,
                 actor_response=actor_responses[i],
+                skill=critic_skill,
             )
             for i, sample in enumerate(samples)
         ]
@@ -157,6 +168,7 @@ def _revision_prompt_from_pair(
     dataset_name: str,
     actor_response: str,
     critic_response: str,
+    actor_style: ReasoningStyle | None = None,
 ) -> str:
     return build_simple_actor_prompt(
         sample,
@@ -164,6 +176,7 @@ def _revision_prompt_from_pair(
         round_num=1,
         previous_actor_response=actor_response,
         critic_feedback=critic_response,
+        style=actor_style,
     )
 
 
@@ -175,6 +188,8 @@ def _guided_prompt(
     previous_responses: list[str],
     actor_response: str,
     agent: str,
+    actor_style: ReasoningStyle | None = None,
+    critic_skill: CriticSkill | None = None,
 ) -> str:
     previous_actor = actor_response or (
         previous_responses[-2] if len(previous_responses) >= 2 else ""
@@ -188,6 +203,7 @@ def _guided_prompt(
             round_num=round_idx,
             previous_actor_response=previous_actor,
             critic_feedback=previous_feedback,
+            style=actor_style,
         )
     if agent == "critic":
         return build_guided_critic_prompt(
@@ -195,6 +211,7 @@ def _guided_prompt(
             dataset_name,
             actor_response=actor_response,
             target_answer=target_answer,
+            skill=critic_skill,
         )
     raise ValueError(f"Unknown guided prompt agent: {agent}")
 
@@ -212,6 +229,8 @@ def build_guided_rollout_pairs(
     max_tokens: int = 512,
     temperature: float = 0.7,
     sample_offset: int = 0,
+    actor_style: ReasoningStyle | None = None,
+    critic_skill: CriticSkill | None = None,
 ) -> list[dict]:
     """Build chosen/rejected pairs from natural seeds and guided rollout scoring."""
     if not samples:
@@ -260,6 +279,8 @@ def build_guided_rollout_pairs(
                         previous_by_sample[idx],
                         round_data["actor_response"],
                         agent="actor",
+                        actor_style=actor_style,
+                        critic_skill=critic_skill,
                     )
                 )
                 guided_actor_meta.append((idx, direction))
@@ -290,6 +311,8 @@ def build_guided_rollout_pairs(
                         previous_by_sample[idx],
                         guided_actor[idx][direction],
                         agent="critic",
+                        actor_style=actor_style,
+                        critic_skill=critic_skill,
                     )
                 )
                 guided_critic_meta.append((idx, direction))
@@ -321,6 +344,7 @@ def build_guided_rollout_pairs(
                             dataset_name,
                             actor_response,
                             critic_response,
+                            actor_style=actor_style,
                         )
                     )
                     phase_a_meta.append((idx, prefix_idx))
@@ -332,7 +356,12 @@ def build_guided_rollout_pairs(
         ) if phase_a_prompts else []
 
         phase_b_prompts = [
-            build_simple_critic_prompt(samples[idx], dataset_name, actor_response=response)
+            build_simple_critic_prompt(
+                samples[idx],
+                dataset_name,
+                actor_response=response,
+                skill=critic_skill,
+            )
             for (idx, _), response in zip(phase_a_meta, phase_a_results)
         ]
         phase_b_results = critic_model.generate(
@@ -342,7 +371,13 @@ def build_guided_rollout_pairs(
         ) if phase_b_prompts else []
 
         phase_c_prompts = [
-            _revision_prompt_from_pair(samples[idx], dataset_name, actor_response, critic_response)
+            _revision_prompt_from_pair(
+                samples[idx],
+                dataset_name,
+                actor_response,
+                critic_response,
+                actor_style=actor_style,
+            )
             for (idx, _), actor_response, critic_response
             in zip(phase_a_meta, phase_a_results, phase_b_results)
         ]
@@ -478,6 +513,8 @@ def build_pairwise_training_pairs_batch(
     temperature: float = 0.7,
     seed: int = 42,
     batch_size: int = 4,
+    actor_style: ReasoningStyle | None = None,
+    critic_skill: CriticSkill | None = None,
 ) -> list[dict]:
     """Build Society pairwise training pairs directly from samples."""
     all_pairs: list[dict] = []
@@ -497,6 +534,8 @@ def build_pairwise_training_pairs_batch(
             num_rounds=num_rounds,
             max_tokens=max_tokens,
             temperature=temperature,
+            actor_style=actor_style,
+            critic_skill=critic_skill,
         )
 
         correct_answers: list[str] = []
@@ -529,6 +568,8 @@ def build_pairwise_training_pairs_batch(
                 max_tokens=max_tokens,
                 temperature=temperature,
                 sample_offset=batch_start,
+                actor_style=actor_style,
+                critic_skill=critic_skill,
             )
         )
     return all_pairs

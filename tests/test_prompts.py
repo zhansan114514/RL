@@ -129,7 +129,7 @@ def test_critic_prompt_uses_natural_critique_and_judgement_block():
     assert "Give natural-language critique first." in prompt
     assert "Judgement:" in prompt
     assert "Answer correct: yes/no/uncertain" in prompt
-    assert "Suggested answer: A/B/C/D/Yes/No/unknown" in prompt
+    assert "Suggested answer: A/B/C/D/Yes/No, a math result, or unknown" in prompt
     assert "[Answer_Correct" not in prompt
 
 

@@ -64,6 +64,22 @@ Confidence: 0.4"""
     assert parsed.usable_for_consensus is False
 
 
+def test_critic_parser_reads_math_suggested_answer():
+    response = """The actor's arithmetic misses the carry.
+
+Judgement:
+Answer correct: no
+Suggested answer: 42
+Confidence: 0.9"""
+
+    parsed = parse_critic_response(response, "math")
+
+    assert parsed.answer_correct == "no"
+    assert parsed.suggested_answer == "42"
+    assert parsed.has_suggested_answer is True
+    assert parsed.usable_for_consensus is True
+
+
 def test_router_routes_natural_feedback_without_schema_filter():
     critic = AgentConfig(
         name="critic_reasoning",
@@ -100,4 +116,5 @@ def test_critic_prompt_uses_natural_judgement_not_schema():
     )
     assert "Judgement:" in prompt
     assert "Answer correct: yes/no/uncertain" in prompt
+    assert "Suggested answer: A/B/C/D/Yes/No, a math result, or unknown" in prompt
     assert "[Answer_Correct" not in prompt

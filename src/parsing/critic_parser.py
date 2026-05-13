@@ -41,6 +41,12 @@ SUGGESTED_PATTERNS = [
     re.compile(r"(?i)\[\s*suggested_final_answer\s*[:=]\s*(A|B|C|D|Yes|No|unknown)\s*\]"),
 ]
 
+SUGGESTED_MATH_PATTERNS = [
+    re.compile(r"(?im)^\s*suggested\s+(?:final\s+)?answer\s*[:=]\s*(.+?)\s*$"),
+    re.compile(r"(?im)^\s*the\s+suggested\s+answer\s+is\s*(.+?)\s*$"),
+    re.compile(r"(?im)^\s*\[\s*suggested_final_answer\s*[:=]\s*(.+?)\s*\]\s*$"),
+]
+
 CONFIDENCE_PATTERNS = [
     re.compile(r"(?i)\bconfidence\s*[:=]\s*([01](?:\.\d+)?)\b"),
     re.compile(r"(?i)\[\s*confidence\s*[:=]\s*([01](?:\.\d+)?)\s*\]"),
@@ -140,7 +146,8 @@ def parse_confidence(text: str) -> Optional[float]:
 
 def parse_suggested_answer(text: str, task_type: str = "multiple_choice") -> Optional[str]:
     """Parse a suggested answer token."""
-    found = _last_group(text, SUGGESTED_PATTERNS)
+    patterns = SUGGESTED_MATH_PATTERNS if task_type == "math" else SUGGESTED_PATTERNS
+    found = _last_group(text, patterns)
     if found is None:
         return None
     if str(found).strip().lower() == "unknown":

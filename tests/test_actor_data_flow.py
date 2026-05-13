@@ -216,31 +216,29 @@ def test_actor_pair_builder_caps_prompted_style_fallback():
     ) == 1
 
 
-def test_society_actor_style_prompt_wrapper_conditions_generation():
+def test_society_actor_prompt_builder_conditions_generation_once():
+    from src.prompts.prompt_builder import build_simple_actor_prompt
     from src.society.agent_registry import ReasoningStyle
-    from src.society.society_trainer import StyleConditionedActorAdapter
 
-    class FakeModel:
-        def __init__(self):
-            self.prompts = []
+    prompt = build_simple_actor_prompt(
+        {
+            "question": "Q",
+            "choices": ["A", "B", "C", "D"],
+            "task_type": "multiple_choice",
+        },
+        "mmlu",
+        style=ReasoningStyle.ELIMINATION,
+    )
 
-        def generate(self, prompts, **kwargs):
-            self.prompts.extend(prompts)
-            return ["ok" for _ in prompts]
-
-    model = FakeModel()
-    adapter = StyleConditionedActorAdapter(model, ReasoningStyle.ELIMINATION)
-
-    adapter.generate(["Solve Q"], max_tokens=8, temperature=0.3)
-
-    assert "You are Actor-elimination" in model.prompts[0]
-    assert "Compare options and rule out" in model.prompts[0]
-    assert model.prompts[0].endswith("Solve Q")
+    assert prompt.count("You are Actor-elimination") == 1
+    assert "comparing the options" in prompt
+    assert prompt.count("The final result is <answer>.") == 1
 
 
 def test_society_actor_dpo_prompt_is_style_conditioned(monkeypatch, tmp_path):
     from src.society import society_trainer
-    from src.society.agent_registry import ReasoningStyle
+    from src.prompts.prompt_builder import build_actor_prompt
+    from src.society.agent_registry import AgentConfig, AgentRole, ReasoningStyle
 
     captured = {}
 
@@ -278,13 +276,99 @@ def test_society_actor_dpo_prompt_is_style_conditioned(monkeypatch, tmp_path):
     )
 
     prompt = captured["dataset"][0]["prompt"]
+    expected_prompt = build_actor_prompt(
+        AgentConfig(
+            name="actor_direct",
+            role=AgentRole.ACTOR,
+            model_path="/models/base",
+            reasoning_style=ReasoningStyle.DIRECT,
+        ),
+        {
+            "question": "Q",
+            "choices": ["A", "B", "C", "D"],
+            "answer": "A",
+            "task_type": "multiple_choice",
+        },
+        "mmlu",
+    )
     assert checkpoint == str(tmp_path / "adapter")
+    assert prompt == expected_prompt
     assert prompt.startswith("/no_think\n")
     assert prompt.count("/no_think") == 1
-    assert "You are Actor-direct" in prompt
+    assert prompt.count("You are Actor-direct") == 1
     assert "shortest sufficient reasoning" in prompt
-    assert "The final result is <answer>." in prompt
+    assert prompt.count("The final result is <answer>.") == 1
     assert "FINAL_ANSWER" not in prompt
+
+
+def test_actor_diversification_dpo_prompt_matches_simple_actor_prompt():
+    diversify = _load_script("09_diversify_actors.py")
+    from src.prompts.prompt_builder import build_simple_actor_prompt
+    from src.society.agent_registry import ReasoningStyle
+
+    sample = {
+        "question": "Q",
+        "choices": ["A", "B", "C", "D"],
+        "answer": "A",
+        "task_type": "multiple_choice",
+    }
+
+    prompt = diversify._actor_training_prompt("mmlu", "evidence", sample)
+    expected = build_simple_actor_prompt(
+        sample,
+        "mmlu",
+        style=ReasoningStyle.EVIDENCE,
+    )
+
+    assert prompt == expected
+    assert prompt.count("You are Actor-evidence") == 1
+    assert prompt.count("The final result is <answer>.") == 1
+
+
+def test_society_critic_dpo_ignores_stale_stored_prompt(monkeypatch, tmp_path):
+    from src.society import society_trainer
+
+    captured = {}
+
+    def fake_detect_model_type(model_name):
+        return "qwen2.5"
+
+    def fake_train_dpo(**kwargs):
+        captured["dataset"] = kwargs["preference_dataset"]
+        return str(tmp_path / "adapter")
+
+    monkeypatch.setattr(
+        "src.utils.model_utils.detect_model_type",
+        fake_detect_model_type,
+    )
+    monkeypatch.setattr("src.training.dpo_trainer.train_dpo", fake_train_dpo)
+
+    society_trainer._run_dpo_training(
+        model_name="/models/base",
+        preference_pairs=[{
+            "sample": {
+                "question": "Q",
+                "choices": ["A", "B", "C", "D"],
+                "answer": "A",
+                "task_type": "multiple_choice",
+            },
+            "prompt": "/no_think\nSTALE PROMPT",
+            "actor_response": "Wrong path.\nThe final result is B.",
+            "chosen": "Helpful critique.\n\nJudgement:\nAnswer correct: no\nSuggested answer: A\nConfidence: 0.9",
+            "rejected": "Bad critique.\n\nJudgement:\nAnswer correct: yes\nSuggested answer: B\nConfidence: 0.9",
+            "metadata": {"target_skill": "verification"},
+        }],
+        output_dir=str(tmp_path),
+        agent_type="critic",
+        agent_name="critic_verification",
+        dataset_name="mmlu",
+    )
+
+    prompt = captured["dataset"][0]["prompt"]
+    assert "STALE PROMPT" not in prompt
+    assert "You are Critic-verification" in prompt
+    assert "Actor response:" in prompt
+    assert "The final result is B." in prompt
 
 
 def test_society_training_fails_low_data_without_advancing_checkpoint(monkeypatch, tmp_path):
