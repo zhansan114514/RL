@@ -45,6 +45,12 @@ from src.society.data_classifier import (
     classify_reasoning_style, ClassificationError,
 )
 from src.society.actor_response_quality import is_trainable_actor_response
+from src.society.critic_pair_quality import (
+    actor_error_response_is_usable,
+    filter_critic_raw_pairs,
+    filter_routed_items_for_raw_pairs,
+    structured_critic_pair_is_usable,
+)
 from src.society.diversity_split import DiversitySplit, summarize_critic_training_pairs
 from src.algorithms.reward import extract_answer, math_answers_equal, normalize_answer
 from src.society.pair_generation import (
@@ -240,6 +246,48 @@ def _cap_prompted_fallback_pairs(
     }
 
 
+def summarize_actor_training_pairs(preference_pairs: list[dict]) -> dict[str, Any]:
+    """Summarize Actor DPO pairs with style-gate visibility."""
+    total = len(preference_pairs)
+    source_counts = Counter(
+        p.get("metadata", {}).get("pair_source", "unknown")
+        for p in preference_pairs
+    )
+    classified_counts = Counter(
+        p.get("metadata", {}).get("classified_style", "unknown")
+        for p in preference_pairs
+    )
+    unique_pairs = {
+        (
+            p.get("sample", {}).get("question", ""),
+            p.get("chosen", ""),
+            p.get("rejected", ""),
+        )
+        for p in preference_pairs
+    }
+    strict = source_counts.get("strict", 0)
+    fallback = source_counts.get("prompted_fallback", 0)
+    return {
+        "sample_count": total,
+        "unique_pair_count": len(unique_pairs),
+        "duplicate_rate": 1.0 - (len(unique_pairs) / total) if total else 0.0,
+        "pair_source_counts": dict(source_counts),
+        "pair_source_ratios": {
+            "strict": strict / total if total else 0.0,
+            "prompted_fallback": fallback / total if total else 0.0,
+        },
+        "style_verified_count": sum(
+            1 for p in preference_pairs
+            if p.get("metadata", {}).get("style_verified")
+        ),
+        "style_match_count": sum(
+            1 for p in preference_pairs
+            if p.get("metadata", {}).get("style_match")
+        ),
+        "classified_style_counts": dict(classified_counts),
+    }
+
+
 def society_alternating_train(
     registry: AgentRegistry,
     dataset: list[dict],
@@ -265,6 +313,9 @@ def society_alternating_train(
     max_model_len: int = 4096,
     max_samples: int = 200,
     min_pairs_per_critic: int = 64,
+    min_pairs_per_actor: int = 64,
+    min_unique_pairs_per_critic: int | None = None,
+    max_critic_pair_duplicate_rate: float = 0.0,
     min_specialty_items: int = 32,
     min_specialty_ratio: float = 0.08,
     specialty_ratio: float = 0.7,
@@ -323,6 +374,11 @@ def society_alternating_train(
         gpu_memory_utilization: vLLM GPU memory utilization.
         max_model_len: Max model sequence length.
         min_pairs_per_critic: Minimum selected DPO pairs required to train a critic.
+        min_pairs_per_actor: Minimum selected DPO pairs required to train an actor.
+        min_unique_pairs_per_critic: Minimum unique actor-error cases required
+            to train a critic. Defaults to min_pairs_per_critic.
+        max_critic_pair_duplicate_rate: Maximum duplicate actor-error case
+            ratio permitted in selected Critic DPO data.
         min_specialty_items: Minimum target-skill routed items required to activate a critic.
         min_specialty_ratio: Minimum target-skill share required to activate a critic.
         allow_skip_low_data: If true, mark agents with insufficient pairs as skipped.
@@ -347,6 +403,13 @@ def society_alternating_train(
             {c.name: c.lora_path or "" for c in critics},
             {"status": "skipped", "iterations": 0},
         )
+
+    if min_unique_pairs_per_critic is None:
+        min_unique_pairs_per_critic = min_pairs_per_critic
+    max_critic_pair_duplicate_rate = max(
+        0.0,
+        min(1.0, float(max_critic_pair_duplicate_rate)),
+    )
 
     # Setup checkpointing
     ckpt_dir = Path(checkpoint_dir) if checkpoint_dir else Path(output_base_dir) / "checkpoints"
@@ -461,6 +524,8 @@ def society_alternating_train(
                 specialty_ratio=specialty_ratio,
                 general_ratio=general_ratio,
                 calibration_ratio=calibration_ratio,
+                min_unique_pairs=min_unique_pairs_per_critic,
+                max_duplicate_rate=max_critic_pair_duplicate_rate,
             )
 
             # Cache pairs for potential resume
@@ -689,13 +754,20 @@ def society_alternating_train(
 
             preference_pairs = actor_pairs_cache.get(actor.name, [])
 
-            if not preference_pairs:
-                reason = "no_preference_pairs"
-                logger.warning("  No preference pairs for %s", actor.name)
+            if len(preference_pairs) < min_pairs_per_actor:
+                reason = "below_min_pairs_per_actor"
+                logger.warning(
+                    "  %s: %s pairs < %s minimum",
+                    actor.name,
+                    len(preference_pairs),
+                    min_pairs_per_actor,
+                )
                 metrics[f"actor_{actor.name}_iter{iteration}"] = {
-                    "status": "skipped_low_data" if allow_skip_low_data else "failed_no_pairs",
-                    "pairs": 0,
+                    "status": "skipped_low_data" if allow_skip_low_data else "failed_low_data",
+                    "pairs": len(preference_pairs),
                     "reason": reason,
+                    "min_pairs_per_actor": min_pairs_per_actor,
+                    "actor_training_metrics": summarize_actor_training_pairs(preference_pairs),
                 }
                 _save_checkpoint(ckpt_file, {
                     "iteration": iteration,
@@ -714,7 +786,9 @@ def society_alternating_train(
                 })
                 if not allow_skip_low_data:
                     raise RuntimeError(
-                        f"No preference pairs for actor {actor.name}. "
+                        f"Insufficient training pairs for {actor.name}: "
+                        f"{len(preference_pairs)} pairs < "
+                        f"{min_pairs_per_actor} minimum. "
                         "Set allow_skip_low_data=true for flow-only runs."
                     )
                 phase_b_done.add(actor.name)
@@ -749,6 +823,7 @@ def society_alternating_train(
                     "status": "completed",
                     "pairs": len(preference_pairs),
                     "path": checkpoint_path,
+                    "actor_training_metrics": summarize_actor_training_pairs(preference_pairs),
                 }
             else:
                 logger.warning("  DPO training failed for %s", actor.name)
@@ -756,6 +831,7 @@ def society_alternating_train(
                     "status": "failed",
                     "pairs": len(preference_pairs),
                     "path": actor_paths.get(actor.name, ""),
+                    "actor_training_metrics": summarize_actor_training_pairs(preference_pairs),
                 }
                 _save_checkpoint(ckpt_file, {
                     "iteration": iteration,
@@ -943,6 +1019,8 @@ def _generate_critic_pairs_pairwise(
     specialty_ratio: float = 0.7,
     general_ratio: float = 0.2,
     calibration_ratio: float = 0.1,
+    min_unique_pairs: int = 64,
+    max_duplicate_rate: float = 0.0,
 ) -> list[dict]:
     """Generate Critic DPO pairs from Society pairwise guided rollouts.
 
@@ -1055,16 +1133,12 @@ def _generate_critic_pairs_pairwise(
                 correct_answer = sample.get("answer", "")
                 rejected_answer = extract_answer(rejected_actor_response, task_type)
 
-                if task_type == "math":
-                    is_wrong = not math_answers_equal(
-                        rejected_answer or "", correct_answer,
-                    )
-                else:
-                    is_wrong = normalize_answer(
-                        rejected_answer or "", task_type,
-                    ) != normalize_answer(correct_answer, task_type)
-
-                if is_wrong:
+                usable_error, _, rejected_answer = actor_error_response_is_usable(
+                    sample,
+                    rejected_actor_response,
+                    actor_answer=rejected_answer,
+                )
+                if usable_error:
                     raw_pairs.append({
                         "sample": sample,
                         "critic_pair": critic_candidate,
@@ -1078,8 +1152,10 @@ def _generate_critic_pairs_pairwise(
                         "rollout_scores": pair["rollout_scores"],
                     })
 
+        raw_pairs, raw_filter_metrics = filter_critic_raw_pairs(raw_pairs)
         logger.info(
-            f"  [{critic.name}] Pairwise rollouts produced {len(raw_pairs)} raw critic pairs"
+            f"  [{critic.name}] Pairwise rollouts produced {len(raw_pairs)} "
+            f"usable raw critic pairs (filter: {raw_filter_metrics})"
         )
 
         # Routing below is API-bound and can take several minutes. Release the
@@ -1116,6 +1192,10 @@ def _generate_critic_pairs_pairwise(
                 extracted_answers=[p["actor_answer"] or "" for p in raw_pairs],
                 dataset_name=dataset_name,
             )
+            routed_items, routed_filter_metrics = filter_routed_items_for_raw_pairs(
+                routed_items,
+                raw_pairs,
+            )
 
             if specialty is None:
                 raise ValueError(f"Critic '{critic.name}' has no error_specialty set")
@@ -1138,6 +1218,7 @@ def _generate_critic_pairs_pairwise(
                 specialty_ratio=specialty_ratio,
                 general_ratio=general_ratio,
                 calibration_ratio=calibration_ratio,
+                allow_oversample=False,
             )
 
             if not critic_items:
@@ -1153,14 +1234,20 @@ def _generate_critic_pairs_pairwise(
                 key = (p["sample"].get("question", ""), p["actor_response"])
                 pair_index[key] = p
 
+            quality_dropped: Counter[str] = Counter()
+            seen_pair_keys: set[tuple[str, str]] = set()
             for item in critic_items:
                 key = (item.sample.get("question", ""), item.response)
                 p = pair_index.get(key)
                 if p is not None:
+                    if key in seen_pair_keys:
+                        quality_dropped["duplicate_raw_pair"] += 1
+                        continue
+                    seen_pair_keys.add(key)
                     profile = item.profile if isinstance(item.profile, dict) else {}
                     chosen = _render_structured_critic_chosen(p, profile)
                     rejected = _render_structured_critic_rejected(p, profile, specialty.value)
-                    preference_pairs.append({
+                    candidate_pair = {
                         "sample": p["sample"],
                         "chosen": chosen,
                         "rejected": rejected,
@@ -1177,8 +1264,39 @@ def _generate_critic_pairs_pairwise(
                             "actor_answer": p.get("actor_answer", ""),
                             "correct_answer": p.get("correct_answer", ""),
                             "structured_judgement": True,
+                            "raw_filter": raw_filter_metrics,
+                            "routed_filter": routed_filter_metrics,
                         },
-                    })
+                    }
+                    usable, reason = structured_critic_pair_is_usable(candidate_pair)
+                    if not usable:
+                        quality_dropped[reason] += 1
+                        continue
+                    preference_pairs.append(candidate_pair)
+
+            summary = summarize_critic_training_pairs(preference_pairs)
+            if summary.get("unique_pair_count", 0) < min_unique_pairs:
+                logger.info(
+                    "  [%s] inactive: unique critic pairs %s < %s minimum",
+                    critic.name,
+                    summary.get("unique_pair_count", 0),
+                    min_unique_pairs,
+                )
+                return []
+            if summary.get("duplicate_rate", 0.0) > max_duplicate_rate:
+                logger.info(
+                    "  [%s] inactive: duplicate_rate %.3f > %.3f",
+                    critic.name,
+                    summary.get("duplicate_rate", 0.0),
+                    max_duplicate_rate,
+                )
+                return []
+            if quality_dropped:
+                logger.info(
+                    "  [%s] Critic quality filter dropped: %s",
+                    critic.name,
+                    dict(quality_dropped),
+                )
 
         logger.info(
             f"  [{critic.name}] {len(preference_pairs)}/{len(raw_pairs)} pairs "
@@ -1527,6 +1645,8 @@ def _generate_actor_pairs_pairwise(
                             "pair_source": pair_source,
                             "is_correct": True,
                             "chosen_answer": chosen_answer,
+                            "quality_accepted_for_actor": True,
+                            "strict_accepted_for_actor": style_verified,
                             "accepted_for_actor": True,
                             "delta": p["delta"],
                             "comparison_mode": p["comparison_mode"],

@@ -108,6 +108,8 @@ step04_diversify_critics:
   max_length: 2048
   beta: 0.1
   min_real_specialty_items: 16
+  min_unique_pairs_per_critic: 256
+  max_critic_pair_duplicate_rate: 0.0
   target_pairs_per_critic: 512
   max_pairs_per_critic: 1024
   min_pairs_per_critic: 256
@@ -145,6 +147,9 @@ step05_train_society:
   max_length: 2048
   beta: 0.1
   min_pairs_per_critic: 256
+  min_pairs_per_actor: 256
+  min_unique_pairs_per_critic: 256
+  max_critic_pair_duplicate_rate: 0.0
   min_specialty_items: 64
   min_specialty_ratio: 0.05
   specialty_ratio: 0.60

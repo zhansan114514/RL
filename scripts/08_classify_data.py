@@ -230,6 +230,8 @@ def build_per_response_labels(traj: dict[str, Any]) -> list[dict[str, Any]]:
             "trainable_for_actor": False,
             "style_verified": False,
             "style_weight": 0.0,
+            "quality_accepted_for_actor": False,
+            "strict_accepted_for_actor": False,
             "accepted_for_actor": False,
         })
     return labels
@@ -252,6 +254,11 @@ def update_actor_acceptance(label: dict[str, Any], args: Any) -> None:
     label["trainable_for_actor"] = trainable
     label["style_verified"] = style_verified
     label["style_weight"] = confidence if style_match else 0.3
+    label["quality_accepted_for_actor"] = trainable
+    label["strict_accepted_for_actor"] = trainable and style_verified
+    # Legacy compatibility: accepted_for_actor means quality-accepted, not
+    # necessarily style-verified.  Downstream pair builders cap non-strict
+    # prompted fallback data separately.
     label["accepted_for_actor"] = trainable
 
 
@@ -385,6 +392,12 @@ def aggregate_result(
         "num_style_verified": sum(
             1 for label in labels if label.get("style_verified")
         ),
+        "num_quality_accepted_for_actor": sum(
+            1 for label in labels if label.get("quality_accepted_for_actor")
+        ),
+        "num_strict_accepted_for_actor": sum(
+            1 for label in labels if label.get("strict_accepted_for_actor")
+        ),
         "num_accepted_for_actor": sum(
             1 for label in labels if label.get("accepted_for_actor")
         ),
@@ -494,6 +507,10 @@ def build_reports(
                 gate_retention[prompted]["style_verified"] += 1
             if label.get("accepted_for_actor"):
                 gate_retention[prompted]["accepted_for_actor"] += 1
+            if label.get("quality_accepted_for_actor"):
+                gate_retention[prompted]["quality_accepted_for_actor"] += 1
+            if label.get("strict_accepted_for_actor"):
+                gate_retention[prompted]["strict_accepted_for_actor"] += 1
             if label.get("primary_style"):
                 style = label["primary_style"]
                 style_dist[style] += 1
@@ -520,6 +537,8 @@ def build_reports(
                     "trainable_for_actor": label.get("trainable_for_actor", False),
                     "style_verified": label.get("style_verified", False),
                     "style_weight": label.get("style_weight", 0.0),
+                    "quality_accepted_for_actor": label.get("quality_accepted_for_actor", False),
+                    "strict_accepted_for_actor": label.get("strict_accepted_for_actor", False),
                     "accepted_for_actor": label.get("accepted_for_actor", False),
                     "is_correct": label.get("is_correct", False),
                 })

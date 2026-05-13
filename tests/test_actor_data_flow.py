@@ -40,6 +40,25 @@ def test_classification_checkpoint_metadata_tracks_input_fingerprint(tmp_path):
     assert first["input_file"]["sha256"] != second["input_file"]["sha256"]
 
 
+def test_actor_acceptance_fields_distinguish_quality_from_strict_style():
+    classify = _load_script("08_classify_data.py")
+    label = {
+        "prompted_style": "evidence",
+        "primary_style": "direct",
+        "task_type": "multiple_choice",
+        "reasoning_style_confidence": 0.9,
+        "is_correct": True,
+        "response": "The answer follows from the question clue.\nThe final result is A.",
+    }
+    args = type("Args", (), {"min_style_confidence": 0.65})()
+
+    classify.update_actor_acceptance(label, args)
+
+    assert label["quality_accepted_for_actor"] is True
+    assert label["strict_accepted_for_actor"] is False
+    assert label["accepted_for_actor"] is True
+
+
 def test_actor_pairs_use_only_accepted_target_style_chosen():
     diversify = _load_script("09_diversify_actors.py")
     sample = {
@@ -214,6 +233,12 @@ def test_actor_pair_builder_caps_prompted_style_fallback():
         1 for pair in pairs
         if pair["metadata"]["pair_source"] == "prompted_fallback"
     ) == 1
+    fallback_pair = next(
+        pair for pair in pairs
+        if pair["metadata"]["pair_source"] == "prompted_fallback"
+    )
+    assert fallback_pair["metadata"]["chosen_quality_accepted_for_actor"] is True
+    assert fallback_pair["metadata"]["chosen_strict_accepted_for_actor"] is False
 
 
 def test_actor_pair_builder_allows_prompted_fallback_when_classifier_has_no_strict_match():
@@ -272,6 +297,233 @@ def test_actor_pair_builder_allows_prompted_fallback_when_classifier_has_no_stri
     assert metrics["fallback_selection"]["strict_selected"] == 0
     assert metrics["fallback_selection"]["prompted_fallback_selected"] == 1
     assert metrics["fallback_selection"]["prompted_fallback_only_without_strict"] is True
+
+
+def test_critic_structured_pairs_do_not_oversample_or_keep_invalid_judgements():
+    diversify = _load_script("10_diversify_critics.py")
+    from src.society.agent_registry import CriticSkill
+    from src.society.diversity_split import RoutedTrainingItem
+
+    sample_a = {
+        "question": "Q1",
+        "answer": "A",
+        "task_type": "multiple_choice",
+    }
+    sample_b = {
+        "question": "Q2",
+        "answer": "B",
+        "task_type": "multiple_choice",
+    }
+    raw_pairs = [
+        {
+            "raw_pair_id": "raw_1",
+            "sample": sample_a,
+            "actor_response": "Wrong reasoning.\nThe final result is C.",
+            "actor_answer": "C",
+            "correct_answer": "A",
+            "actor_name": "actor_direct",
+        },
+        {
+            "raw_pair_id": "raw_1_dup",
+            "sample": sample_a,
+            "actor_response": "Wrong reasoning.\nThe final result is C.",
+            "actor_answer": "C",
+            "correct_answer": "A",
+            "actor_name": "actor_direct",
+        },
+        {
+            "raw_pair_id": "raw_correct",
+            "sample": sample_b,
+            "actor_response": "Correct reasoning.\nThe final result is B.",
+            "actor_answer": "B",
+            "correct_answer": "B",
+            "actor_name": "actor_direct",
+        },
+    ]
+    routed_items = [
+        RoutedTrainingItem(
+            sample=sample_a,
+            response="Wrong reasoning.\nThe final result is C.",
+            skill=CriticSkill.REASONING,
+            weight=1.0,
+            profile={
+                "primary": "reasoning",
+                "confidence": 0.9,
+                "evidence": "The actor uses the wrong inference.",
+            },
+            response_id="raw_1",
+        ),
+        RoutedTrainingItem(
+            sample=sample_a,
+            response="Wrong reasoning.\nThe final result is C.",
+            skill=CriticSkill.REASONING,
+            weight=1.0,
+            profile={
+                "primary": "reasoning",
+                "confidence": 0.9,
+                "evidence": "Duplicate route should not create another pair.",
+            },
+            response_id="raw_1_dup",
+        ),
+        RoutedTrainingItem(
+            sample=sample_b,
+            response="Correct reasoning.\nThe final result is B.",
+            skill=CriticSkill.REASONING,
+            weight=1.0,
+            profile={
+                "primary": "reasoning",
+                "confidence": 0.9,
+                "evidence": "Correct actor response must be filtered.",
+            },
+            response_id="raw_correct",
+        ),
+    ]
+
+    pairs, metrics = diversify.build_structured_critic_pairs(
+        raw_pairs=raw_pairs,
+        routed_items=routed_items,
+        critic_skill="reasoning",
+        max_pairs=10,
+        seed=42,
+        min_real_specialty_items=1,
+        min_unique_pairs=1,
+        max_duplicate_rate=0.0,
+        pair_mix={"specialty": 1.0, "general": 0.0},
+    )
+
+    assert len(pairs) == 1
+    assert pairs[0]["metadata"]["raw_pair_id"] == "raw_1"
+    assert metrics["unique_pair_count"] == 1
+    assert metrics["duplicate_rate"] == 0.0
+    assert metrics["raw_filter"]["dropped_counts"] == {
+        "duplicate_actor_error_case": 1,
+        "actor_response_correct": 1,
+    }
+
+
+def test_critic_structured_pairs_fail_when_unique_threshold_not_met():
+    diversify = _load_script("10_diversify_critics.py")
+    from src.society.agent_registry import CriticSkill
+    from src.society.diversity_split import RoutedTrainingItem
+
+    sample = {
+        "question": "Q",
+        "answer": "A",
+        "task_type": "multiple_choice",
+    }
+    raw_pairs = [{
+        "raw_pair_id": "raw_1",
+        "sample": sample,
+        "actor_response": "Wrong reasoning.\nThe final result is C.",
+        "actor_answer": "C",
+        "correct_answer": "A",
+        "actor_name": "actor_direct",
+    }]
+    routed_items = [RoutedTrainingItem(
+        sample=sample,
+        response="Wrong reasoning.\nThe final result is C.",
+        skill=CriticSkill.REASONING,
+        weight=1.0,
+        profile={
+            "primary": "reasoning",
+            "confidence": 0.9,
+            "evidence": "The actor uses the wrong inference.",
+        },
+        response_id="raw_1",
+    )]
+
+    pairs, metrics = diversify.build_structured_critic_pairs(
+        raw_pairs=raw_pairs,
+        routed_items=routed_items,
+        critic_skill="reasoning",
+        max_pairs=10,
+        seed=42,
+        min_real_specialty_items=1,
+        min_unique_pairs=2,
+        pair_mix={"specialty": 1.0, "general": 0.0},
+    )
+
+    assert pairs == []
+    assert metrics["status"] == "frozen_base"
+    assert metrics["reason"] == "unique_pairs_below_threshold"
+
+
+def test_critic_routed_filter_collapses_duplicate_content_with_different_ids():
+    from src.society.agent_registry import CriticSkill
+    from src.society.critic_pair_quality import filter_routed_items_for_raw_pairs
+    from src.society.diversity_split import RoutedTrainingItem
+
+    sample = {
+        "question": "Q",
+        "answer": "A",
+        "task_type": "multiple_choice",
+    }
+    raw_pairs = [{
+        "raw_pair_id": "raw_1",
+        "sample": sample,
+        "actor_response": "Wrong reasoning.\nThe final result is C.",
+        "actor_answer": "C",
+        "correct_answer": "A",
+    }]
+    routed_items = [
+        RoutedTrainingItem(
+            sample=sample,
+            response="Wrong reasoning.\nThe final result is C.",
+            skill=CriticSkill.REASONING,
+            weight=1.0,
+            profile={},
+            response_id="raw_1",
+        ),
+        RoutedTrainingItem(
+            sample=sample,
+            response="Wrong reasoning.\nThe final result is C.",
+            skill=CriticSkill.REASONING,
+            weight=1.0,
+            profile={},
+            response_id="raw_1_dup",
+        ),
+    ]
+
+    kept, metrics = filter_routed_items_for_raw_pairs(routed_items, raw_pairs)
+
+    assert len(kept) == 1
+    assert kept[0].response_id == "raw_1"
+    assert metrics["dropped_counts"] == {"duplicate_routed_assignment": 1}
+
+
+def test_critic_training_mix_fills_with_remaining_real_items_without_replacement():
+    from src.society.agent_registry import CriticSkill
+    from src.society.diversity_split import DiversitySplit, RoutedTrainingItem
+
+    items = []
+    for idx, skill in enumerate([
+        CriticSkill.REASONING,
+        CriticSkill.KNOWLEDGE,
+        CriticSkill.GROUNDING,
+        CriticSkill.VERIFICATION,
+    ]):
+        items.append(RoutedTrainingItem(
+            sample={"question": f"Q{idx}"},
+            response=f"Wrong {idx}",
+            skill=skill,
+            weight=1.0,
+            profile={},
+            response_id=f"raw_{idx}",
+        ))
+
+    selected = DiversitySplit(seed=42, use_api=False).build_critic_training_mix(
+        all_items=items,
+        target_skill=CriticSkill.REASONING,
+        max_items=4,
+        min_specialty_items=1,
+        min_specialty_ratio=0.0,
+        specialty_ratio=0.75,
+        general_ratio=0.25,
+        calibration_ratio=0.0,
+    )
+
+    assert len(selected) == 4
+    assert len({item.response_id for item in selected}) == 4
 
 
 def test_reasoning_style_parser_uses_evidence_when_primary_label_is_ambiguous():
@@ -493,6 +745,98 @@ def test_society_training_fails_low_data_without_advancing_checkpoint(monkeypatc
     assert state["iteration"] == 0
     assert state["iteration_completed"] is False
     assert state["failed_agents"] == {"critic_reasoning": "below_min_pairs_per_critic"}
+
+
+def test_society_training_fails_actor_low_data_without_advancing_checkpoint(monkeypatch, tmp_path):
+    from src.society import society_trainer
+    from src.society.agent_registry import (
+        AgentConfig,
+        AgentRegistry,
+        AgentRole,
+        CriticSkill,
+        ReasoningStyle,
+    )
+
+    critic_pair = {
+        "sample": {"question": "Q", "answer": "A", "task_type": "multiple_choice"},
+        "actor_response": "Wrong reasoning.\nThe final result is B.",
+        "chosen": (
+            "The actor chose the wrong option.\n\n"
+            "Judgement:\n"
+            "Answer correct: no\n"
+            "Suggested answer: A\n"
+            "Confidence: 0.9"
+        ),
+        "rejected": (
+            "This critique misses the issue.\n\n"
+            "Judgement:\n"
+            "Answer correct: yes\n"
+            "Suggested answer: B\n"
+            "Confidence: 0.8"
+        ),
+        "metadata": {"target_skill": "reasoning", "assigned_skill": "reasoning"},
+    }
+    actor_pair = {
+        "sample": {"question": "Q", "answer": "A", "task_type": "multiple_choice"},
+        "chosen": "Some valid reasoning.\nThe final result is A.",
+        "rejected": "Wrong reasoning.\nThe final result is B.",
+        "metadata": {"style": "direct"},
+    }
+
+    monkeypatch.setattr(
+        society_trainer,
+        "_generate_critic_pairs_pairwise",
+        lambda **kwargs: [critic_pair],
+    )
+    monkeypatch.setattr(
+        society_trainer,
+        "_generate_actor_pairs_pairwise",
+        lambda **kwargs: [actor_pair],
+    )
+    monkeypatch.setattr(
+        society_trainer,
+        "_run_dpo_training",
+        lambda **kwargs: str(tmp_path / kwargs["agent_name"]),
+    )
+    monkeypatch.setattr(society_trainer, "_cleanup_gpu", lambda: None)
+
+    registry = AgentRegistry(base_model_path="/models/base")
+    registry.register(AgentConfig(
+        name="actor_direct",
+        role=AgentRole.ACTOR,
+        model_path="/models/base",
+        reasoning_style=ReasoningStyle.DIRECT,
+    ))
+    registry.register(AgentConfig(
+        name="critic_reasoning",
+        role=AgentRole.CRITIC,
+        model_path="/models/base",
+        error_specialty=CriticSkill.REASONING,
+    ))
+    checkpoint_dir = tmp_path / "checkpoints"
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="Insufficient training pairs for actor_direct"):
+        society_trainer.society_alternating_train(
+            registry=registry,
+            dataset=[{"question": "Q", "answer": "A", "task_type": "multiple_choice"}],
+            dataset_name="mmlu",
+            output_base_dir=str(tmp_path / "society"),
+            checkpoint_dir=str(checkpoint_dir),
+            num_iterations=1,
+            min_pairs_per_critic=1,
+            min_pairs_per_actor=2,
+            max_samples=1,
+        )
+
+    import json
+
+    state = json.loads((checkpoint_dir / "society_training_state.json").read_text())
+    assert state["iteration"] == 0
+    assert state["iteration_completed"] is False
+    assert state["failed_agents"] == {"actor_direct": "below_min_pairs_per_actor"}
+    assert state["phase_done"]["phase_A"] == ["critic_reasoning"]
 
 
 def test_society_actor_acceptance_allows_prompted_fallback_but_requires_quality(monkeypatch):
@@ -828,3 +1172,45 @@ def test_society_actor_pair_generation_allows_fallback_without_strict_pair(monke
 
     assert len(pairs) == 1
     assert pairs[0]["metadata"]["pair_source"] == "prompted_fallback"
+
+
+def test_actor_training_summary_reports_strict_and_fallback_ratios():
+    from src.society.society_trainer import summarize_actor_training_pairs
+
+    pairs = [
+        {
+            "sample": {"question": "Q1"},
+            "chosen": "Reasoning.\nThe final result is A.",
+            "rejected": "Wrong.\nThe final result is B.",
+            "metadata": {
+                "pair_source": "strict",
+                "style_verified": True,
+                "style_match": True,
+                "classified_style": "evidence",
+            },
+        },
+        {
+            "sample": {"question": "Q2"},
+            "chosen": "Prompted evidence.\nThe final result is A.",
+            "rejected": "Wrong.\nThe final result is B.",
+            "metadata": {
+                "pair_source": "prompted_fallback",
+                "style_verified": False,
+                "style_match": True,
+                "classified_style": "evidence",
+            },
+        },
+    ]
+
+    summary = summarize_actor_training_pairs(pairs)
+
+    assert summary["sample_count"] == 2
+    assert summary["pair_source_counts"] == {
+        "strict": 1,
+        "prompted_fallback": 1,
+    }
+    assert summary["pair_source_ratios"] == {
+        "strict": 0.5,
+        "prompted_fallback": 0.5,
+    }
+    assert summary["style_verified_count"] == 1

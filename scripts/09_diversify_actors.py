@@ -91,6 +91,8 @@ def build_response_index(
             accepted = bool(label.get("accepted_for_actor"))
             trainable = bool(label.get("trainable_for_actor", accepted))
             style_verified = bool(label.get("style_verified", accepted and label.get("style_match")))
+            quality_accepted = bool(label.get("quality_accepted_for_actor", accepted or trainable))
+            strict_accepted = bool(label.get("strict_accepted_for_actor", trainable and style_verified))
             by_sample[sample_id].append({
                 "sample_id": sample_id,
                 "response_id": label.get("response_id", ""),
@@ -105,6 +107,8 @@ def build_response_index(
                 "trainable_for_actor": trainable,
                 "style_verified": style_verified,
                 "style_weight": label.get("style_weight", label.get("reasoning_style_confidence", 0.0)),
+                "quality_accepted_for_actor": quality_accepted,
+                "strict_accepted_for_actor": strict_accepted,
                 "accepted_for_actor": accepted or trainable,
                 "generation_index": label.get("generation_index"),
                 "agent_name": label.get("agent_name", ""),
@@ -363,6 +367,8 @@ def augment_pairs_if_needed(
                 "chosen_prompted_style": target_style,
                 "chosen_primary_style": target_style,
                 "chosen_accepted_for_actor": True,
+                "chosen_quality_accepted_for_actor": True,
+                "chosen_strict_accepted_for_actor": True,
                 "chosen_style_verified": True,
                 "chosen_style_weight": item.get("style_confidence", 0.0),
                 "style_confidence": item.get("style_confidence", 0.0),
@@ -406,6 +412,8 @@ def _make_pair(chosen: dict[str, Any], rejected: dict[str, Any], pair_type: str)
             "chosen_primary_style": chosen.get("primary_style", ""),
             "chosen_style_confidence": chosen.get("style_confidence", 0.0),
             "chosen_style_verified": bool(chosen.get("style_verified")),
+            "chosen_quality_accepted_for_actor": bool(chosen.get("quality_accepted_for_actor")),
+            "chosen_strict_accepted_for_actor": bool(chosen.get("strict_accepted_for_actor")),
             "chosen_style_weight": chosen.get("style_weight", 0.0),
             "chosen_accepted_for_actor": bool(chosen.get("accepted_for_actor")),
             "rejected_prompted_style": rejected.get("prompted_style", ""),

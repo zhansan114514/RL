@@ -504,6 +504,8 @@ class DiversitySplit:
         specialty_ratio: float = 0.7,
         general_ratio: float = 0.2,
         calibration_ratio: float = 0.1,
+        allow_oversample: bool = False,
+        max_repeats_per_item: int = 1,
     ) -> list[RoutedTrainingItem]:
         """
         Build a specialist-heavy training mix only when enough target data exists.
@@ -554,17 +556,44 @@ class DiversitySplit:
             quotas["specialty"] += max_items - quota_sum
 
         selected: list[RoutedTrainingItem] = []
-        selected.extend(self._sample_bucket(specialty_pool, quotas["specialty"], "specialty"))
-        selected.extend(self._sample_bucket(general_pool, quotas["general"], "general"))
-        selected.extend(self._sample_bucket(calibration_pool, quotas["calibration"], "calibration"))
+        selected.extend(self._sample_bucket(
+            specialty_pool,
+            quotas["specialty"],
+            "specialty",
+            allow_oversample=allow_oversample,
+            max_repeats_per_item=max_repeats_per_item,
+        ))
+        selected.extend(self._sample_bucket(
+            general_pool,
+            quotas["general"],
+            "general",
+            allow_oversample=allow_oversample,
+            max_repeats_per_item=max_repeats_per_item,
+        ))
+        selected.extend(self._sample_bucket(
+            calibration_pool,
+            quotas["calibration"],
+            "calibration",
+            allow_oversample=allow_oversample,
+            max_repeats_per_item=max_repeats_per_item,
+        ))
+        selected = _dedupe_routed_items(selected)
 
         if len(selected) < max_items:
-            filler = specialty_pool or general_pool
+            filler = [
+                item for item in all_items
+                if _routed_item_key(item) not in {
+                    _routed_item_key(existing) for existing in selected
+                }
+            ]
             selected.extend(self._sample_bucket(
                 filler,
                 max_items - len(selected),
-                "specialty" if filler is specialty_pool else "general",
+                "general",
+                allow_oversample=allow_oversample,
+                max_repeats_per_item=max_repeats_per_item,
             ))
+            selected = _dedupe_routed_items(selected)
 
         self.rng.shuffle(selected)
         return selected[:max_items]
@@ -574,9 +603,14 @@ class DiversitySplit:
         pool: list[RoutedTrainingItem],
         n: int,
         source_bucket: str,
+        allow_oversample: bool = False,
+        max_repeats_per_item: int = 1,
     ) -> list[RoutedTrainingItem]:
         """Sample a pool and annotate copies with their source bucket."""
-        sampled = self._sample_pool(pool, n, replace=len(pool) < n)
+        sample_with_replacement = allow_oversample and len(pool) < n
+        if sample_with_replacement:
+            n = min(n, max(1, int(max_repeats_per_item)) * len(pool))
+        sampled = self._sample_pool(pool, n, replace=sample_with_replacement)
         return [replace(item, source_bucket=source_bucket) for item in sampled]
 
     def _sample_pool(
@@ -658,6 +692,27 @@ def assign_error_profile(
         return [("general", 1.0)]
 
     return [(label, score / total) for label, score in selected]
+
+
+def _dedupe_routed_items(items: list[RoutedTrainingItem]) -> list[RoutedTrainingItem]:
+    deduped: list[RoutedTrainingItem] = []
+    seen: set[tuple[str, str | None]] = set()
+    for item in items:
+        key = _routed_item_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
+def _routed_item_key(item: RoutedTrainingItem) -> tuple[str, str | None]:
+    base = item.response_id or _content_hash(
+        item.sample.get("question", ""),
+        item.response,
+    )
+    skill = item.skill.value if item.skill else None
+    return (base, skill)
 
 
 def _ambiguous_profile(evidence: str = "") -> dict:

@@ -32,6 +32,13 @@ from src.society.multi_deliberation import LoRAError
 from src.society.society_trainer import LoRAModelAdapter
 from src.parsing.critic_parser import parse_critic_response
 from src.prompts.critic_prompts import render_critic_judgement
+from src.society.critic_pair_quality import (
+    actor_error_response_is_usable,
+    filter_critic_raw_pairs,
+    filter_routed_items_for_raw_pairs,
+    routed_item_base_key,
+    structured_critic_pair_is_usable,
+)
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -58,6 +65,8 @@ STEP_DEFAULTS = {
     "max_length": 2048,
     "beta": 0.1,
     "min_real_specialty_items": 16,
+    "min_unique_pairs_per_critic": 64,
+    "max_critic_pair_duplicate_rate": 0.0,
     "target_pairs_per_critic": 512,
     "max_pairs_per_critic": 1024,
     "min_pairs_per_critic": 64,
@@ -209,7 +218,7 @@ def build_critic_raw_pairs(
     route it once, then sample skill-specific mixtures from the routed pool.
     """
     from src.inference.vllm_server import VLLMInference
-    from src.algorithms.reward import extract_answer, math_answers_equal, normalize_answer
+    from src.algorithms.reward import extract_answer
     from src.society.pair_generation import build_pairwise_training_pairs_batch
     from src.society.agent_registry import ReasoningStyle
 
@@ -289,18 +298,15 @@ def build_critic_raw_pairs(
                 rejected_actor_response = actor_candidate["rejected"]
                 rejected_answer = extract_answer(rejected_actor_response, task_type)
 
-                # Only keep pairs where the actor's rejected response was wrong
-                # (error scenario — this is where Critic feedback matters)
-                if task_type == "math":
-                    is_wrong = not math_answers_equal(
-                        rejected_answer or "", correct_answer,
-                    )
-                else:
-                    is_wrong = normalize_answer(
-                        rejected_answer or "", task_type,
-                    ) != normalize_answer(correct_answer, task_type)
+                # Only keep pairs where the actor's rejected response was a
+                # parseable wrong-answer error case.
+                usable_error, _, rejected_answer = actor_error_response_is_usable(
+                    sample,
+                    rejected_actor_response,
+                    actor_answer=rejected_answer,
+                )
 
-                if is_wrong:
+                if usable_error:
                     raw_pair_id = f"raw_{len(raw_pairs):06d}"
                     raw_pairs.append({
                         "raw_pair_id": raw_pair_id,
@@ -327,7 +333,11 @@ def build_critic_raw_pairs(
             _cleanup_gpu()
         raise
 
-    logger.info(f"  Pairwise rollouts produced {len(raw_pairs)} shared raw critic pairs")
+    raw_pairs, filter_metrics = filter_critic_raw_pairs(raw_pairs)
+    logger.info(
+        f"  Pairwise rollouts produced {len(raw_pairs)} usable shared raw "
+        f"critic pairs (filter: {filter_metrics})"
+    )
     return raw_pairs
 
 
@@ -505,6 +515,8 @@ def build_structured_critic_pairs(
     max_pairs: int,
     seed: int,
     min_real_specialty_items: int,
+    min_unique_pairs: int | None = None,
+    max_duplicate_rate: float = 0.0,
     pair_mix: Dict[str, float] | None = None,
 ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Build DPO pairs where chosen/rejected are structured Critic judgements."""
@@ -514,6 +526,13 @@ def build_structured_critic_pairs(
     rng = np.random.default_rng(seed)
     skill = resolve_critic_skill(critic_skill)
     pair_mix = pair_mix or {"specialty": 0.75, "general": 0.25}
+    min_unique_pairs = min_unique_pairs if min_unique_pairs is not None else min_real_specialty_items
+    max_duplicate_rate = max(0.0, min(1.0, float(max_duplicate_rate)))
+    raw_pairs, raw_filter_metrics = filter_critic_raw_pairs(raw_pairs)
+    routed_items, routed_filter_metrics = filter_routed_items_for_raw_pairs(
+        routed_items,
+        raw_pairs,
+    )
 
     pair_by_id = {
         p.get("raw_pair_id"): p
@@ -532,23 +551,44 @@ def build_structured_critic_pairs(
             "reason": "real_specialty_items_below_threshold",
             "real_specialty_items": len(specialty_items),
             "min_real_specialty_items": min_real_specialty_items,
+            "raw_filter": raw_filter_metrics,
+            "routed_filter": routed_filter_metrics,
         }
 
     general_items = [item for item in routed_items if item.skill is None]
-    other_items = [item for item in routed_items if item.skill is not None and item.skill != skill]
     specialty_quota, general_quota = _critic_pair_quotas(max_pairs, pair_mix)
 
     selected: list[tuple[Any, str]] = []
     selected.extend((item, "specialty") for item in _sample_items(rng, specialty_items, specialty_quota))
     selected.extend((item, "general") for item in _sample_items(rng, general_items or routed_items, general_quota))
+    selected = _dedupe_selected_items(selected)
+    if len(selected) < max_pairs:
+        selected_keys = {routed_item_base_key(item) for item, _ in selected}
+        filler_items = [
+            item for item in routed_items
+            if routed_item_base_key(item) not in selected_keys
+        ]
+        selected.extend(
+            (item, "general")
+            for item in _sample_items(rng, filler_items, max_pairs - len(selected))
+        )
+        selected = _dedupe_selected_items(selected)
 
     structured_pairs: List[Dict[str, Any]] = []
+    dropped: Counter[str] = Counter()
+    seen_pair_keys: set[str] = set()
     for idx, (item, source_bucket) in enumerate(selected):
         p = pair_by_id.get(getattr(item, "response_id", ""))
         if p is None:
             p = pair_by_content.get((item.sample.get("question", ""), item.response))
         if p is None:
+            dropped["missing_raw_pair"] += 1
             continue
+        pair_key = str(p.get("raw_pair_id") or routed_item_base_key(item))
+        if pair_key in seen_pair_keys:
+            dropped["duplicate_raw_pair"] += 1
+            continue
+        seen_pair_keys.add(pair_key)
 
         profile = item.profile if isinstance(item.profile, dict) else {}
         chosen = _render_chosen_judgement(p, profile)
@@ -558,14 +598,7 @@ def build_structured_critic_pairs(
             target_skill=skill.value,
             negative_kind=_negative_kind(idx, source_bucket),
         )
-        parsed = parse_critic_response(chosen, p.get("sample", {}).get("task_type", "multiple_choice"))
-        if not parsed.usable_for_feedback:
-            raise RuntimeError(
-                f"Generated unusable critic chosen for {p.get('raw_pair_id')}: "
-                f"{parsed.parse_errors}"
-            )
-
-        structured_pairs.append({
+        candidate_pair = {
             "sample": p["sample"],
             "chosen": chosen,
             "rejected": rejected,
@@ -582,9 +615,40 @@ def build_structured_critic_pairs(
                 "correct_answer": p.get("correct_answer", ""),
                 "structured_judgement": True,
             },
-        })
+        }
+        usable, reason = structured_critic_pair_is_usable(candidate_pair)
+        if not usable:
+            dropped[reason] += 1
+            continue
+        structured_pairs.append(candidate_pair)
 
     metrics = summarize_structured_critic_pairs(structured_pairs, len(specialty_items))
+    metrics["raw_filter"] = raw_filter_metrics
+    metrics["routed_filter"] = routed_filter_metrics
+    metrics["quality_filter"] = {
+        "selected_items": len(selected),
+        "kept_pairs": len(structured_pairs),
+        "dropped_pairs": sum(dropped.values()),
+        "dropped_counts": dict(dropped),
+    }
+    unique_pair_count = metrics.get("unique_pair_count", 0)
+    duplicate_rate = metrics.get("duplicate_rate", 0.0)
+    if unique_pair_count < min_unique_pairs:
+        metrics.update({
+            "status": "frozen_base",
+            "reason": "unique_pairs_below_threshold",
+            "unique_pair_count": unique_pair_count,
+            "min_unique_pairs": min_unique_pairs,
+        })
+        return [], metrics
+    if duplicate_rate > max_duplicate_rate:
+        metrics.update({
+            "status": "frozen_base",
+            "reason": "duplicate_rate_above_threshold",
+            "duplicate_rate": duplicate_rate,
+            "max_duplicate_rate": max_duplicate_rate,
+        })
+        return [], metrics
     metrics["status"] = (
         "trained_specialist"
         if len(specialty_items) >= min_real_specialty_items
@@ -614,8 +678,17 @@ def summarize_structured_critic_pairs(
         p.get("metadata", {}).get("assigned_skill", "unknown")
         for p in preference_pairs
     )
+    unique_pairs = {
+        (
+            p.get("sample", {}).get("question", ""),
+            p.get("actor_response", ""),
+        )
+        for p in preference_pairs
+    }
     return {
         "sample_count": total,
+        "unique_pair_count": len(unique_pairs),
+        "duplicate_rate": 1.0 - (len(unique_pairs) / total) if total else 0.0,
         "real_specialty_items": real_specialty_items,
         "chosen_parse_usable_rate": parse_usable / total if total else 0.0,
         "source_bucket_counts": dict(bucket_counts),
@@ -709,9 +782,20 @@ def _critic_pair_quotas(max_pairs: int, pair_mix: Dict[str, float]) -> tuple[int
 def _sample_items(rng, items: list[Any], n: int) -> list[Any]:
     if n <= 0 or not items:
         return []
-    replace = len(items) < n
-    indices = rng.choice(len(items), size=n if replace else min(n, len(items)), replace=replace)
+    indices = rng.choice(len(items), size=min(n, len(items)), replace=False)
     return [items[int(i)] for i in indices]
+
+
+def _dedupe_selected_items(items: list[tuple[Any, str]]) -> list[tuple[Any, str]]:
+    deduped: list[tuple[Any, str]] = []
+    seen: set[str] = set()
+    for item, source_bucket in items:
+        key = routed_item_base_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((item, source_bucket))
+    return deduped
 
 
 def _routed_item_to_json(item: Any) -> Dict[str, Any]:
@@ -1107,6 +1191,12 @@ def main():
                 max_pairs=getattr(args, "max_pairs_per_critic", getattr(args, "target_pairs_per_critic", args.max_delib_samples)),
                 seed=args.seed,
                 min_real_specialty_items=getattr(args, "min_real_specialty_items", 16),
+                min_unique_pairs=getattr(
+                    args,
+                    "min_unique_pairs_per_critic",
+                    args.min_pairs_per_critic,
+                ),
+                max_duplicate_rate=getattr(args, "max_critic_pair_duplicate_rate", 0.0),
                 pair_mix=getattr(args, "pair_mix", {"specialty": 0.75, "general": 0.25}),
             )
 
@@ -1249,6 +1339,16 @@ def main():
                 "active_selection": {
                     "min_pairs_per_critic": args.min_pairs_per_critic,
                     "min_real_specialty_items": getattr(args, "min_real_specialty_items", 16),
+                    "min_unique_pairs_per_critic": getattr(
+                        args,
+                        "min_unique_pairs_per_critic",
+                        args.min_pairs_per_critic,
+                    ),
+                    "max_critic_pair_duplicate_rate": getattr(
+                        args,
+                        "max_critic_pair_duplicate_rate",
+                        0.0,
+                    ),
                     "target_pairs_per_critic": getattr(args, "target_pairs_per_critic", args.max_delib_samples),
                     "max_pairs_per_critic": getattr(args, "max_pairs_per_critic", args.max_delib_samples),
                 },
