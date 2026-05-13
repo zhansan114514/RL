@@ -41,18 +41,25 @@ def build_actor_prompt(
     round_num: int = 0,
     previous_actor_response: str = "",
     critic_feedback: str = "",
+    no_think: bool = True,
 ) -> str:
     """Build an Actor prompt for the current deliberation round."""
     problem_text = build_problem_text(sample, dataset_name)
     style = actor.reasoning_style if isinstance(actor.reasoning_style, ReasoningStyle) else None
     if round_num <= 0 or not previous_actor_response:
-        return build_initial_actor_prompt(style, problem_text, actor_name=actor.name)
+        return build_initial_actor_prompt(
+            style,
+            problem_text,
+            actor_name=actor.name,
+            no_think=no_think,
+        )
     return build_revision_actor_prompt(
         style,
         problem_text,
         previous_actor_response=previous_actor_response,
         critic_feedback=critic_feedback,
         actor_name=actor.name,
+        no_think=no_think,
     )
 
 
@@ -63,16 +70,18 @@ def build_simple_actor_prompt(
     previous_actor_response: str = "",
     critic_feedback: str = "",
     style: ReasoningStyle | None = None,
+    no_think: bool = True,
 ) -> str:
     """Build an Actor prompt when no AgentConfig is available."""
     problem_text = build_problem_text(sample, dataset_name)
     if round_num <= 0 or not previous_actor_response:
-        return build_initial_actor_prompt(style, problem_text)
+        return build_initial_actor_prompt(style, problem_text, no_think=no_think)
     return build_revision_actor_prompt(
         style,
         problem_text,
         previous_actor_response=previous_actor_response,
         critic_feedback=critic_feedback,
+        no_think=no_think,
     )
 
 
@@ -81,11 +90,18 @@ def build_critic_feedback_prompt(
     sample: dict[str, Any],
     dataset_name: str,
     actor_response: str,
+    no_think: bool = True,
 ) -> str:
     """Build a Critic prompt for one Actor response."""
     problem_text = build_problem_text(sample, dataset_name)
     skill = critic.error_specialty if isinstance(critic.error_specialty, CriticSkill) else None
-    return build_critic_prompt(skill, problem_text, actor_response, critic_name=critic.name)
+    return build_critic_prompt(
+        skill,
+        problem_text,
+        actor_response,
+        critic_name=critic.name,
+        no_think=no_think,
+    )
 
 
 def build_simple_critic_prompt(
@@ -93,12 +109,14 @@ def build_simple_critic_prompt(
     dataset_name: str,
     actor_response: str,
     skill: CriticSkill | None = None,
+    no_think: bool = True,
 ) -> str:
     """Build a Critic prompt when no AgentConfig is available."""
     return build_critic_prompt(
         skill,
         build_problem_text(sample, dataset_name),
         actor_response,
+        no_think=no_think,
     )
 
 
@@ -110,6 +128,7 @@ def build_guided_actor_prompt(
     previous_actor_response: str = "",
     critic_feedback: str = "",
     style: ReasoningStyle | None = None,
+    no_think: bool = True,
 ) -> str:
     """Build a natural guided Actor prompt for preference-pair generation."""
     problem_text = build_problem_text(sample, dataset_name)
@@ -119,12 +138,13 @@ def build_guided_actor_prompt(
     )
     guided_problem_text = f"{problem_text}\n\n{guide}".strip()
     if round_num <= 0:
-        return build_initial_actor_prompt(style, guided_problem_text)
+        return build_initial_actor_prompt(style, guided_problem_text, no_think=no_think)
     return build_revision_actor_prompt(
         style,
         guided_problem_text,
         previous_actor_response=previous_actor_response,
         critic_feedback=critic_feedback,
+        no_think=no_think,
     )
 
 
@@ -134,6 +154,7 @@ def build_guided_critic_prompt(
     actor_response: str,
     target_answer: str,
     skill: CriticSkill | None = None,
+    no_think: bool = True,
 ) -> str:
     """Build a guided Critic prompt for preference-pair generation."""
     problem_text = build_problem_text(sample, dataset_name)
@@ -141,4 +162,4 @@ def build_guided_critic_prompt(
         f"For this training rollout, evaluate whether the answer should be {target_answer}."
     )
     guided_problem_text = f"{problem_text}\n\n{guide}".strip()
-    return build_critic_prompt(skill, guided_problem_text, actor_response)
+    return build_critic_prompt(skill, guided_problem_text, actor_response, no_think=no_think)

@@ -36,6 +36,7 @@ from src.society.agent_registry import (
     resolve_critic_skill,
     ReasoningStyle,
 )
+from src.prompts.control_tokens import ensure_no_think, strip_no_think
 from src.prompts.critic_prompts import render_critic_judgement
 from src.prompts.prompt_builder import (
     build_critic_feedback_prompt,
@@ -71,14 +72,14 @@ ACTOR_STYLE_TRAINING_GUIDANCE = {
 def _style_condition_actor_prompt(prompt: str, style: ReasoningStyle) -> str:
     """Prefix an Actor prompt with the requested reasoning style."""
 
-    return (
-        "/no_think\n"
+    body = (
         f"You are Actor-{style.value}.\n"
         "Use this reasoning style naturally.\n"
         f"{ACTOR_STYLE_PROMPTS[style]}\n"
         f"{ACTOR_STYLE_TRAINING_GUIDANCE[style]}\n\n"
-        f"{prompt}"
+        f"{strip_no_think(prompt)}"
     )
+    return ensure_no_think(body)
 
 
 def _style_output_format(style: ReasoningStyle) -> str:
@@ -100,7 +101,12 @@ def _style_condition_actor_single_shot_prompt(
     sample: dict[str, Any],
     style: ReasoningStyle,
 ) -> str:
-    base_prompt = build_simple_actor_prompt(sample, dataset_name, style=style)
+    base_prompt = build_simple_actor_prompt(
+        sample,
+        dataset_name,
+        style=style,
+        no_think=False,
+    )
     return (
         _style_condition_actor_prompt(base_prompt, style)
         + "\n\n"
@@ -326,6 +332,7 @@ def society_alternating_train(
     request_timeout: int | float = 30,
     max_retries: int = 5,
     retry_delay: int | float = 5,
+    allow_skip_low_data: bool = False,
 ) -> SocietyTrainingResult:
     """
     Train N Actors + M Critics in alternating fashion.
@@ -367,6 +374,8 @@ def society_alternating_train(
         min_pairs_per_critic: Minimum selected DPO pairs required to train a critic.
         min_specialty_items: Minimum target-skill routed items required to activate a critic.
         min_specialty_ratio: Minimum target-skill share required to activate a critic.
+        allow_skip_low_data: If true, mark agents with insufficient pairs as skipped.
+            If false, save checkpoint state and fail without advancing the iteration.
 
     Returns:
         SocietyTrainingResult with checkpoint paths and metrics.
@@ -516,29 +525,41 @@ def society_alternating_train(
             preference_pairs = critic_pairs_cache.get(critic.name, [])
 
             if len(preference_pairs) < min_pairs_per_critic:
-                logger.warning(
-                    f"  Skipping {critic.name}: {len(preference_pairs)} pairs < "
+                reason = "below_min_pairs_per_critic"
+                message = (
+                    f"{critic.name}: {len(preference_pairs)} pairs < "
                     f"{min_pairs_per_critic} minimum"
                 )
+                logger.warning("  %s", message)
                 critic_paths[critic.name] = critic.lora_path or ""
                 metrics[f"critic_{critic.name}_iter{iteration}"] = {
-                    "status": "skipped",
+                    "status": "skipped_low_data" if allow_skip_low_data else "failed_low_data",
                     "pairs": len(preference_pairs),
-                    "reason": "below_min_pairs_per_critic",
+                    "reason": reason,
                     "min_pairs_per_critic": min_pairs_per_critic,
                     "critic_training_metrics": summarize_critic_training_pairs(preference_pairs),
                 }
-                phase_a_done.add(critic.name)
                 _save_checkpoint(ckpt_file, {
                     "iteration": iteration,
                     "actor_paths": actor_paths,
                     "critic_paths": critic_paths,
                     "metrics": metrics,
+                    "failed_agents": {
+                        **state.get("failed_agents", {}),
+                        critic.name: reason,
+                    } if not allow_skip_low_data else state.get("failed_agents", {}),
+                    "iteration_completed": False,
                     "phase_done": {
                         **phase_done,
-                        "phase_A": sorted(phase_a_done),
+                        "phase_A": sorted(phase_a_done | ({critic.name} if allow_skip_low_data else set())),
                     },
                 })
+                if not allow_skip_low_data:
+                    raise RuntimeError(
+                        f"Insufficient training pairs for {message}. "
+                        "Set allow_skip_low_data=true for flow-only runs."
+                    )
+                phase_a_done.add(critic.name)
                 continue
 
             critic_iter_dir = f"{output_base_dir}/critics/{critic.name}/iter_{iteration}"
@@ -572,16 +593,29 @@ def society_alternating_train(
                     "critic_training_metrics": summarize_critic_training_pairs(preference_pairs),
                 }
             else:
-                logger.warning(
-                    f"  DPO training failed for {critic.name}, "
-                    f"keeping previous LoRA path"
-                )
+                logger.warning("  DPO training failed for %s", critic.name)
                 metrics[f"critic_{critic.name}_iter{iteration}"] = {
                     "status": "failed",
                     "pairs": len(preference_pairs),
                     "path": critic_paths.get(critic.name, ""),
                     "critic_training_metrics": summarize_critic_training_pairs(preference_pairs),
                 }
+                _save_checkpoint(ckpt_file, {
+                    "iteration": iteration,
+                    "actor_paths": actor_paths,
+                    "critic_paths": critic_paths,
+                    "metrics": metrics,
+                    "failed_agents": {
+                        **state.get("failed_agents", {}),
+                        critic.name: "dpo_training_failed",
+                    },
+                    "iteration_completed": False,
+                    "phase_done": {
+                        **phase_done,
+                        "phase_A": sorted(phase_a_done),
+                    },
+                })
+                raise RuntimeError(f"DPO training failed for critic {critic.name}")
 
             # Per-critic checkpoint
             phase_a_done.add(critic.name)
@@ -590,12 +624,10 @@ def society_alternating_train(
                 "actor_paths": actor_paths,
                 "critic_paths": critic_paths,
                 "metrics": metrics,
+                "iteration_completed": False,
                 "phase_done": {
                     **phase_done,
-                    "phase_A": [
-                        n for n, p in critic_paths.items()
-                        if metrics.get(f"critic_{n}_iter{iteration}", {}).get("status") == "completed"
-                    ],
+                    "phase_A": sorted(phase_a_done),
                 },
             })
 
@@ -706,20 +738,35 @@ def society_alternating_train(
             preference_pairs = actor_pairs_cache.get(actor.name, [])
 
             if not preference_pairs:
-                logger.warning(f"  No preference pairs for {actor.name}, skipping")
-                metrics[f"actor_{actor.name}_iter{iteration}"] = {"status": "skipped", "pairs": 0}
-                phase_b_done.add(actor.name)
+                reason = "no_preference_pairs"
+                logger.warning("  No preference pairs for %s", actor.name)
+                metrics[f"actor_{actor.name}_iter{iteration}"] = {
+                    "status": "skipped_low_data" if allow_skip_low_data else "failed_no_pairs",
+                    "pairs": 0,
+                    "reason": reason,
+                }
                 _save_checkpoint(ckpt_file, {
                     "iteration": iteration,
                     "actor_paths": actor_paths,
                     "critic_paths": critic_paths,
                     "metrics": metrics,
+                    "failed_agents": {
+                        **state.get("failed_agents", {}),
+                        actor.name: reason,
+                    } if not allow_skip_low_data else state.get("failed_agents", {}),
+                    "iteration_completed": False,
                     "phase_done": {
                         **phase_done,
                         "phase_A": sorted(phase_a_done),
-                        "phase_B": sorted(phase_b_done),
+                        "phase_B": sorted(phase_b_done | ({actor.name} if allow_skip_low_data else set())),
                     },
                 })
+                if not allow_skip_low_data:
+                    raise RuntimeError(
+                        f"No preference pairs for actor {actor.name}. "
+                        "Set allow_skip_low_data=true for flow-only runs."
+                    )
+                phase_b_done.add(actor.name)
                 continue
 
             actor_iter_dir = f"{output_base_dir}/actors/{actor.name}/iter_{iteration}"
@@ -753,15 +800,29 @@ def society_alternating_train(
                     "path": checkpoint_path,
                 }
             else:
-                logger.warning(
-                    f"  DPO training failed for {actor.name}, "
-                    f"keeping previous LoRA path"
-                )
+                logger.warning("  DPO training failed for %s", actor.name)
                 metrics[f"actor_{actor.name}_iter{iteration}"] = {
                     "status": "failed",
                     "pairs": len(preference_pairs),
                     "path": actor_paths.get(actor.name, ""),
                 }
+                _save_checkpoint(ckpt_file, {
+                    "iteration": iteration,
+                    "actor_paths": actor_paths,
+                    "critic_paths": critic_paths,
+                    "metrics": metrics,
+                    "failed_agents": {
+                        **state.get("failed_agents", {}),
+                        actor.name: "dpo_training_failed",
+                    },
+                    "iteration_completed": False,
+                    "phase_done": {
+                        **phase_done,
+                        "phase_A": sorted(phase_a_done),
+                        "phase_B": sorted(phase_b_done),
+                    },
+                })
+                raise RuntimeError(f"DPO training failed for actor {actor.name}")
 
             # Per-actor checkpoint
             phase_b_done.add(actor.name)
@@ -770,13 +831,11 @@ def society_alternating_train(
                 "actor_paths": actor_paths,
                 "critic_paths": critic_paths,
                 "metrics": metrics,
+                "iteration_completed": False,
                 "phase_done": {
                     **phase_done,
                     "phase_A": sorted(phase_a_done),
-                    "phase_B": [
-                        n for n, p in actor_paths.items()
-                        if metrics.get(f"actor_{n}_iter{iteration}", {}).get("status") == "completed"
-                    ],
+                    "phase_B": sorted(phase_b_done),
                 },
             })
 
@@ -796,6 +855,8 @@ def society_alternating_train(
             "critic_paths": critic_paths,
             "metrics": metrics,
             "phase_done": {},
+            "failed_agents": {},
+            "iteration_completed": True,
         })
 
     # Update registry with new LoRA paths (only if training succeeded)
@@ -1445,6 +1506,7 @@ def _generate_actor_pairs_pairwise(
             target_style = actor.reasoning_style
             prompt_style = target_style.value
             min_conf = float(min_style_confidence)
+            gate_counts: Counter[str] = Counter({"raw": len(raw_pairs)})
             for p in raw_pairs:
                 sample = p["sample"]
                 question = sample.get("question", "")
@@ -1463,18 +1525,28 @@ def _generate_actor_pairs_pairwise(
                         normalize_answer(chosen_answer or "", task_type)
                         == normalize_answer(correct_answer, task_type)
                     )
+                if is_correct:
+                    gate_counts["correct"] += 1
+
+                trainable = is_trainable_actor_response(chosen, task_type)
+                if trainable:
+                    gate_counts["trainable"] += 1
 
                 result = style_cache.get(key)
                 classified_style = result.get("style") if result else None
                 style_confidence = float(result.get("confidence", 0.0)) if result else 0.0
-                accepted_for_actor = (
-                    is_correct
-                    and prompt_style == target_style.value
-                    and classified_style == target_style
-                    and is_trainable_actor_response(chosen, task_type)
-                    and style_confidence >= min_conf
-                )
+                style_match = classified_style == target_style
+                style_verified = style_match and style_confidence >= min_conf
+                if style_match:
+                    gate_counts["style_match"] += 1
+                if style_confidence >= min_conf:
+                    gate_counts["confidence_pass"] += 1
+                if style_verified:
+                    gate_counts["style_verified"] += 1
+                accepted_for_actor = is_correct and trainable
                 if accepted_for_actor:
+                    pair_source = "strict" if style_verified else "prompted_fallback"
+                    gate_counts[pair_source] += 1
                     preference_pairs.append({
                         "sample": sample,
                         "chosen": chosen,
@@ -1482,8 +1554,16 @@ def _generate_actor_pairs_pairwise(
                         "metadata": {
                             "style": target_style.value,
                             "prompted_style": prompt_style,
-                            "classified_style": target_style.value,
+                            "classified_style": (
+                                classified_style.value
+                                if isinstance(classified_style, ReasoningStyle)
+                                else str(classified_style or "")
+                            ),
                             "style_confidence": style_confidence,
+                            "style_match": style_match,
+                            "style_verified": style_verified,
+                            "style_weight": style_confidence if style_match else 0.3,
+                            "pair_source": pair_source,
                             "is_correct": True,
                             "chosen_answer": chosen_answer,
                             "accepted_for_actor": True,
@@ -1495,7 +1575,8 @@ def _generate_actor_pairs_pairwise(
 
         logger.info(
             f"  [{actor.name}] {len(preference_pairs)}/{len(raw_pairs)} pairs "
-            f"matched style '{actor.reasoning_style.value}'"
+            f"accepted for style '{actor.reasoning_style.value}' "
+            f"(gates: {dict(gate_counts)})"
         )
 
         if _owns_engine and engine is not None:

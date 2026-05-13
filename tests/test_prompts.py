@@ -2,6 +2,7 @@
 
 from src.prompts.actor_prompts import build_initial_actor_prompt, build_revision_actor_prompt
 from src.prompts.critic_prompts import build_critic_prompt
+from src.prompts.control_tokens import ensure_no_think
 from src.prompts.prompt_builder import (
     build_guided_actor_prompt,
     build_guided_critic_prompt,
@@ -81,6 +82,7 @@ def test_simple_actor_prompt_applies_style_and_options():
         style=ReasoningStyle.EVIDENCE,
     )
 
+    assert prompt.startswith("/no_think\n")
     assert "Actor-evidence" in prompt
     assert "Options:" in prompt
     assert "The final result is <answer>." in prompt
@@ -94,6 +96,7 @@ def test_guided_actor_prompt_keeps_natural_protocol():
         style=ReasoningStyle.DIRECT,
     )
 
+    assert prompt.startswith("/no_think\n")
     assert "reason toward the answer Yes" in prompt
     assert "The final result is <answer>." in prompt
     assert prompt.endswith("The final result is <answer>.")
@@ -109,6 +112,7 @@ def test_guided_critic_prompt_keeps_judgement_protocol_at_end():
         skill=CriticSkill.VERIFICATION,
     )
 
+    assert prompt.startswith("/no_think\n")
     assert "evaluate whether the answer should be Yes" in prompt
     assert "Judgement:" in prompt
     assert prompt.endswith("Confidence: 0.0-1.0")
@@ -137,6 +141,13 @@ def test_simple_critic_prompt_includes_actor_response():
         skill=CriticSkill.VERIFICATION,
     )
 
+    assert prompt.startswith("/no_think\n")
     assert "Actor response:" in prompt
     assert "The final result is Yes." in prompt
     assert "Critic-verification" in prompt
+
+
+def test_control_token_helper_is_idempotent():
+    prompt = ensure_no_think("/no_think\n/no_think\nQuestion?")
+
+    assert prompt == "/no_think\nQuestion?"

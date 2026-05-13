@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from src.prompts.control_tokens import ensure_no_think
 from src.society.agent_registry import CriticSkill
 
 
@@ -50,9 +51,10 @@ def build_critic_prompt(
     problem_text: str,
     actor_response: str,
     critic_name: str = "",
+    no_think: bool = False,
 ) -> str:
     """Build a natural Critic prompt."""
-    return f"""{critic_role_header(skill, critic_name)}
+    body = f"""{critic_role_header(skill, critic_name)}
 
 Your role is to help the actor improve its answer.
 Read the question, the options or context, and the actor's response.
@@ -70,6 +72,7 @@ Actor response:
 Now provide your critique.
 
 {JUDGEMENT_INSTRUCTION}""".strip()
+    return ensure_no_think(body, enabled=no_think)
 
 
 def render_critic_judgement(

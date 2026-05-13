@@ -227,6 +227,9 @@ def build_per_response_labels(traj: dict[str, Any]) -> list[dict[str, Any]]:
             "error_profile": None,
             "classification_source": None,
             "style_match": False,
+            "trainable_for_actor": False,
+            "style_verified": False,
+            "style_weight": 0.0,
             "accepted_for_actor": False,
         })
     return labels
@@ -237,15 +240,19 @@ def update_actor_acceptance(label: dict[str, Any], args: Any) -> None:
     prompted_style = str(label.get("prompted_style") or "")
     primary_style = str(label.get("primary_style") or "")
     task_type = str(label.get("task_type") or "multiple_choice")
+    confidence = float(label.get("reasoning_style_confidence", 0.0) or 0.0)
+    min_confidence = float(getattr(args, "min_style_confidence", 0.65))
     style_match = bool(prompted_style and primary_style == prompted_style)
-    label["style_match"] = style_match
-    label["accepted_for_actor"] = (
-        bool(label.get("is_correct"))
-        and style_match
-        and is_trainable_actor_response(label.get("response", ""), task_type)
-        and float(label.get("reasoning_style_confidence", 0.0) or 0.0)
-        >= float(getattr(args, "min_style_confidence", 0.65))
+    trainable = bool(label.get("is_correct")) and is_trainable_actor_response(
+        label.get("response", ""),
+        task_type,
     )
+    style_verified = style_match and confidence >= min_confidence
+    label["style_match"] = style_match
+    label["trainable_for_actor"] = trainable
+    label["style_verified"] = style_verified
+    label["style_weight"] = confidence if style_match else 0.3
+    label["accepted_for_actor"] = trainable
 
 
 def _choices_text(sample: dict[str, Any]) -> str:
@@ -372,6 +379,12 @@ def aggregate_result(
         ),
         "num_responses": len(labels),
         "num_style_match": sum(1 for label in labels if label.get("style_match")),
+        "num_trainable_for_actor": sum(
+            1 for label in labels if label.get("trainable_for_actor")
+        ),
+        "num_style_verified": sum(
+            1 for label in labels if label.get("style_verified")
+        ),
         "num_accepted_for_actor": sum(
             1 for label in labels if label.get("accepted_for_actor")
         ),
@@ -436,11 +449,14 @@ def build_reports(
 
     total_labels = 0
     style_match_dist: Counter[str] = Counter()
+    style_verified_dist: Counter[str] = Counter()
+    trainable_style_dist: Counter[str] = Counter()
     accepted_style_dist: Counter[str] = Counter()
     # Confusion matrix: prompted_style -> classified_style -> count
     confusion: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     # prompted_style -> total classified (for match rate denominator)
     prompted_classified: Counter[str] = Counter()
+    gate_retention: dict[str, Counter[str]] = defaultdict(Counter)
     warnings: list[str] = []
 
     for result in results:
@@ -459,15 +475,37 @@ def build_reports(
             fmt = label.get("format_status") or "unclassified"
             format_dist[fmt] += 1
             per_subject[subject]["formats"][fmt] += 1
+            prompted = str(label.get("prompted_style") or "unknown")
+            gate_retention[prompted]["total"] += 1
+            if label.get("answer") is not None:
+                gate_retention[prompted]["parseable"] += 1
+            if label.get("is_correct"):
+                gate_retention[prompted]["correct"] += 1
+            if label.get("trainable_for_actor"):
+                gate_retention[prompted]["trainable"] += 1
+            if label.get("style_match"):
+                gate_retention[prompted]["style_match"] += 1
+            if (
+                float(label.get("reasoning_style_confidence", 0.0) or 0.0)
+                >= min_style_confidence
+            ):
+                gate_retention[prompted]["confidence_pass"] += 1
+            if label.get("style_verified"):
+                gate_retention[prompted]["style_verified"] += 1
+            if label.get("accepted_for_actor"):
+                gate_retention[prompted]["accepted_for_actor"] += 1
             if label.get("primary_style"):
                 style = label["primary_style"]
                 style_dist[style] += 1
                 per_subject[subject]["styles"][style] += 1
                 if label.get("style_match"):
                     style_match_dist[style] += 1
+                if label.get("trainable_for_actor"):
+                    trainable_style_dist[style] += 1
+                if label.get("style_verified"):
+                    style_verified_dist[style] += 1
                 if label.get("accepted_for_actor"):
                     accepted_style_dist[style] += 1
-                prompted = label.get("prompted_style", "")
                 if prompted:
                     confusion[prompted][style] += 1
                     prompted_classified[prompted] += 1
@@ -479,6 +517,9 @@ def build_reports(
                     "agent_name": label.get("agent_name", ""),
                     "prompted_style": label.get("prompted_style", ""),
                     "style_match": label.get("style_match", False),
+                    "trainable_for_actor": label.get("trainable_for_actor", False),
+                    "style_verified": label.get("style_verified", False),
+                    "style_weight": label.get("style_weight", 0.0),
                     "accepted_for_actor": label.get("accepted_for_actor", False),
                     "is_correct": label.get("is_correct", False),
                 })
@@ -542,12 +583,18 @@ def build_reports(
         "schema_version": 3,
         "style_distribution": dict(style_dist),
         "style_match_distribution": dict(style_match_dist),
+        "trainable_for_actor_distribution": dict(trainable_style_dist),
+        "style_verified_distribution": dict(style_verified_dist),
         "accepted_for_actor_distribution": dict(accepted_style_dist),
         "error_profile_distribution": dict(profile_dist),
         "format_status_distribution": dict(format_dist),
         "min_style_confidence": min_style_confidence,
         "prompted_vs_classified_confusion": confusion_matrix,
         "style_match_rate_by_prompted_style": style_match_rate_by_prompted,
+        "gate_retention_by_prompted_style": {
+            style: dict(counts)
+            for style, counts in sorted(gate_retention.items())
+        },
         "per_subject_distribution": {
             subject: {
                 "styles": dict(counters["styles"]),

@@ -61,6 +61,8 @@ def test_actor_pairs_use_only_accepted_target_style_chosen():
                 "format_status": "valid",
                 "prompted_style": "evidence",
                 "style_match": True,
+                "trainable_for_actor": True,
+                "style_verified": True,
                 "accepted_for_actor": True,
             },
             {
@@ -82,6 +84,8 @@ def test_actor_pairs_use_only_accepted_target_style_chosen():
                 "format_status": "valid",
                 "prompted_style": "direct",
                 "style_match": True,
+                "trainable_for_actor": True,
+                "style_verified": True,
                 "accepted_for_actor": True,
             },
             {
@@ -94,6 +98,8 @@ def test_actor_pairs_use_only_accepted_target_style_chosen():
                 "format_status": "answer_only",
                 "prompted_style": "evidence",
                 "style_match": True,
+                "trainable_for_actor": False,
+                "style_verified": True,
                 "accepted_for_actor": False,
             },
         ],
@@ -114,10 +120,11 @@ def test_actor_pairs_use_only_accepted_target_style_chosen():
 
     assert {p["metadata"]["pair_type"] for p in pairs} == {"correctness", "style"}
     assert all(p["metadata"]["chosen_response_id"] == "chosen" for p in pairs)
-    assert metrics["candidate_counts"] == {
-        "correctness": 1,
-        "style": 2,
-    }
+    assert metrics["candidate_counts"]["correctness"] == 1
+    assert metrics["candidate_counts"]["style"] == 2
+    assert metrics["candidate_counts"]["strict_style_correct"] == 1
+    assert metrics["candidate_counts"]["prompted_style_correct_fallback"] == 0
+    assert metrics["candidate_counts"]["selected_pairs"] == 2
 
 
 def test_society_actor_style_prompt_wrapper_conditions_generation():
@@ -183,13 +190,65 @@ def test_society_actor_dpo_prompt_is_style_conditioned(monkeypatch, tmp_path):
 
     prompt = captured["dataset"][0]["prompt"]
     assert checkpoint == str(tmp_path / "adapter")
+    assert prompt.startswith("/no_think\n")
+    assert prompt.count("/no_think") == 1
     assert "You are Actor-direct" in prompt
     assert "shortest sufficient reasoning" in prompt
     assert "The final result is <answer>." in prompt
     assert "FINAL_ANSWER" not in prompt
 
 
-def test_society_actor_acceptance_requires_style_confidence_and_correctness(monkeypatch):
+def test_society_training_fails_low_data_without_advancing_checkpoint(monkeypatch, tmp_path):
+    from src.society import society_trainer
+    from src.society.agent_registry import (
+        AgentConfig,
+        AgentRegistry,
+        AgentRole,
+        CriticSkill,
+        ReasoningStyle,
+    )
+
+    monkeypatch.setattr(society_trainer, "_generate_critic_pairs_pairwise", lambda **kwargs: [])
+    monkeypatch.setattr(society_trainer, "_cleanup_gpu", lambda: None)
+
+    registry = AgentRegistry(base_model_path="/models/base")
+    registry.register(AgentConfig(
+        name="actor_direct",
+        role=AgentRole.ACTOR,
+        model_path="/models/base",
+        reasoning_style=ReasoningStyle.DIRECT,
+    ))
+    registry.register(AgentConfig(
+        name="critic_reasoning",
+        role=AgentRole.CRITIC,
+        model_path="/models/base",
+        error_specialty=CriticSkill.REASONING,
+    ))
+    checkpoint_dir = tmp_path / "checkpoints"
+
+    import pytest
+
+    with pytest.raises(RuntimeError, match="Insufficient training pairs"):
+        society_trainer.society_alternating_train(
+            registry=registry,
+            dataset=[{"question": "Q", "answer": "A", "task_type": "multiple_choice"}],
+            dataset_name="mmlu",
+            output_base_dir=str(tmp_path / "society"),
+            checkpoint_dir=str(checkpoint_dir),
+            num_iterations=1,
+            min_pairs_per_critic=1,
+            max_samples=1,
+        )
+
+    import json
+
+    state = json.loads((checkpoint_dir / "society_training_state.json").read_text())
+    assert state["iteration"] == 0
+    assert state["iteration_completed"] is False
+    assert state["failed_agents"] == {"critic_reasoning": "below_min_pairs_per_critic"}
+
+
+def test_society_actor_acceptance_allows_prompted_fallback_but_requires_quality(monkeypatch):
     from src.society import society_trainer
     from src.society.agent_registry import (
         AgentConfig,
@@ -220,7 +279,10 @@ def test_society_actor_acceptance_requires_style_confidence_and_correctness(monk
         {
             "sample": sample,
             "actor_candidate": {
-                "chosen": "Low confidence evidence.\nThe final result is A.",
+                "chosen": (
+                    "Low confidence evidence still names the relevant clue from the question.\n"
+                    "The final result is A."
+                ),
                 "rejected": "Wrong reasoning.\nThe final result is B.",
             },
             "critic_candidate": {"chosen": "critic chosen", "rejected": "critic rejected"},
@@ -384,12 +446,19 @@ def test_society_actor_acceptance_requires_style_confidence_and_correctness(monk
         min_style_confidence=0.65,
     )
 
-    assert len(pairs) == 1
+    assert len(pairs) == 2
     chosen_texts = {pair["chosen"] for pair in pairs}
     assert "The question states the key evidence.\nThe final result is A." in chosen_texts
+    assert (
+        "Low confidence evidence still names the relevant clue from the question.\n"
+        "The final result is A."
+    ) in chosen_texts
     assert "A" not in chosen_texts
     assert all(pair["metadata"]["prompted_style"] == "evidence" for pair in pairs)
     assert all(pair["metadata"]["classified_style"] == "evidence" for pair in pairs)
     assert all("format_status" not in pair["metadata"] for pair in pairs)
-    assert all(pair["metadata"]["style_confidence"] >= 0.65 for pair in pairs)
+    assert {pair["metadata"]["pair_source"] for pair in pairs} == {
+        "strict",
+        "prompted_fallback",
+    }
     assert all(pair["metadata"]["is_correct"] is True for pair in pairs)

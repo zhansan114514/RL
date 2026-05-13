@@ -60,7 +60,7 @@ step02_classify:
   max_workers: 8
   reasoning_styles: ["direct", "evidence", "elimination"]
   error_dimensions: ["reasoning", "knowledge", "grounding", "verification"]
-  min_style_confidence: 0.60
+  min_style_confidence: 0.30
   min_error_confidence: 0.5
 
 # Phase 3: Actor diversification
@@ -95,7 +95,7 @@ step04_diversify_critics:
   max_delib_samples: 30
   num_rounds: 2
   num_simulations: 1
-  max_tokens: 192
+  max_tokens: 384
   reward_threshold: 0.0
   lora_r: 64
   lora_alpha: 128
@@ -131,7 +131,7 @@ step05_train_society:
   num_rounds: 1
   num_simulations: 1
   max_samples: 12
-  trajectory_max_tokens: 192
+  trajectory_max_tokens: 384
   reward_threshold: 0.0
   lora_r: 64
   lora_alpha: 128
@@ -148,9 +148,10 @@ step05_train_society:
   calibration_ratio: 0.15
   checkpoint_dir: "output/society_mmlu_smoke_n50_style3_qwen3/checkpoints"
   actor_temperature: 0.7
-  actor_max_tokens: 192
-  critic_max_tokens: 192
-  min_style_confidence: 0.60
+  actor_max_tokens: 384
+  critic_max_tokens: 384
+  min_style_confidence: 0.30
+  allow_skip_low_data: true
   strict_classification: true
   max_classification_failure_rate: 0.0
   max_classification_workers: 4
@@ -175,8 +176,9 @@ step06_evaluate:
       gpu_memory_utilization: 0.80
   max_samples: 10
   num_rounds: 2
-  max_tokens: 128
+  max_tokens: 512
   temperature: 0.0
+  eval_batch_size: 1
   run_ablations: true
   num_samples_for_qualitative: 5
   max_lora_rank: 256

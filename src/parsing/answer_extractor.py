@@ -11,6 +11,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal, Optional
 
+from src.parsing.think_blocks import strip_think_blocks
+
 
 AnswerSource = Literal[
     "final_result",
@@ -106,6 +108,9 @@ TAIL_CLAIM_MATH = [
 def extract_answer(text: str, task_type: str = "yes_no") -> ExtractedAnswer:
     """Extract an answer token with source and parse-confidence metadata."""
     if not text or not text.strip():
+        return _none()
+    text = strip_think_blocks(text)
+    if not text:
         return _none()
 
     if task_type == "multiple_choice":

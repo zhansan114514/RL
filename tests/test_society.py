@@ -85,6 +85,36 @@ Confidence: 0.82""",
     assert feedback.usable_for_consensus
 
 
+def test_build_critic_feedback_ignores_think_block_and_final_judgement_header():
+    critic = AgentConfig(
+        name="critic_verification",
+        role=AgentRole.CRITIC,
+        model_path="base",
+        error_specialty=CriticSkill.VERIFICATION,
+    )
+
+    feedback = build_critic_feedback(
+        critic,
+        """<think>
+Answer correct: yes
+Suggested answer: A
+Confidence: 1.0
+</think>
+The actor's final answer conflicts with the option mapping.
+
+Final judgement:
+Answer correct: no
+Suggested answer: B
+Confidence: 0.64""",
+        task_type="multiple_choice",
+    )
+
+    assert feedback.answer_correct == "no"
+    assert feedback.suggested_answer == "B"
+    assert feedback.confidence == 0.64
+    assert feedback.critique.startswith("The actor's final answer")
+
+
 def test_router_selects_natural_feedback_without_schema_filter():
     low_no_conf = CriticFeedback(
         critic_name="critic_a",

@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 from src.algorithms.reward import extract_answer, math_answers_equal, normalize_answer
+from src.prompts.control_tokens import ensure_no_think
 from src.prompts.prompt_builder import build_guided_actor_prompt
 from src.society.agent_registry import ACTOR_STYLE_PROMPTS, ReasoningStyle
 from src.society.data_classifier import (
@@ -140,9 +141,9 @@ def _build_style_generation_prompt(
         dataset_name,
         target_answer=sample.get("answer", ""),
         style=style,
+        no_think=False,
     )
-    return (
-        "/no_think\n"
+    body = (
         f"{ACTOR_STYLE_PROMPTS[style]}\n\n"
         "Generate one correct response for training an Actor with this style.\n"
         "Reason naturally and end with exactly one sentence of the form: "
@@ -152,6 +153,7 @@ def _build_style_generation_prompt(
         f"Gold answer for this augmentation task: {sample.get('answer', '')}\n"
         "Return only the model response."
     )
+    return ensure_no_think(body)
 
 
 def _response_answer_is_correct(response: str, sample: dict[str, Any]) -> bool:

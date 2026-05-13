@@ -80,6 +80,22 @@ class TestExtractAnswer:
         assert result.answer == "B"
         assert result.source == "final_result"
 
+    def test_think_block_is_ignored_before_answer_extraction(self):
+        result = extract_answer_with_source(
+            "<think>The final result is A.</think>\nReasoning.\nThe final result is C.",
+            task_type="multiple_choice",
+        )
+        assert result.answer == "C"
+        assert result.source == "final_result"
+
+    def test_unterminated_think_block_does_not_produce_answer(self):
+        result = extract_answer_with_source(
+            "<think>The answer is A and then the output was truncated",
+            task_type="multiple_choice",
+        )
+        assert result.answer is None
+        assert result.source == "none"
+
     def test_tail_claim_extraction_source(self):
         result = extract_answer_with_source(
             "Therefore, the answer is B.",

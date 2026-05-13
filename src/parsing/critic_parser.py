@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 
+from src.parsing.think_blocks import strip_think_blocks
+
 
 AnswerCorrect = Literal["yes", "no", "uncertain", "unknown"]
 
@@ -44,12 +46,14 @@ CONFIDENCE_PATTERNS = [
     re.compile(r"(?i)\[\s*confidence\s*[:=]\s*([01](?:\.\d+)?)\s*\]"),
 ]
 
-JUDGEMENT_HEADER = re.compile(r"(?im)^\s*judge?ment\s*:\s*$")
+JUDGEMENT_HEADER = re.compile(
+    r"(?im)^\s*(?:final\s+)?judge?ment\s*:?\s*$|^\s*evaluation\s*:?\s*$"
+)
 
 
 def parse_critic_response(text: str, task_type: str = "multiple_choice") -> ParsedCritic:
     """Parse a Critic response without requiring a rigid schema."""
-    raw = text or ""
+    raw = strip_think_blocks(text or "")
     judgement_block = find_judgement_block(raw)
     target = judgement_block if judgement_block is not None else get_tail(raw, n=10)
 

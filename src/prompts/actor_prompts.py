@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from src.prompts.control_tokens import ensure_no_think
 from src.society.agent_registry import ReasoningStyle
 
 
@@ -55,13 +56,15 @@ def build_initial_actor_prompt(
     style: ReasoningStyle | None,
     problem_text: str,
     actor_name: str = "",
+    no_think: bool = False,
 ) -> str:
     """Build an initial natural Actor prompt."""
-    return (
+    body = (
         f"{actor_role_header(style, actor_name)}\n\n"
         f"{problem_text.strip()}\n\n"
         f"{FINAL_RESULT_INSTRUCTION}"
     ).strip()
+    return ensure_no_think(body, enabled=no_think)
 
 
 def build_revision_actor_prompt(
@@ -70,9 +73,10 @@ def build_revision_actor_prompt(
     previous_actor_response: str,
     critic_feedback: str,
     actor_name: str = "",
+    no_think: bool = False,
 ) -> str:
     """Build a revision prompt that exposes only natural Critic feedback."""
-    return (
+    body = (
         f"{actor_role_header(style, actor_name)}\n\n"
         f"{problem_text.strip()}\n\n"
         "You previously gave this response:\n"
@@ -81,3 +85,4 @@ def build_revision_actor_prompt(
         f"{critic_feedback.strip() if critic_feedback.strip() else 'No critic feedback was selected.'}\n\n"
         f"{REVISION_FINAL_RESULT_INSTRUCTION}"
     ).strip()
+    return ensure_no_think(body, enabled=no_think)

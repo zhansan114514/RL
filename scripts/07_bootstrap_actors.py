@@ -20,6 +20,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from _utils import setup_logging
+from src.prompts.control_tokens import ensure_no_think
 from src.society.agent_registry import ACTOR_STYLE_PROMPTS, ReasoningStyle
 from src.utils.config import ConfigManager
 
@@ -110,9 +111,13 @@ def build_style_prompt(
 ) -> str:
     from src.prompts.prompt_builder import build_simple_actor_prompt
 
-    base_prompt = build_simple_actor_prompt(sample, dataset_name, style=style)
+    base_prompt = build_simple_actor_prompt(
+        sample,
+        dataset_name,
+        style=style,
+        no_think=False,
+    )
     prompt = (
-        "/no_think\n"
         f"You are Actor-{style.value}.\n"
         "Use this reasoning style naturally.\n"
         f"{ACTOR_STYLE_PROMPTS[style]}\n"
@@ -122,7 +127,7 @@ def build_style_prompt(
         f"{base_prompt}\n\n"
         f"{style_output_format(style)}"
     )
-    return prompt
+    return ensure_no_think(prompt)
 
 
 def style_output_format(style: ReasoningStyle) -> str:

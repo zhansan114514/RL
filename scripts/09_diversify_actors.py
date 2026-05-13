@@ -15,6 +15,7 @@ from typing import Any
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from _utils import setup_logging
+from src.prompts.control_tokens import ensure_no_think
 from src.prompts.prompt_builder import build_simple_actor_prompt
 from src.society.agent_registry import ReasoningStyle
 from src.society.augmentation import (
@@ -100,6 +101,9 @@ def build_response_index(
         sample = result.get("sample", {})
         for label in result.get("per_response_labels", []):
             response_text = label.get("response", "")
+            accepted = bool(label.get("accepted_for_actor"))
+            trainable = bool(label.get("trainable_for_actor", accepted))
+            style_verified = bool(label.get("style_verified", accepted and label.get("style_match")))
             by_sample[sample_id].append({
                 "sample_id": sample_id,
                 "response_id": label.get("response_id", ""),
@@ -111,7 +115,10 @@ def build_response_index(
                 "style_confidence": label.get("reasoning_style_confidence", 0.0),
                 "prompted_style": label.get("prompted_style", ""),
                 "style_match": bool(label.get("style_match")),
-                "accepted_for_actor": bool(label.get("accepted_for_actor")),
+                "trainable_for_actor": trainable,
+                "style_verified": style_verified,
+                "style_weight": label.get("style_weight", label.get("reasoning_style_confidence", 0.0)),
+                "accepted_for_actor": accepted or trainable,
                 "generation_index": label.get("generation_index"),
                 "agent_name": label.get("agent_name", ""),
                 "synthetic": False,
@@ -150,17 +157,32 @@ def build_preference_pairs_for_style(
 
     correctness_candidates = []
     style_candidates = []
+    strict_count = 0
+    fallback_count = 0
+    incorrect_count = 0
 
     for sample_id, responses in by_sample.items():
-        style_correct = [
+        strict_style_correct = [
             r for r in responses
             if (
                 r["is_correct"]
                 and r.get("accepted_for_actor")
                 and r.get("prompted_style") == target_style
                 and r.get("primary_style") == target_style
+                and r.get("style_verified")
             )
         ]
+        strict_ids = {r.get("response_id", "") for r in strict_style_correct}
+        prompted_style_correct = [
+            r for r in responses
+            if (
+                r["is_correct"]
+                and r.get("accepted_for_actor")
+                and r.get("prompted_style") == target_style
+                and r.get("response_id", "") not in strict_ids
+            )
+        ]
+        style_correct = strict_style_correct + prompted_style_correct
         style_correct_ids = {r.get("response_id", "") for r in style_correct}
         other_style_correct = [
             r for r in responses
@@ -176,8 +198,11 @@ def build_preference_pairs_for_style(
             )
         ]
         incorrect = [r for r in responses if not r["is_correct"]]
+        strict_count += len(strict_style_correct)
+        fallback_count += len(prompted_style_correct)
+        incorrect_count += len(incorrect)
 
-        for chosen in style_correct:
+        for chosen in strict_style_correct:
             for rejected in incorrect:
                 if rejected["response_id"] == chosen["response_id"]:
                     continue
@@ -186,6 +211,20 @@ def build_preference_pairs_for_style(
                 if rejected["response_id"] == chosen["response_id"]:
                     continue
                 style_candidates.append(_make_pair(chosen, rejected, "style"))
+
+        for chosen in prompted_style_correct:
+            for rejected in incorrect:
+                if rejected["response_id"] == chosen["response_id"]:
+                    continue
+                correctness_candidates.append(
+                    _make_pair(chosen, rejected, "prompted_fallback_correctness")
+                )
+            for rejected in other_style_correct:
+                if rejected["response_id"] == chosen["response_id"]:
+                    continue
+                style_candidates.append(
+                    _make_pair(chosen, rejected, "prompted_fallback_style")
+                )
 
     pairs: list[dict[str, Any]] = []
     per_sample_counter: Counter[str] = Counter()
@@ -237,6 +276,10 @@ def build_preference_pairs_for_style(
         "candidate_counts": {
             "correctness": len(correctness_candidates),
             "style": len(style_candidates),
+            "strict_style_correct": strict_count,
+            "prompted_style_correct_fallback": fallback_count,
+            "incorrect": incorrect_count,
+            "selected_pairs": len(pairs),
         },
     })
     return pairs, metrics
@@ -291,10 +334,13 @@ def augment_pairs_if_needed(
                 "chosen_response_id": f"synthetic_{target_style}_{idx}",
                 "rejected_response_id": f"synthetic_rejected_{target_style}_{idx}",
                 "pair_type": "synthetic_correctness",
+                "pair_source": "synthetic",
                 "synthetic": True,
                 "chosen_prompted_style": target_style,
                 "chosen_primary_style": target_style,
                 "chosen_accepted_for_actor": True,
+                "chosen_style_verified": True,
+                "chosen_style_weight": item.get("style_confidence", 0.0),
                 "style_confidence": item.get("style_confidence", 0.0),
             },
         })
@@ -318,20 +364,26 @@ def _pair_quotas(target_pairs: int, mix: dict[str, float]) -> dict[str, int]:
 
 
 def _make_pair(chosen: dict[str, Any], rejected: dict[str, Any], pair_type: str) -> dict[str, Any]:
+    pair_source = "strict" if not pair_type.startswith("prompted_fallback") else "prompted_fallback"
     return {
         "sample": chosen["sample"],
         "chosen": chosen["response"],
         "rejected": rejected["response"],
         "metadata": {
-            "thinking_style": chosen.get("primary_style"),
+            "thinking_style": chosen.get("prompted_style") or chosen.get("primary_style"),
+            "target_style": chosen.get("prompted_style", ""),
             "sample_id": chosen.get("sample_id", ""),
             "chosen_response_id": chosen.get("response_id", ""),
             "rejected_response_id": rejected.get("response_id", ""),
             "pair_type": pair_type,
+            "pair_source": pair_source,
             "synthetic": bool(chosen.get("synthetic") or rejected.get("synthetic")),
             "chosen_prompted_style": chosen.get("prompted_style", ""),
             "chosen_primary_style": chosen.get("primary_style", ""),
             "chosen_style_confidence": chosen.get("style_confidence", 0.0),
+            "chosen_style_verified": bool(chosen.get("style_verified")),
+            "chosen_style_weight": chosen.get("style_weight", 0.0),
+            "chosen_accepted_for_actor": bool(chosen.get("accepted_for_actor")),
             "rejected_prompted_style": rejected.get("prompted_style", ""),
             "rejected_primary_style": rejected.get("primary_style", ""),
         },
@@ -343,6 +395,10 @@ def _pair_metrics(pairs: list[dict[str, Any]]) -> dict[str, Any]:
         "pair_count": len(pairs),
         "pair_type_counts": dict(Counter(
             p.get("metadata", {}).get("pair_type", "unknown")
+            for p in pairs
+        )),
+        "pair_source_counts": dict(Counter(
+            p.get("metadata", {}).get("pair_source", "unknown")
             for p in pairs
         )),
         "unique_samples": len({
@@ -399,9 +455,13 @@ def _actor_training_prompt(dataset_name: str, thinking_style: str, sample: dict[
     from src.society.agent_registry import ACTOR_STYLE_PROMPTS
 
     style = ReasoningStyle(thinking_style)
-    base_prompt = build_simple_actor_prompt(sample, dataset_name, style=style)
-    return (
-        "/no_think\n"
+    base_prompt = build_simple_actor_prompt(
+        sample,
+        dataset_name,
+        style=style,
+        no_think=False,
+    )
+    prompt = (
         f"You are Actor-{thinking_style}.\n"
         "Use this reasoning style naturally.\n"
         f"{ACTOR_STYLE_PROMPTS[style]}\n"
@@ -409,6 +469,7 @@ def _actor_training_prompt(dataset_name: str, thinking_style: str, sample: dict[
         f"{base_prompt}\n\n"
         f"{_style_output_format(style)}"
     )
+    return ensure_no_think(prompt)
 
 
 def _style_output_format(style: ReasoningStyle) -> str:
