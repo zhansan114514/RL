@@ -127,6 +127,95 @@ def test_actor_pairs_use_only_accepted_target_style_chosen():
     assert metrics["candidate_counts"]["selected_pairs"] == 2
 
 
+def test_actor_pair_builder_caps_prompted_style_fallback():
+    diversify = _load_script("09_diversify_actors.py")
+    sample = {
+        "question": "Q",
+        "answer": "A",
+        "task_type": "multiple_choice",
+    }
+    labels = [
+        {
+            "response_id": "strict",
+            "response": "Evidence.\nThe final result is A.",
+            "answer": "A",
+            "is_correct": True,
+            "primary_style": "evidence",
+            "reasoning_style_confidence": 0.9,
+            "format_status": "valid",
+            "prompted_style": "evidence",
+            "style_match": True,
+            "trainable_for_actor": True,
+            "style_verified": True,
+            "accepted_for_actor": True,
+        },
+        {
+            "response_id": "fallback_1",
+            "response": "Low confidence but prompted evidence.\nThe final result is A.",
+            "answer": "A",
+            "is_correct": True,
+            "primary_style": "evidence",
+            "reasoning_style_confidence": 0.2,
+            "format_status": "valid",
+            "prompted_style": "evidence",
+            "style_match": True,
+            "trainable_for_actor": True,
+            "style_verified": False,
+            "accepted_for_actor": True,
+        },
+        {
+            "response_id": "fallback_2",
+            "response": "Classifier missed the style.\nThe final result is A.",
+            "answer": "A",
+            "is_correct": True,
+            "primary_style": "direct",
+            "reasoning_style_confidence": 0.8,
+            "format_status": "valid",
+            "prompted_style": "evidence",
+            "style_match": False,
+            "trainable_for_actor": True,
+            "style_verified": False,
+            "accepted_for_actor": True,
+        },
+        {
+            "response_id": "wrong",
+            "response": "Wrong.\nThe final result is B.",
+            "answer": "B",
+            "is_correct": False,
+            "format_status": "valid",
+            "prompted_style": "evidence",
+            "accepted_for_actor": False,
+        },
+    ]
+    classified_results = [{
+        "sample_id": "mmlu_0",
+        "sample": sample,
+        "per_response_labels": labels,
+    }]
+    args = type("Args", (), {
+        "pair_mix": {"correctness": 1.0, "style": 0.0},
+        "target_pairs_per_actor": 8,
+        "max_pairs_per_actor": 8,
+        "max_pairs_per_sample": 8,
+        "max_prompted_fallback_ratio": 0.5,
+    })()
+
+    pairs, metrics = diversify.build_preference_pairs_for_style(
+        diversify.build_response_index(classified_results),
+        "evidence",
+        args,
+    )
+
+    assert metrics["fallback_selection"]["strict_selected"] == 1
+    assert metrics["fallback_selection"]["prompted_fallback_candidates"] == 2
+    assert metrics["fallback_selection"]["prompted_fallback_selected"] == 1
+    assert metrics["fallback_selection"]["prompted_fallback_dropped"] == 1
+    assert sum(
+        1 for pair in pairs
+        if pair["metadata"]["pair_source"] == "prompted_fallback"
+    ) == 1
+
+
 def test_society_actor_style_prompt_wrapper_conditions_generation():
     from src.society.agent_registry import ReasoningStyle
     from src.society.society_trainer import StyleConditionedActorAdapter
@@ -462,3 +551,121 @@ def test_society_actor_acceptance_allows_prompted_fallback_but_requires_quality(
         "prompted_fallback",
     }
     assert all(pair["metadata"]["is_correct"] is True for pair in pairs)
+
+
+def test_society_actor_pair_generation_requires_strict_pair_for_fallback(monkeypatch):
+    from src.society import society_trainer
+    from src.society.agent_registry import (
+        AgentConfig,
+        AgentRegistry,
+        AgentRole,
+        CriticSkill,
+        ReasoningStyle,
+    )
+    from src.society.data_classifier import ReasoningStyleResult
+
+    sample = {
+        "question": "Q",
+        "choices": ["correct", "wrong", "wrong", "wrong"],
+        "answer": "A",
+        "task_type": "multiple_choice",
+    }
+    raw_pairs = [
+        {
+            "sample": sample,
+            "actor_candidate": {
+                "chosen": "Prompted evidence, but confidence is low.\nThe final result is A.",
+                "rejected": "Wrong reasoning.\nThe final result is B.",
+            },
+            "critic_candidate": {"chosen": "critic chosen", "rejected": "critic rejected"},
+            "comparison": {"delta": 1.0, "mode": "towards_correct"},
+            "rollout_scores": {"natural": 0.0, "guided_correct": 1.0, "guided_wrong": 0.0},
+        },
+    ]
+
+    class FakeActorAdapter:
+        def generate(self, prompts, **kwargs):
+            return ["actor"] * len(prompts)
+
+    class FakeCriticAdapter:
+        def generate(self, prompts, **kwargs):
+            return ["critic"] * len(prompts)
+
+    class FakeEngine:
+        def cleanup(self):
+            pass
+
+    monkeypatch.setattr(
+        "src.inference.vllm_server.VLLMInference",
+        lambda *args, **kwargs: FakeEngine(),
+    )
+    monkeypatch.setattr(
+        society_trainer,
+        "_build_lora_adapters",
+        lambda engine, agents: {
+            "actor_evidence": FakeActorAdapter(),
+            "critic_reasoning": FakeCriticAdapter(),
+        },
+    )
+    monkeypatch.setattr(
+        society_trainer,
+        "run_pairwise_deliberation_batch",
+        lambda *args, **kwargs: [[{
+            "round": 0,
+            "actor_response": "Natural.\nThe final result is A.",
+            "critic_response": "critic",
+        }]],
+    )
+    monkeypatch.setattr(
+        society_trainer,
+        "build_guided_rollout_pairs",
+        lambda *args, **kwargs: raw_pairs,
+    )
+    monkeypatch.setattr(
+        society_trainer,
+        "classify_reasoning_style",
+        lambda response, **kwargs: ReasoningStyleResult(
+            primary_style=ReasoningStyle.EVIDENCE,
+            secondary_styles=[],
+            format_status="valid",
+            confidence=0.4,
+        ),
+    )
+    monkeypatch.setattr(society_trainer, "_cleanup_gpu", lambda: None)
+
+    registry = AgentRegistry(base_model_path="/models/base")
+    actor = AgentConfig(
+        name="actor_evidence",
+        role=AgentRole.ACTOR,
+        model_path="/models/base",
+        reasoning_style=ReasoningStyle.EVIDENCE,
+    )
+    critic = AgentConfig(
+        name="critic_reasoning",
+        role=AgentRole.CRITIC,
+        model_path="/models/base",
+        error_specialty=CriticSkill.REASONING,
+    )
+
+    pairs = society_trainer._generate_actor_pairs_pairwise(
+        actor=actor,
+        critics=[critic],
+        dataset=[sample],
+        dataset_name="mmlu",
+        registry=registry,
+        num_rounds=1,
+        num_simulations=1,
+        max_tokens=64,
+        reward_threshold=0.0,
+        max_samples=1,
+        seed=42,
+        device=0,
+        dtype="bfloat16",
+        gpu_memory_utilization=0.1,
+        max_model_len=512,
+        strict_classification=True,
+        min_style_confidence=0.65,
+        max_fallback_ratio=1.0,
+    )
+
+    assert pairs == []

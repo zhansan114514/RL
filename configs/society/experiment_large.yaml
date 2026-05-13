@@ -75,6 +75,7 @@ step03_diversify_actors:
   max_pairs_per_sample: 4
   augment_when_below: 256
   max_synthetic_ratio: 0.7
+  max_prompted_fallback_ratio: 0.5
   pair_mix:
     correctness: 0.7
     style: 0.3
@@ -154,6 +155,8 @@ step05_train_society:
   actor_max_tokens: 256
   critic_max_tokens: 256
   min_style_confidence: 0.60
+  allow_skip_low_data: false
+  max_actor_fallback_ratio: 0.5
   strict_classification: true
   max_classification_failure_rate: 0.01
   max_classification_workers: 16

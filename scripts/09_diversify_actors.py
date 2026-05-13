@@ -40,6 +40,7 @@ STEP_DEFAULTS = {
     "max_pairs_per_sample": 4,
     "augment_when_below": 256,
     "max_synthetic_ratio": 0.7,
+    "max_prompted_fallback_ratio": 0.5,
     "pair_mix": {"correctness": 0.7, "style": 0.3},
     "lora_r": 256,
     "lora_alpha": 512,
@@ -144,6 +145,36 @@ def _take_limited(
     return selected
 
 
+def _fallback_ratio_stats(
+    pairs: list[dict[str, Any]],
+    max_fallback_ratio: float,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    ratio = max(0.0, min(1.0, float(max_fallback_ratio)))
+    strict = [
+        p for p in pairs
+        if p.get("metadata", {}).get("pair_source") != "prompted_fallback"
+    ]
+    fallback = [
+        p for p in pairs
+        if p.get("metadata", {}).get("pair_source") == "prompted_fallback"
+    ]
+    if ratio <= 0.0 or not strict:
+        selected_fallback: list[dict[str, Any]] = []
+    elif ratio >= 1.0:
+        selected_fallback = fallback
+    else:
+        max_fallback = int((ratio * len(strict)) / max(1.0 - ratio, 1e-6))
+        selected_fallback = fallback[:max_fallback]
+    selected = strict + selected_fallback
+    return selected, {
+        "max_prompted_fallback_ratio": ratio,
+        "strict_selected": len(strict),
+        "prompted_fallback_candidates": len(fallback),
+        "prompted_fallback_selected": len(selected_fallback),
+        "prompted_fallback_dropped": max(0, len(fallback) - len(selected_fallback)),
+    }
+
+
 def build_preference_pairs_for_style(
     by_sample: dict[str, list[dict[str, Any]]],
     target_style: str,
@@ -153,6 +184,7 @@ def build_preference_pairs_for_style(
     target_pairs = int(getattr(args, "target_pairs_per_actor", 512))
     max_pairs = int(getattr(args, "max_pairs_per_actor", 1024))
     max_pairs_per_sample = int(getattr(args, "max_pairs_per_sample", 4))
+    max_fallback_ratio = float(getattr(args, "max_prompted_fallback_ratio", 0.5))
     quotas = _pair_quotas(target_pairs, mix)
 
     correctness_candidates = []
@@ -267,12 +299,14 @@ def build_preference_pairs_for_style(
             if len(pairs) >= target_pairs:
                 break
 
+    pairs, fallback_stats = _fallback_ratio_stats(pairs, max_fallback_ratio)
     pairs = pairs[:max_pairs]
     metrics = _pair_metrics(pairs)
     metrics.update({
         "real_pair_count": len(pairs),
         "synthetic_pair_count": 0,
         "synthetic_ratio": 0.0,
+        "fallback_selection": fallback_stats,
         "candidate_counts": {
             "correctness": len(correctness_candidates),
             "style": len(style_candidates),

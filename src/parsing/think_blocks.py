@@ -9,5 +9,5 @@ def strip_think_blocks(text: str) -> str:
     """Remove complete and unterminated <think> blocks from generated text."""
     raw = text or ""
     raw = re.sub(r"(?is)<think\b[^>]*>.*?</think\s*>", "\n", raw)
-    raw = re.sub(r"(?is)^\s*<think\b[^>]*>.*", "\n", raw)
+    raw = re.sub(r"(?is)<think\b[^>]*>.*$", "\n", raw)
     return raw.strip()

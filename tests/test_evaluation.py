@@ -96,6 +96,14 @@ class TestExtractAnswer:
         assert result.answer is None
         assert result.source == "none"
 
+    def test_mid_response_unterminated_think_block_is_ignored(self):
+        result = extract_answer_with_source(
+            "Visible prefix.\n<think>The final result is A and generation stopped",
+            task_type="multiple_choice",
+        )
+        assert result.answer is None
+        assert result.source == "none"
+
     def test_tail_claim_extraction_source(self):
         result = extract_answer_with_source(
             "Therefore, the answer is B.",

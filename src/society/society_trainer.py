@@ -290,6 +290,42 @@ def _sync_lora_paths(agents: list[AgentConfig], paths: dict[str, str]) -> None:
             agent.lora_path = path
 
 
+def _checkpoint_phase_done(
+    phase_a_done: set[str],
+    phase_b_done: set[str] | None = None,
+) -> dict[str, list[str]]:
+    """Build the per-iteration resume markers stored in checkpoints."""
+    done = {"phase_A": sorted(phase_a_done)}
+    if phase_b_done is not None:
+        done["phase_B"] = sorted(phase_b_done)
+    return done
+
+
+def _cap_prompted_fallback_pairs(
+    strict_pairs: list[dict],
+    fallback_pairs: list[dict],
+    max_fallback_ratio: float,
+) -> tuple[list[dict], dict[str, int | float]]:
+    """Select prompted-style fallback pairs without letting them dominate."""
+    ratio = max(0.0, min(1.0, float(max_fallback_ratio)))
+    if ratio <= 0.0 or not strict_pairs:
+        selected_fallback: list[dict] = []
+    elif ratio >= 1.0:
+        selected_fallback = list(fallback_pairs)
+    else:
+        max_fallback = int((ratio * len(strict_pairs)) / max(1.0 - ratio, 1e-6))
+        selected_fallback = fallback_pairs[:max_fallback]
+
+    selected = list(strict_pairs) + selected_fallback
+    return selected, {
+        "strict_selected": len(strict_pairs),
+        "fallback_candidates": len(fallback_pairs),
+        "fallback_selected": len(selected_fallback),
+        "fallback_dropped": max(0, len(fallback_pairs) - len(selected_fallback)),
+        "max_fallback_ratio": ratio,
+    }
+
+
 def society_alternating_train(
     registry: AgentRegistry,
     dataset: list[dict],
@@ -333,6 +369,7 @@ def society_alternating_train(
     max_retries: int = 5,
     retry_delay: int | float = 5,
     allow_skip_low_data: bool = False,
+    max_actor_fallback_ratio: float = 0.5,
 ) -> SocietyTrainingResult:
     """
     Train N Actors + M Critics in alternating fashion.
@@ -376,6 +413,8 @@ def society_alternating_train(
         min_specialty_ratio: Minimum target-skill share required to activate a critic.
         allow_skip_low_data: If true, mark agents with insufficient pairs as skipped.
             If false, save checkpoint state and fail without advancing the iteration.
+        max_actor_fallback_ratio: Maximum share of prompted-style fallback pairs
+            in Phase B actor DPO data. Requires at least one strict style-verified pair.
 
     Returns:
         SocietyTrainingResult with checkpoint paths and metrics.
@@ -409,13 +448,17 @@ def society_alternating_train(
     # Resume granularity: skip agents whose phase already completed in a
     # partially-run iteration.  Keys: "phase_A_done" / "phase_B_done" ->
     # list of agent names that finished successfully.
-    phase_done: dict[str, list[str]] = state.get("phase_done", {})
+    phase_done: dict[str, list[str]] = (
+        {} if state.get("iteration_completed") else state.get("phase_done", {})
+    )
 
     _sync_lora_paths(actors, actor_paths)
     _sync_lora_paths(critics, critic_paths)
 
     for iteration in range(start_iteration, num_iterations):
         logger.info(f"=== Society Training Iteration {iteration + 1}/{num_iterations} ===")
+        current_phase_done = phase_done if iteration == start_iteration else {}
+        failed_agents = dict(state.get("failed_agents", {})) if iteration == start_iteration else {}
 
         # ---- Phase A: Train all Critics (fix Actors) ----
         logger.info(
@@ -429,7 +472,7 @@ def society_alternating_train(
         all_phase_a_agents = list(actors) + list(critics)
         phase_a_engine = None
 
-        phase_a_done = set(phase_done.get("phase_A", []))
+        phase_a_done = set(current_phase_done.get("phase_A", []))
         critic_pairs_cache: dict[str, list[dict]] = {}
 
         # --- Pass 1: Generate all preference pairs with shared engine ---
@@ -544,15 +587,14 @@ def society_alternating_train(
                     "actor_paths": actor_paths,
                     "critic_paths": critic_paths,
                     "metrics": metrics,
-                    "failed_agents": {
-                        **state.get("failed_agents", {}),
+                    "failed_agents": failed_agents if allow_skip_low_data else {
+                        **failed_agents,
                         critic.name: reason,
-                    } if not allow_skip_low_data else state.get("failed_agents", {}),
-                    "iteration_completed": False,
-                    "phase_done": {
-                        **phase_done,
-                        "phase_A": sorted(phase_a_done | ({critic.name} if allow_skip_low_data else set())),
                     },
+                    "iteration_completed": False,
+                    "phase_done": _checkpoint_phase_done(
+                        phase_a_done | ({critic.name} if allow_skip_low_data else set()),
+                    ),
                 })
                 if not allow_skip_low_data:
                     raise RuntimeError(
@@ -606,14 +648,11 @@ def society_alternating_train(
                     "critic_paths": critic_paths,
                     "metrics": metrics,
                     "failed_agents": {
-                        **state.get("failed_agents", {}),
+                        **failed_agents,
                         critic.name: "dpo_training_failed",
                     },
                     "iteration_completed": False,
-                    "phase_done": {
-                        **phase_done,
-                        "phase_A": sorted(phase_a_done),
-                    },
+                    "phase_done": _checkpoint_phase_done(phase_a_done),
                 })
                 raise RuntimeError(f"DPO training failed for critic {critic.name}")
 
@@ -625,10 +664,8 @@ def society_alternating_train(
                 "critic_paths": critic_paths,
                 "metrics": metrics,
                 "iteration_completed": False,
-                "phase_done": {
-                    **phase_done,
-                    "phase_A": sorted(phase_a_done),
-                },
+                "failed_agents": failed_agents,
+                "phase_done": _checkpoint_phase_done(phase_a_done),
             })
 
         # Cleanup Phase A engine (may already be None)
@@ -647,7 +684,7 @@ def society_alternating_train(
         all_phase_b_agents = list(actors) + list(critics)
         phase_b_engine = None
 
-        phase_b_done = set(phase_done.get("phase_B", []))
+        phase_b_done = set(current_phase_done.get("phase_B", []))
         actor_pairs_cache: dict[str, list[dict]] = {}
 
         # --- Pass 1: Generate all preference pairs with shared engine ---
@@ -717,6 +754,7 @@ def society_alternating_train(
                 request_timeout=request_timeout,
                 max_retries=max_retries,
                 retry_delay=retry_delay,
+                max_fallback_ratio=max_actor_fallback_ratio,
             )
 
             # Cache pairs for potential resume
@@ -750,16 +788,15 @@ def society_alternating_train(
                     "actor_paths": actor_paths,
                     "critic_paths": critic_paths,
                     "metrics": metrics,
-                    "failed_agents": {
-                        **state.get("failed_agents", {}),
+                    "failed_agents": failed_agents if allow_skip_low_data else {
+                        **failed_agents,
                         actor.name: reason,
-                    } if not allow_skip_low_data else state.get("failed_agents", {}),
-                    "iteration_completed": False,
-                    "phase_done": {
-                        **phase_done,
-                        "phase_A": sorted(phase_a_done),
-                        "phase_B": sorted(phase_b_done | ({actor.name} if allow_skip_low_data else set())),
                     },
+                    "iteration_completed": False,
+                    "phase_done": _checkpoint_phase_done(
+                        phase_a_done,
+                        phase_b_done | ({actor.name} if allow_skip_low_data else set()),
+                    ),
                 })
                 if not allow_skip_low_data:
                     raise RuntimeError(
@@ -812,15 +849,11 @@ def society_alternating_train(
                     "critic_paths": critic_paths,
                     "metrics": metrics,
                     "failed_agents": {
-                        **state.get("failed_agents", {}),
+                        **failed_agents,
                         actor.name: "dpo_training_failed",
                     },
                     "iteration_completed": False,
-                    "phase_done": {
-                        **phase_done,
-                        "phase_A": sorted(phase_a_done),
-                        "phase_B": sorted(phase_b_done),
-                    },
+                    "phase_done": _checkpoint_phase_done(phase_a_done, phase_b_done),
                 })
                 raise RuntimeError(f"DPO training failed for actor {actor.name}")
 
@@ -832,11 +865,8 @@ def society_alternating_train(
                 "critic_paths": critic_paths,
                 "metrics": metrics,
                 "iteration_completed": False,
-                "phase_done": {
-                    **phase_done,
-                    "phase_A": sorted(phase_a_done),
-                    "phase_B": sorted(phase_b_done),
-                },
+                "failed_agents": failed_agents,
+                "phase_done": _checkpoint_phase_done(phase_a_done, phase_b_done),
             })
 
         # Cleanup Phase B engine (may already be None)
@@ -858,6 +888,8 @@ def society_alternating_train(
             "failed_agents": {},
             "iteration_completed": True,
         })
+        phase_done = {}
+        failed_agents = {}
 
     # Update registry with new LoRA paths (only if training succeeded)
     for name, path in actor_paths.items():
@@ -1307,6 +1339,7 @@ def _generate_actor_pairs_pairwise(
     request_timeout: int | float = 30,
     max_retries: int = 5,
     retry_delay: int | float = 5,
+    max_fallback_ratio: float = 0.5,
 ) -> list[dict]:
     """Generate Actor DPO pairs from Society pairwise guided rollouts.
 
@@ -1325,6 +1358,7 @@ def _generate_actor_pairs_pairwise(
 
     n_samples = min(len(dataset), max_samples)
     preference_pairs: list[dict] = []
+    gate_counts: Counter[str] = Counter()
     _owns_engine = engine is None
     adapters: dict[str, Any] = {}
 
@@ -1506,7 +1540,9 @@ def _generate_actor_pairs_pairwise(
             target_style = actor.reasoning_style
             prompt_style = target_style.value
             min_conf = float(min_style_confidence)
-            gate_counts: Counter[str] = Counter({"raw": len(raw_pairs)})
+            gate_counts = Counter({"raw": len(raw_pairs)})
+            strict_pairs: list[dict] = []
+            fallback_pairs: list[dict] = []
             for p in raw_pairs:
                 sample = p["sample"]
                 question = sample.get("question", "")
@@ -1547,7 +1583,7 @@ def _generate_actor_pairs_pairwise(
                 if accepted_for_actor:
                     pair_source = "strict" if style_verified else "prompted_fallback"
                     gate_counts[pair_source] += 1
-                    preference_pairs.append({
+                    pair = {
                         "sample": sample,
                         "chosen": chosen,
                         "rejected": p["actor_pair"]["rejected"],
@@ -1571,7 +1607,18 @@ def _generate_actor_pairs_pairwise(
                             "comparison_mode": p["comparison_mode"],
                             "rollout_scores": p.get("rollout_scores", {}),
                         },
-                    })
+                    }
+                    if style_verified:
+                        strict_pairs.append(pair)
+                    else:
+                        fallback_pairs.append(pair)
+
+            preference_pairs, fallback_metrics = _cap_prompted_fallback_pairs(
+                strict_pairs,
+                fallback_pairs,
+                max_fallback_ratio,
+            )
+            gate_counts.update(fallback_metrics)
 
         logger.info(
             f"  [{actor.name}] {len(preference_pairs)}/{len(raw_pairs)} pairs "

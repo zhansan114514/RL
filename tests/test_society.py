@@ -115,6 +115,30 @@ Confidence: 0.64""",
     assert feedback.critique.startswith("The actor's final answer")
 
 
+def test_build_critic_feedback_ignores_mid_response_unterminated_think_block():
+    critic = AgentConfig(
+        name="critic_verification",
+        role=AgentRole.CRITIC,
+        model_path="base",
+        error_specialty=CriticSkill.VERIFICATION,
+    )
+
+    feedback = build_critic_feedback(
+        critic,
+        """The visible critique says the answer cannot be verified.
+<think>
+Answer correct: yes
+Suggested answer: A
+Confidence: 1.0""",
+        task_type="multiple_choice",
+    )
+
+    assert feedback.answer_correct == "unknown"
+    assert feedback.suggested_answer is None
+    assert feedback.confidence is None
+    assert feedback.critique == "The visible critique says the answer cannot be verified."
+
+
 def test_router_selects_natural_feedback_without_schema_filter():
     low_no_conf = CriticFeedback(
         critic_name="critic_a",
