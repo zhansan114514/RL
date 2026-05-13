@@ -218,8 +218,11 @@ def _cap_prompted_fallback_pairs(
 ) -> tuple[list[dict], dict[str, int | float]]:
     """Select prompted-style fallback pairs without letting them dominate."""
     ratio = max(0.0, min(1.0, float(max_fallback_ratio)))
-    if ratio <= 0.0 or not strict_pairs:
+    fallback_only = bool(fallback_pairs and not strict_pairs and ratio > 0.0)
+    if ratio <= 0.0:
         selected_fallback: list[dict] = []
+    elif fallback_only:
+        selected_fallback = list(fallback_pairs)
     elif ratio >= 1.0:
         selected_fallback = list(fallback_pairs)
     else:
@@ -233,6 +236,7 @@ def _cap_prompted_fallback_pairs(
         "fallback_selected": len(selected_fallback),
         "fallback_dropped": max(0, len(fallback_pairs) - len(selected_fallback)),
         "max_fallback_ratio": ratio,
+        "fallback_only_without_strict": fallback_only,
     }
 
 

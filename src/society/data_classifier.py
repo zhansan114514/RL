@@ -92,6 +92,12 @@ def normalize_chat_api_url(api_url: str) -> str:
         return f"{url}/chat/completions"
     return f"{url}/v1/chat/completions"
 
+# Cache/prompt versions.  Bump these when classifier prompts or label
+# semantics change so stale classification artifacts are not silently reused.
+STYLE_CLASSIFIER_VERSION = "style_v5_natural_prompted"
+ERROR_PROFILE_CLASSIFIER_VERSION = "error_profile_v2_no_computation"
+
+
 # Classification prompts
 REASONING_STYLE_PROMPT = """Classify the reasoning style of this model response for an MMLU-style task.
 
@@ -101,12 +107,23 @@ Question:
 Response:
 {response}
 
-Ignore the final answer sentence and classify the reasoning body.
+Ignore the final answer sentence ("The final result is <answer>.") and classify
+only the explanatory reasoning body.
 
 Definitions:
 - direct: concise answer with minimal explanation; does not systematically cite evidence or compare options
 - evidence: uses facts, definitions, concepts, question wording, or domain knowledge as explicit evidence
 - elimination: compares answer options, rules out alternatives, or explains why one option is better than the others
+
+High-precision rules:
+- If the response contains "Direct reason:" and does not compare options, classify as direct.
+- If it contains "Key evidence:" or "Application:" with a fact/definition/question clue, classify as evidence.
+- If it contains "Option analysis:", "Elimination:", rules out choices, or compares multiple options, classify as elimination.
+
+Tie-breakers:
+1. Prefer elimination when the reasoning evaluates alternatives or rules out options.
+2. Prefer evidence when it explicitly cites a fact, definition, concept, or wording clue.
+3. Use direct only when the reasoning is mostly a short justification without explicit evidence or option comparison.
 
 Return JSON only (pick ONE value for each field, do NOT use "|"):
 {{
@@ -327,21 +344,56 @@ def _call_api(
 # Response parsers
 # ============================================================
 
-def _parse_style_response(response: str) -> Optional[ReasoningStyle]:
-    """Parse a style label from JSON or fallback text."""
+def _coerce_reasoning_style_label(value: object) -> Optional[ReasoningStyle]:
+    """Resolve a single explicit style label without defaulting ambiguous labels."""
+    if value is None:
+        return None
+    label = str(value).strip().lower()
+    if not label:
+        return None
+
+    aliases = {
+        "concise": ReasoningStyle.DIRECT,
+        "minimal": ReasoningStyle.DIRECT,
+        "evidence_based": ReasoningStyle.EVIDENCE,
+        "evidence-based": ReasoningStyle.EVIDENCE,
+        "factual": ReasoningStyle.EVIDENCE,
+        "option_elimination": ReasoningStyle.ELIMINATION,
+        "option-elimination": ReasoningStyle.ELIMINATION,
+    }
+    if label in aliases:
+        return aliases[label]
+
+    try:
+        return ReasoningStyle(label)
+    except ValueError:
+        pass
+
+    import re
+
+    parts = [
+        part.strip()
+        for part in re.split(r"[|,/]+", label)
+        if part.strip()
+    ]
+    valid_parts: list[ReasoningStyle] = []
+    for part in parts:
+        try:
+            parsed = ReasoningStyle(part)
+        except ValueError:
+            continue
+        if parsed not in valid_parts:
+            valid_parts.append(parsed)
+    if len(valid_parts) == 1:
+        return valid_parts[0]
+    return None
+
+
+def _parse_style_text(response: str) -> Optional[ReasoningStyle]:
+    """Parse a style label from non-JSON classifier text."""
     if not response:
         return None
     import re
-
-    data = _extract_json(response)
-    if isinstance(data, dict):
-        label = str(data.get("primary_style", "")).strip().lower()
-        # Handle pipe-separated multi-value strings (e.g. "direct|evidence|elimination")
-        label = label.split("|")[0].strip()
-        try:
-            return ReasoningStyle(label)
-        except ValueError:
-            pass
 
     clean = re.sub(r'[*_`"\'\(\)\[\]{}]', ' ', response.lower().strip())
     # Count occurrences of each style rather than matching first-hit;
@@ -373,15 +425,40 @@ def _parse_style_response(response: str) -> Optional[ReasoningStyle]:
         "option-elimination": ReasoningStyle.ELIMINATION,
         "eliminate": ReasoningStyle.ELIMINATION,
         "eliminating": ReasoningStyle.ELIMINATION,
+        "eliminates": ReasoningStyle.ELIMINATION,
         "compare": ReasoningStyle.ELIMINATION,
+        "compares": ReasoningStyle.ELIMINATION,
         "comparison": ReasoningStyle.ELIMINATION,
         "rule_out": ReasoningStyle.ELIMINATION,
+        "rules": ReasoningStyle.ELIMINATION,
+        "ruled": ReasoningStyle.ELIMINATION,
+        "alternative": ReasoningStyle.ELIMINATION,
+        "alternatives": ReasoningStyle.ELIMINATION,
     }
     words = re.findall(r'\b[a-z_]+\b', clean)
     for word in words:
         if word in variants:
             return variants[word]
     return None
+
+
+def _parse_style_response(response: str) -> Optional[ReasoningStyle]:
+    """Parse a style label from JSON or fallback text."""
+    if not response:
+        return None
+
+    data = _extract_json(response)
+    if isinstance(data, dict):
+        for key in ("primary_style", "style"):
+            style = _coerce_reasoning_style_label(data.get(key))
+            if style is not None:
+                return style
+        # If the primary field is malformed, use only the evidence text as a
+        # fallback.  Parsing the whole JSON would bias toward the "evidence"
+        # key name or toward the first label in a pipe-separated list.
+        return _parse_style_text(str(data.get("evidence", "")))
+
+    return _parse_style_text(response)
 
 
 def _parse_style_json_response(response: str) -> Optional[ReasoningStyleResult]:
@@ -410,9 +487,8 @@ def _parse_style_json_response(response: str) -> Optional[ReasoningStyleResult]:
     secondary_styles: list[ReasoningStyle] = []
     if isinstance(secondary_raw, list):
         for label in secondary_raw:
-            try:
-                parsed = ReasoningStyle(str(label).strip().lower())
-            except ValueError:
+            parsed = _coerce_reasoning_style_label(label)
+            if parsed is None:
                 continue
             if parsed != style and parsed not in secondary_styles:
                 secondary_styles.append(parsed)
@@ -629,7 +705,7 @@ def classify_reasoning_style(
     and no cached result exists.
     """
     sample_hash = _compute_sample_hash(question, response)
-    cache_path = Path(cache_dir) / f"style_v4_mmlu_native3_{sample_hash}.json"
+    cache_path = Path(cache_dir) / f"{STYLE_CLASSIFIER_VERSION}_{sample_hash}.json"
 
     # Check cache first (always succeeds regardless of API)
     cached = _load_cache(cache_path)
@@ -726,7 +802,7 @@ def classify_error_profile(
         task_type=task_type,
         subject=f"{subject}|dims={','.join(ERROR_PROFILE_DIMENSIONS)}",
     )
-    cache_path = Path(cache_dir) / f"error_profile_{sample_hash}.json"
+    cache_path = Path(cache_dir) / f"{ERROR_PROFILE_CLASSIFIER_VERSION}_{sample_hash}.json"
 
     # Check cache first
     cached = _load_cache(cache_path)

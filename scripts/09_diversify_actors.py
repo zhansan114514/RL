@@ -144,8 +144,11 @@ def _fallback_ratio_stats(
         p for p in pairs
         if p.get("metadata", {}).get("pair_source") == "prompted_fallback"
     ]
-    if ratio <= 0.0 or not strict:
+    fallback_only = bool(fallback and not strict and ratio > 0.0)
+    if ratio <= 0.0:
         selected_fallback: list[dict[str, Any]] = []
+    elif fallback_only:
+        selected_fallback = fallback
     elif ratio >= 1.0:
         selected_fallback = fallback
     else:
@@ -158,6 +161,7 @@ def _fallback_ratio_stats(
         "prompted_fallback_candidates": len(fallback),
         "prompted_fallback_selected": len(selected_fallback),
         "prompted_fallback_dropped": max(0, len(fallback) - len(selected_fallback)),
+        "prompted_fallback_only_without_strict": fallback_only,
     }
 
 

@@ -216,6 +216,80 @@ def test_actor_pair_builder_caps_prompted_style_fallback():
     ) == 1
 
 
+def test_actor_pair_builder_allows_prompted_fallback_when_classifier_has_no_strict_match():
+    diversify = _load_script("09_diversify_actors.py")
+    sample = {
+        "question": "Q",
+        "answer": "A",
+        "task_type": "multiple_choice",
+    }
+    classified_results = [{
+        "sample_id": "mmlu_0",
+        "sample": sample,
+        "per_response_labels": [
+            {
+                "response_id": "fallback",
+                "response": (
+                    "The prompt asked for evidence and this cites the question clue.\n"
+                    "The final result is A."
+                ),
+                "answer": "A",
+                "is_correct": True,
+                "primary_style": "direct",
+                "reasoning_style_confidence": 0.9,
+                "prompted_style": "evidence",
+                "style_match": False,
+                "trainable_for_actor": True,
+                "style_verified": False,
+                "accepted_for_actor": True,
+            },
+            {
+                "response_id": "wrong",
+                "response": "Wrong path.\nThe final result is B.",
+                "answer": "B",
+                "is_correct": False,
+                "prompted_style": "evidence",
+                "accepted_for_actor": False,
+            },
+        ],
+    }]
+    args = type("Args", (), {
+        "pair_mix": {"correctness": 1.0, "style": 0.0},
+        "target_pairs_per_actor": 4,
+        "max_pairs_per_actor": 4,
+        "max_pairs_per_sample": 4,
+        "max_prompted_fallback_ratio": 0.5,
+    })()
+
+    pairs, metrics = diversify.build_preference_pairs_for_style(
+        diversify.build_response_index(classified_results),
+        "evidence",
+        args,
+    )
+
+    assert len(pairs) == 1
+    assert pairs[0]["metadata"]["pair_source"] == "prompted_fallback"
+    assert metrics["fallback_selection"]["strict_selected"] == 0
+    assert metrics["fallback_selection"]["prompted_fallback_selected"] == 1
+    assert metrics["fallback_selection"]["prompted_fallback_only_without_strict"] is True
+
+
+def test_reasoning_style_parser_uses_evidence_when_primary_label_is_ambiguous():
+    from src.society.agent_registry import ReasoningStyle
+    from src.society.data_classifier import _parse_style_json_response
+
+    parsed = _parse_style_json_response("""{
+      "primary_style": "direct|evidence|elimination",
+      "secondary_styles": [],
+      "format_status": "valid",
+      "confidence": 0.8,
+      "evidence": "The response compares alternatives and eliminates option B."
+    }""")
+
+    assert parsed is not None
+    assert parsed.primary_style == ReasoningStyle.ELIMINATION
+
+
 def test_society_actor_prompt_builder_conditions_generation_once():
     from src.prompts.prompt_builder import build_simple_actor_prompt
     from src.society.agent_registry import ReasoningStyle
@@ -637,7 +711,7 @@ def test_society_actor_acceptance_allows_prompted_fallback_but_requires_quality(
     assert all(pair["metadata"]["is_correct"] is True for pair in pairs)
 
 
-def test_society_actor_pair_generation_requires_strict_pair_for_fallback(monkeypatch):
+def test_society_actor_pair_generation_allows_fallback_without_strict_pair(monkeypatch):
     from src.society import society_trainer
     from src.society.agent_registry import (
         AgentConfig,
@@ -752,4 +826,5 @@ def test_society_actor_pair_generation_requires_strict_pair_for_fallback(monkeyp
         max_fallback_ratio=1.0,
     )
 
-    assert pairs == []
+    assert len(pairs) == 1
+    assert pairs[0]["metadata"]["pair_source"] == "prompted_fallback"
