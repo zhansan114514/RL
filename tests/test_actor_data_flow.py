@@ -308,153 +308,55 @@ def test_actor_sft_selection_enforces_per_question_cap():
     assert metrics["after_question_cap"] == 2
 
 
-def test_critic_structured_pairs_do_not_oversample_or_keep_invalid_judgements():
+def test_critic_sft_script_trains_with_prompt_response_rows(monkeypatch, tmp_path):
     diversify = _load_script("10_diversify_critics.py")
-    from src.society.agent_registry import CriticSkill
-    from src.society.diversity_split import RoutedTrainingItem
 
-    sample_a = {
-        "question": "Q1",
-        "answer": "A",
-        "task_type": "multiple_choice",
-    }
-    sample_b = {
-        "question": "Q2",
-        "answer": "B",
-        "task_type": "multiple_choice",
-    }
-    raw_pairs = [
-        {
-            "raw_pair_id": "raw_1",
-            "sample": sample_a,
-            "actor_response": "Wrong reasoning.\nThe final result is C.",
-            "actor_answer": "C",
-            "correct_answer": "A",
-            "actor_name": "actor_direct",
-        },
-        {
-            "raw_pair_id": "raw_1_dup",
-            "sample": sample_a,
-            "actor_response": "Wrong reasoning.\nThe final result is C.",
-            "actor_answer": "C",
-            "correct_answer": "A",
-            "actor_name": "actor_direct",
-        },
-        {
-            "raw_pair_id": "raw_correct",
-            "sample": sample_b,
-            "actor_response": "Correct reasoning.\nThe final result is B.",
-            "actor_answer": "B",
-            "correct_answer": "B",
-            "actor_name": "actor_direct",
-        },
-    ]
-    routed_items = [
-        RoutedTrainingItem(
-            sample=sample_a,
-            response="Wrong reasoning.\nThe final result is C.",
-            skill=CriticSkill.REASONING,
-            weight=1.0,
-            profile={
-                "primary": "reasoning",
-                "confidence": 0.9,
-                "evidence": "The actor uses the wrong inference.",
-            },
-            response_id="raw_1",
-        ),
-        RoutedTrainingItem(
-            sample=sample_a,
-            response="Wrong reasoning.\nThe final result is C.",
-            skill=CriticSkill.REASONING,
-            weight=1.0,
-            profile={
-                "primary": "reasoning",
-                "confidence": 0.9,
-                "evidence": "Duplicate route should not create another pair.",
-            },
-            response_id="raw_1_dup",
-        ),
-        RoutedTrainingItem(
-            sample=sample_b,
-            response="Correct reasoning.\nThe final result is B.",
-            skill=CriticSkill.REASONING,
-            weight=1.0,
-            profile={
-                "primary": "reasoning",
-                "confidence": 0.9,
-                "evidence": "Correct actor response must be filtered.",
-            },
-            response_id="raw_correct",
-        ),
-    ]
+    captured = {}
 
-    pairs, metrics = diversify.build_structured_critic_pairs(
-        raw_pairs=raw_pairs,
-        routed_items=routed_items,
+    def fake_detect_model_type(model_name):
+        return "qwen3"
+
+    def fake_train_sft(**kwargs):
+        captured["dataset"] = kwargs["sft_dataset"]
+        captured["model_type"] = kwargs["model_type"]
+        return str(tmp_path / "critic_reasoning_adapter")
+
+    monkeypatch.setattr(
+        "src.utils.model_utils.detect_model_type",
+        fake_detect_model_type,
+    )
+    monkeypatch.setattr("src.training.sft_trainer.train_sft", fake_train_sft)
+
+    checkpoint = diversify.train_critic_sft(
+        model_name="/models/base",
+        rows=[{"prompt": "Critic prompt", "response": "Critic feedback"}],
         critic_skill="reasoning",
-        max_pairs=10,
+        output_dir=str(tmp_path),
+        lora_r=8,
+        lora_alpha=16,
+        learning_rate=5e-5,
+        batch_size=1,
+        gradient_accumulation_steps=1,
+        num_epochs=1,
+        max_length=256,
         seed=42,
-        min_real_specialty_items=1,
-        min_unique_pairs=1,
-        max_duplicate_rate=0.0,
-        pair_mix={"specialty": 1.0, "general": 0.0},
+        device=0,
     )
 
-    assert len(pairs) == 1
-    assert pairs[0]["metadata"]["raw_pair_id"] == "raw_1"
-    assert metrics["unique_pair_count"] == 1
-    assert metrics["duplicate_rate"] == 0.0
-    assert metrics["raw_filter"]["dropped_counts"] == {
-        "duplicate_actor_error_case": 1,
-        "actor_response_correct": 1,
-    }
+    assert checkpoint == str(tmp_path / "critic_reasoning_adapter")
+    assert captured["model_type"] == "qwen3"
+    assert captured["dataset"][0]["prompt"] == "Critic prompt"
+    assert captured["dataset"][0]["response"] == "Critic feedback"
+    assert "chosen" not in captured["dataset"].column_names
+    assert "rejected" not in captured["dataset"].column_names
 
 
-def test_critic_structured_pairs_fail_when_unique_threshold_not_met():
+def test_step04_script_has_no_legacy_critic_dpo_pair_builders():
     diversify = _load_script("10_diversify_critics.py")
-    from src.society.agent_registry import CriticSkill
-    from src.society.diversity_split import RoutedTrainingItem
 
-    sample = {
-        "question": "Q",
-        "answer": "A",
-        "task_type": "multiple_choice",
-    }
-    raw_pairs = [{
-        "raw_pair_id": "raw_1",
-        "sample": sample,
-        "actor_response": "Wrong reasoning.\nThe final result is C.",
-        "actor_answer": "C",
-        "correct_answer": "A",
-        "actor_name": "actor_direct",
-    }]
-    routed_items = [RoutedTrainingItem(
-        sample=sample,
-        response="Wrong reasoning.\nThe final result is C.",
-        skill=CriticSkill.REASONING,
-        weight=1.0,
-        profile={
-            "primary": "reasoning",
-            "confidence": 0.9,
-            "evidence": "The actor uses the wrong inference.",
-        },
-        response_id="raw_1",
-    )]
-
-    pairs, metrics = diversify.build_structured_critic_pairs(
-        raw_pairs=raw_pairs,
-        routed_items=routed_items,
-        critic_skill="reasoning",
-        max_pairs=10,
-        seed=42,
-        min_real_specialty_items=1,
-        min_unique_pairs=2,
-        pair_mix={"specialty": 1.0, "general": 0.0},
-    )
-
-    assert pairs == []
-    assert metrics["status"] == "frozen_base"
-    assert metrics["reason"] == "unique_pairs_below_threshold"
+    assert not hasattr(diversify, "build_structured_critic_pairs")
+    assert not hasattr(diversify, "train_critic_dpo")
+    assert not hasattr(diversify, "select_critic_preference_pairs")
 
 
 def test_critic_routed_filter_collapses_duplicate_content_with_different_ids():

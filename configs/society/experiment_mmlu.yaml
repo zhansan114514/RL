@@ -93,45 +93,31 @@ step03_train_actors_sft:
   weight_decay: 0.01
   max_grad_norm: 1.0
 
-# Phase 4: Critic diversification
+# Phase 4: Critic SFT training
 step04_diversify_critics:
   input_dir: "output/society_mmlu_style3_qwen3/classified"
   actor_base_dir: "output/society_mmlu_style3_qwen3/actors"
   output_dir: "output/society_mmlu_style3_qwen3/critics"
-  api_base: "https://api.labforge.top"
-  api_model: "gpt5.5"
-  request_timeout: 60
-  retry_delay: 5
-  max_retries: 5
-  api_temperature: 0.1
   critic_skills: ["reasoning", "knowledge", "grounding", "verification"]
-  max_delib_samples: 100
-  num_rounds: 3
-  num_simulations: 2
-  max_classification_workers: 4
-  max_tokens: 192
-  reward_threshold: 0.0
-  min_real_specialty_items: 16
-  min_unique_pairs_per_critic: 64
-  max_critic_pair_duplicate_rate: 0.0
-  target_pairs_per_critic: 512
-  max_pairs_per_critic: 1024
-  min_pairs_per_critic: 64
-  allow_synthetic_critique: true
-  pair_mix:
-    specialty: 0.75
-    general: 0.25
+  max_samples: 100
+  max_examples_per_critic: 512
+  min_examples_per_critic: 64
+  correction_ratio: 0.55
+  keep_ratio: 0.45
+  summary_mode: rule
+  validate_revision: true
+  fail_on_low_data: true
+  actor_max_tokens: 192
+  revision_max_tokens: 192
+  summary_max_chars_per_actor: 500
   gradient_accumulation_steps: 4
   lora_r: 64
   lora_alpha: 128
   learning_rate: 5.0e-5
-  beta: 0.1
   batch_size: 4
   num_epochs: 1
   max_length: 2048
   max_lora_rank: 256
-  strict_classification: true
-  max_classification_failure_rate: 0.0
 
 # Phase 5: Society alternating training
 step05_train_society:

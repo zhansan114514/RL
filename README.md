@@ -2,7 +2,8 @@
 
 This repository contains the current Society experiment pipeline: multiple
 style-specialized Actors, multiple skill-specialized Critics, confidence-based
-Critic routing, LoRA DPO training, and A1-A5 ablation evaluation.
+Critic routing, first-round Critic SFT, LoRA DPO training for later Society
+updates, and A1-A5 ablation evaluation.
 
 The previous standalone 1 Actor + 1 Critic experiment scripts and tests have
 been removed. The supported experiment entrypoints are the Society phase

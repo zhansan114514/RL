@@ -37,7 +37,7 @@ PHASES = [
     ("07_bootstrap_actors.py", "Phase 1: Actor SFT 候选生成"),
     ("08_classify_data.py",    "Phase 2: 候选正确性/风格分类"),
     ("09_train_actors_sft.py", "Phase 3: Actor SFT 训练"),
-    ("10_diversify_critics.py","Phase 4: Critic 分化训练"),
+    ("10_diversify_critics.py","Phase 4: Critic SFT 训练"),
     ("11_society_train.py",    "Phase 5: Society 交替训练"),
     ("12_society_evaluate.py", "Phase 6: 评估 + 消融实验"),
 ]
@@ -230,11 +230,11 @@ def _get_api_key_from_config(config_path: str) -> str | None:
 
 
 def _build_subprocess_env(phase_num: int, config_path: str) -> dict[str, str]:
-    """Build subprocess env and share the GLM key with strict classification phases."""
+    """Build subprocess env and share the GLM key with classification phases."""
     scripts_dir = os.path.dirname(os.path.abspath(__file__))
     sub_env = {**os.environ, "PYTHONPATH": os.path.dirname(scripts_dir)}
     configure_runtime_libraries(sub_env, preload=False)
-    if phase_num in {4, 5} and not sub_env.get("GLM_API_KEY"):
+    if phase_num == 5 and not sub_env.get("GLM_API_KEY"):
         api_key = _get_api_key_from_config(config_path)
         if api_key:
             sub_env["GLM_API_KEY"] = api_key

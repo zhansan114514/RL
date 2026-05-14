@@ -150,6 +150,41 @@ api:
         ):
             assert old_key not in step
 
+    def test_critic_sft_step_replaces_critic_dpo_keys(self, tmp_path):
+        local = tmp_path / "local.yaml"
+        local.write_text("""
+api:
+  providers:
+    glm:
+      api_key: test-key
+      api_base: https://api.example.test
+      api_model: test-model
+""")
+        cfg = ConfigManager.initialize(
+            config_path="configs/society/experiment_mmlu.yaml",
+            local_config_path=str(local),
+        )
+        step = cfg.step("step04_diversify_critics")
+
+        assert step.get("max_examples_per_critic") == 512
+        assert step.get("correction_ratio") == 0.55
+        assert step.get("keep_ratio") == 0.45
+        assert step.get("validate_revision") is True
+        for old_key in (
+            "pair_mix",
+            "beta",
+            "reward_threshold",
+            "num_simulations",
+            "strict_classification",
+            "min_real_specialty_items",
+            "min_unique_pairs_per_critic",
+            "max_critic_pair_duplicate_rate",
+            "allow_synthetic_critique",
+            "target_pairs_per_critic",
+            "max_pairs_per_critic",
+        ):
+            assert old_key not in step
+
     def test_step_defaults_are_required_schema(self):
         """defaults declares required keys; it does not fill missing values."""
         cfg = ConfigManager.initialize()
