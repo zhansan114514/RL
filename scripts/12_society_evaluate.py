@@ -69,6 +69,7 @@ STEP_DEFAULTS = {
     "router_fallback_to_uniform": False,
     "route_feedback_to_actor": True,
     "consensus_uses_selected_critics_only": False,
+    "max_samples": None,
     "sampling": None,
     "mmlu_load_mode": "by_subject",
     "eval_batch_size": 1,
@@ -1557,6 +1558,14 @@ def main():
         sampling=getattr(args, "sampling", None),
         mmlu_load_mode=getattr(args, "mmlu_load_mode", "by_subject"),
     )
+    max_samples = getattr(args, "max_samples", None)
+    if max_samples is not None:
+        max_samples = int(max_samples)
+        if max_samples <= 0:
+            raise ValueError(f"max_samples must be positive or None, got {max_samples}")
+        if len(samples) > max_samples:
+            samples = samples[:max_samples]
+            logger.info(f"  Applied max_samples={max_samples}")
     logger.info(f"  Test samples: {len(samples)}")
 
     # Run all evaluations with shared engine

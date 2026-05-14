@@ -34,12 +34,17 @@ sampling:
     max_samples: null
     seed_offset: 2
 
-# Phase 1: Style-prompted Actor data generation
+# Phase 1: Actor SFT candidate generation
 step01_bootstrap:
   output_dir: "output/society_mmlu_style3_qwen3/bootstrap"
+  source_splits: ["dev", "validation"]
+  subject_balanced: true
+  min_subjects: 57
+  max_samples_per_subject: 20
+  max_samples: 300
   reasoning_styles: ["direct", "evidence", "elimination"]
-  generations_per_style: 4
-  temperature: 0.7
+  temperatures: [0.4, 0.7, 1.0, 1.2]
+  generations_per_temperature: 1
   top_p: 0.8
   max_tokens: 384
   batch_size: 4
@@ -65,29 +70,28 @@ step02_classify:
   min_style_confidence: 0.60
   min_error_confidence: 0.5
 
-# Phase 3: Actor diversification
-step03_diversify_actors:
+# Phase 3: Actor SFT training
+step03_train_actors_sft:
   input_dir: "output/society_mmlu_style3_qwen3/classified"
   output_dir: "output/society_mmlu_style3_qwen3/actors"
   reasoning_styles: ["direct", "evidence", "elimination"]
-  min_pairs_per_actor: 256
-  target_pairs_per_actor: 512
-  max_pairs_per_actor: 1024
-  max_pairs_per_sample: 4
-  augment_when_below: 256
-  max_synthetic_ratio: 0.7
-  max_prompted_fallback_ratio: 0.5
-  pair_mix:
-    correctness: 0.7
-    style: 0.3
+  min_style_confidence: 0.55
+  min_examples_per_actor: 256
+  max_examples_per_question_style: 2
+  balance_by_subject: true
+  min_subject_coverage: 55
+  max_style_imbalance_ratio: 1.5
+  max_subject_imbalance_ratio: 3.0
   lora_r: 256
   lora_alpha: 512
   learning_rate: 5.0e-5
-  beta: 0.1
   batch_size: 4
   gradient_accumulation_steps: 4
   num_epochs: 1
   max_length: 2048
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  max_grad_norm: 1.0
 
 # Phase 4: Critic diversification
 step04_diversify_critics:

@@ -1,13 +1,9 @@
 """
-Diversity split: Data-level diversification for Multiagent FT.
+Diversity split: Critic error-profile routing for Society training.
 
-Partitions training data by:
-1. Reasoning style (DIRECT, EVIDENCE, ELIMINATION) → for Actor diversification
-2. Error profile dimensions → weighted Critic-skill routing
-
-Each Actor trains only on its style subset.  Critics receive a mixture of
-general examples, high-relevance specialty examples, and out-of-specialty
-calibration examples.
+Incorrect Actor responses are classified by error-profile dimensions and
+routed into specialist Critic training mixtures.  Actors are selected for
+first-round SFT in scripts/09_train_actors_sft.py, not through this module.
 """
 
 from __future__ import annotations
@@ -19,15 +15,12 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 from dataclasses import dataclass, replace
-from pathlib import Path
-from typing import Optional
 
 import numpy as np
 
-from src.society.agent_registry import ReasoningStyle, CriticSkill
+from src.society.agent_registry import CriticSkill
 from src.society.data_classifier import (
     ERROR_PROFILE_DIMENSIONS,
-    classify_reasoning_style,
     classify_error_profile,
     ClassificationError,
 )
@@ -57,23 +50,18 @@ class RoutedTrainingItem:
 
 class DiversitySplit:
     """
-    Split training data across reasoning styles and error types.
+    Route incorrect responses across error types.
 
     Uses DataClassifier to label each sample, then groups by label.
-    Does not hard-balance by default; minority handling belongs in pair
-    construction and augmentation, not in destructive split downsampling.
-
-    Supports loading pre-classified results from phase 2 (08_classify_data.py)
-    via `pre_classified_file` to avoid redundant re-classification.
+    Minority handling belongs in pair construction, not in destructive split
+    downsampling.
     """
 
     def __init__(
         self,
-        balance: bool = False,
         seed: int = 42,
         use_api: bool = True,
         cache_dir: str = "output/society/classified",
-        pre_classified_file: Optional[str] = None,
         api_key: str = "",
         api_base: str = "",
         api_model: str = "",
@@ -84,12 +72,9 @@ class DiversitySplit:
         max_retries: int = 5,
         retry_delay: int | float = 5,
     ):
-        self.balance = balance
         self.rng = np.random.default_rng(seed)
         self.use_api = use_api
         self.cache_dir = cache_dir
-        self.pre_classified_file = pre_classified_file
-        self._pre_classified: Optional[dict] = None
         self._api_key = api_key
         self._api_base = api_base
         self._api_model = api_model
@@ -100,91 +85,6 @@ class DiversitySplit:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.last_classification_metrics: dict[str, dict] = {}
-
-        if pre_classified_file:
-            self._pre_classified = self._load_pre_classified(pre_classified_file)
-
-    @staticmethod
-    def _load_pre_classified(path: str) -> Optional[dict]:
-        """Load pre-classified results from phase 2 (08_classify_data.py).
-
-        Returns a dict keyed by (question, response) hash -> classification,
-        or None if the file doesn't exist.
-        """
-        path = Path(path)
-        if not path.exists():
-            logger.warning(f"Pre-classified file not found: {path}")
-            return None
-
-        try:
-            with open(path) as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning(f"Failed to load pre-classified file: {e}")
-            return None
-
-        # Build lookups by stable response_id first, with content hash as a
-        # secondary key for generated pairs that do not originate from bootstrap.
-        by_response_id: dict[str, dict] = {}
-        by_content: dict[str, dict] = {}
-        for result in data.get("results", []):
-            # Use per-response labels for fine-grained matching
-            for label in result.get("per_response_labels", []):
-                question = result.get("question") or result.get("sample_id", "")
-                response = label.get("response", "")
-                key = _content_hash(question, response)
-                entry = {}
-                if label.get("response_id"):
-                    entry["response_id"] = label["response_id"]
-                if label.get("reasoning_style"):
-                    entry["style"] = label["reasoning_style"]
-                    entry["style_confidence"] = label.get("reasoning_style_confidence", 0.5)
-                if label.get("error_profile"):
-                    entry["error_profile"] = label["error_profile"]
-                if entry:
-                    by_content[key] = entry
-                    if entry.get("response_id"):
-                        by_response_id[entry["response_id"]] = entry
-
-        logger.info(
-            f"Loaded {len(by_content)} pre-classified entries from {path}"
-        )
-        return {"by_response_id": by_response_id, "by_content": by_content}
-
-    def _lookup_pre_classified_style(
-        self, question: str, response: str, response_id: str = "",
-    ) -> Optional[ReasoningStyle]:
-        """Check pre-classified results for a reasoning style match."""
-        if not self._pre_classified:
-            return None
-        entry = None
-        if response_id:
-            entry = self._pre_classified.get("by_response_id", {}).get(response_id)
-        key = _content_hash(question, response)
-        if entry is None:
-            entry = self._pre_classified.get("by_content", {}).get(key)
-        if entry and "style" in entry:
-            try:
-                return ReasoningStyle(entry["style"])
-            except ValueError:
-                pass
-        return None
-
-    def _lookup_pre_classified_error_profile(
-        self, question: str, response: str, response_id: str = "",
-    ) -> Optional[dict]:
-        """Check pre-classified results for an error profile match."""
-        if not self._pre_classified:
-            return None
-        entry = None
-        if response_id:
-            entry = self._pre_classified.get("by_response_id", {}).get(response_id)
-        key = _content_hash(question, response)
-        if entry is None:
-            entry = self._pre_classified.get("by_content", {}).get(key)
-        if entry and "error_profile" in entry:
-            return entry["error_profile"]
-        return None
 
     def _require_live_classifier(self) -> None:
         if not self.strict_classification:
@@ -204,14 +104,12 @@ class DiversitySplit:
         self,
         kind: str,
         total: int,
-        preclassified: int,
         attempted_live: int,
         failures: int,
     ) -> None:
         failure_rate = failures / attempted_live if attempted_live else 0.0
         metrics = {
             "total_items": total,
-            "preclassified": preclassified,
             "attempted_live": attempted_live,
             "failures": failures,
             "failure_rate": failure_rate,
@@ -230,109 +128,14 @@ class DiversitySplit:
                 f"({failures}/{attempted_live})"
             )
 
-    def split_by_reasoning_style(
-        self,
-        samples: list[dict],
-        responses: Optional[list[str]] = None,
-        answers: Optional[list[str]] = None,
-        response_ids: Optional[list[str]] = None,
-    ) -> dict[ReasoningStyle, list[dict]]:
-        """
-        Split samples by reasoning style.
-
-        For samples with correct responses, classifies the reasoning style
-        and groups accordingly.
-
-        Args:
-            samples: List of standardized sample dicts.
-            responses: Optional corresponding responses (for classification).
-            answers: Optional correct answers.
-
-        Returns:
-            Dict mapping ReasoningStyle to list of samples.
-        """
-        splits: dict[ReasoningStyle, list[dict]] = {s: [] for s in ReasoningStyle}
-        preclassified = 0
-        attempted_live = 0
-        failures = 0
-
-        for i, sample in enumerate(samples):
-            question = sample.get("question", "")
-            response = responses[i] if responses and i < len(responses) else ""
-            answer = answers[i] if answers and i < len(answers) else sample.get("answer", "")
-            response_id = response_ids[i] if response_ids and i < len(response_ids) else ""
-
-            if response:
-                # Try pre-classified data first (single source of truth)
-                style = self._lookup_pre_classified_style(question, response, response_id)
-                if style is not None:
-                    preclassified += 1
-                    splits[style].append(sample)
-                    continue
-
-                # Fall back to live classification
-                self._require_live_classifier()
-                try:
-                    attempted_live += 1
-                    result = classify_reasoning_style(
-                        response=response,
-                        question=question,
-                        correct_answer=answer,
-                        use_api=self.use_api,
-                        cache_dir=self.cache_dir,
-                        api_key=self._api_key,
-                        api_base=self._api_base,
-                        api_model=self._api_model,
-                        request_timeout=self.request_timeout,
-                        max_retries=self.max_retries,
-                        retry_delay=self.retry_delay,
-                    )
-                    style = result.style
-                except ClassificationError as e:
-                    failures += 1
-                    if self.strict_classification:
-                        logger.error(f"Reasoning style classification failed for sample {i}: {e}")
-                        continue
-                    logger.warning(
-                        f"Classification failed for sample {i}; leaving unclassified: {e}"
-                    )
-                    continue
-            else:
-                if self.strict_classification:
-                    attempted_live += 1
-                    failures += 1
-                    logger.error(f"Missing response for strict reasoning style classification at sample {i}")
-                    continue
-                logger.warning(f"Missing response for reasoning style classification at sample {i}")
-                continue
-
-            splits[style].append(sample)
-
-        self._record_classification_metrics(
-            "reasoning_style",
-            total=len(samples),
-            preclassified=preclassified,
-            attempted_live=attempted_live,
-            failures=failures,
-        )
-
-        if self.balance:
-            splits = self._balance_splits(splits)
-
-        logger.info(
-            "Reasoning style split: "
-            + ", ".join(f"{s.value}={len(v)}" for s, v in splits.items())
-        )
-        return splits
-
     def split_by_error_profile(
         self,
         samples: list[dict],
         responses: list[str],
-        correct_answers: Optional[list[str]] = None,
-        extracted_answers: Optional[list[str]] = None,
+        correct_answers: list[str] | None = None,
+        extracted_answers: list[str] | None = None,
         dataset_name: str = "",
-        response_ids: Optional[list[str]] = None,
+        response_ids: list[str] | None = None,
     ) -> list[RoutedTrainingItem]:
         """
         Route incorrect responses by multi-dimensional error profile.
@@ -354,7 +157,6 @@ class DiversitySplit:
         routed_items: list[RoutedTrainingItem] = []
         profile_counts = {dim: 0 for dim in ERROR_PROFILE_DIMENSIONS}
         profile_counts["general"] = 0
-        preclassified = 0
         attempted_live = 0
         failures = 0
         profile_by_index: dict[int, dict] = {}
@@ -364,14 +166,6 @@ class DiversitySplit:
             question = sample.get("question", "")
             correct = correct_answers[i] if correct_answers and i < len(correct_answers) else sample.get("answer", "")
             extracted = extracted_answers[i] if extracted_answers and i < len(extracted_answers) else ""
-            response_id = response_ids[i] if response_ids and i < len(response_ids) else ""
-
-            # Try pre-classified data first (single source of truth)
-            profile = self._lookup_pre_classified_error_profile(question, response, response_id)
-            if profile is not None:
-                preclassified += 1
-                profile_by_index[i] = profile
-                continue
 
             key = _live_profile_key(
                 question=question,
@@ -483,7 +277,6 @@ class DiversitySplit:
         self._record_classification_metrics(
             "error_profile",
             total=len(responses),
-            preclassified=preclassified,
             attempted_live=attempted_live,
             failures=failures,
         )
@@ -625,22 +418,6 @@ class DiversitySplit:
         size = n if replace else min(n, len(pool))
         indices = self.rng.choice(len(pool), size=size, replace=replace)
         return [pool[int(i)] for i in indices]
-
-    def _balance_splits(self, splits: dict) -> dict:
-        """Downsample majority groups to match minority."""
-        non_empty = {k: v for k, v in splits.items() if v}
-        if not non_empty:
-            return splits
-
-        target = min(len(v) for v in non_empty.values())
-        balanced = {}
-        for key, items in splits.items():
-            if len(items) > target:
-                indices = self.rng.choice(len(items), size=target, replace=False)
-                balanced[key] = [items[i] for i in indices]
-            else:
-                balanced[key] = items
-        return balanced
 
 
 def assign_error_profile(

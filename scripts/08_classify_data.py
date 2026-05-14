@@ -1,9 +1,10 @@
 """
-Classify bootstrap data with the shared MMLU-aware society classifier.
+Classify Actor SFT candidates with the shared MMLU-aware style classifier.
 
-Outputs schema_version=3 classified_data.json and classification_report.json.
-The script is intentionally a caller of src.society.data_classifier; it does
-not maintain its own label taxonomy.
+Phase 08 now performs local correctness checks for every generated response,
+then calls the reasoning-style classifier only for correct responses.  The main
+training gate is accepted_for_actor_sft: correct, trainable, prompted-style
+matched, classified-style matched, and above the configured confidence floor.
 """
 
 from __future__ import annotations
@@ -24,10 +25,7 @@ from _utils import setup_logging
 from src.society.agent_registry import ReasoningStyle
 from src.society.actor_response_quality import is_trainable_actor_response
 from src.society.data_classifier import (
-    ERROR_PROFILE_DIMENSIONS,
-    ERROR_PROFILE_PRIMARY_LABELS,
     ClassificationError,
-    classify_error_profile,
     classify_reasoning_style,
 )
 from src.utils.config import ConfigManager
@@ -52,7 +50,6 @@ STEP_DEFAULTS = {
 }
 
 VALID_STYLES = {style.value for style in ReasoningStyle}
-VALID_PRIMARY = set(ERROR_PROFILE_PRIMARY_LABELS)
 
 
 def parse_args():
@@ -120,10 +117,11 @@ def load_trajectories(input_dir: str) -> list[dict]:
 def checkpoint_metadata(args: Any) -> dict[str, Any]:
     trajectory_file = resolve_trajectory_file(str(getattr(args, "input_dir", "")))
     return {
+        "schema_version": 4,
+        "classification_mode": "actor_sft_selection",
         "input_dir": str(getattr(args, "input_dir", "")),
         "input_file": fingerprint_file(trajectory_file),
         "reasoning_styles": sorted(VALID_STYLES),
-        "error_profile_dimensions": list(ERROR_PROFILE_DIMENSIONS),
         "min_style_confidence": float(getattr(args, "min_style_confidence", 0.65)),
     }
 
@@ -139,7 +137,7 @@ def load_checkpoint(output_dir: str, args: Any) -> dict[str, Any]:
             "Ignoring stale classification checkpoint at %s: metadata mismatch",
             path,
         )
-    return {"schema_version": 3, "completed": [], "results": []}
+    return {"schema_version": 4, "completed": [], "results": []}
 
 
 def save_checkpoint(output_dir: str, checkpoint: dict[str, Any], args: Any) -> None:
@@ -214,6 +212,9 @@ def build_per_response_labels(traj: dict[str, Any]) -> list[dict[str, Any]]:
             "agent_id": resp.get("agent_id", 0),
             "agent_name": resp.get("agent_name", ""),
             "prompted_style": resp.get("prompted_style", ""),
+            "source_split": resp.get("source_split") or traj.get("source_split", ""),
+            "subject": resp.get("subject") or traj.get("subject", ""),
+            "temperature": resp.get("temperature"),
             "task_type": task_type,
             "generation_index": resp.get("generation_index"),
             "response": resp.get("response", ""),
@@ -224,21 +225,18 @@ def build_per_response_labels(traj: dict[str, Any]) -> list[dict[str, Any]]:
             "reasoning_style": None,
             "reasoning_style_confidence": 0.0,
             "format_status": None,
-            "error_profile": None,
             "classification_source": None,
             "style_match": False,
             "trainable_for_actor": False,
             "style_verified": False,
             "style_weight": 0.0,
-            "quality_accepted_for_actor": False,
-            "strict_accepted_for_actor": False,
-            "accepted_for_actor": False,
+            "accepted_for_actor_sft": False,
         })
     return labels
 
 
 def update_actor_acceptance(label: dict[str, Any], args: Any) -> None:
-    """Populate actor-training gate fields for one classified label."""
+    """Populate actor SFT gate fields for one classified label."""
     prompted_style = str(label.get("prompted_style") or "")
     primary_style = str(label.get("primary_style") or "")
     task_type = str(label.get("task_type") or "multiple_choice")
@@ -254,12 +252,12 @@ def update_actor_acceptance(label: dict[str, Any], args: Any) -> None:
     label["trainable_for_actor"] = trainable
     label["style_verified"] = style_verified
     label["style_weight"] = confidence if style_match else 0.3
-    label["quality_accepted_for_actor"] = trainable
-    label["strict_accepted_for_actor"] = trainable and style_verified
-    # Legacy compatibility: accepted_for_actor means quality-accepted, not
-    # necessarily style-verified.  Downstream pair builders cap non-strict
-    # prompted fallback data separately.
-    label["accepted_for_actor"] = trainable
+    label["accepted_for_actor_sft"] = (
+        trainable
+        and style_verified
+        and bool(prompted_style)
+        and primary_style == prompted_style
+    )
 
 
 def _choices_text(sample: dict[str, Any]) -> str:
@@ -295,34 +293,7 @@ def classify_label(label: dict[str, Any], sample: dict[str, Any], args: Any) -> 
             update_actor_acceptance(label, args)
             return True
 
-        result = classify_error_profile(
-            response=label.get("response", ""),
-            question=question,
-            extracted_answer=label.get("answer") or "",
-            correct_answer=sample.get("answer", ""),
-            choices=sample.get("choices", ""),
-            dataset_name=sample.get("dataset_name", ""),
-            task_type=sample.get("task_type", ""),
-            subject=sample.get("subject", sample.get("category", "")),
-            use_api=True,
-            cache_dir=args.output_dir,
-            api_key=args.api_key,
-            api_base=args.api_base,
-            api_model=args.api_model,
-            request_timeout=args.request_timeout,
-            max_retries=args.max_retries,
-            retry_delay=args.retry_delay,
-        )
-        label["format_status"] = result.format_status
-        label["error_profile"] = {
-            "format_status": result.format_status,
-            "scores": result.scores,
-            "primary": result.primary,
-            "secondary": result.secondary,
-            "confidence": result.confidence,
-            "evidence": result.evidence,
-        }
-        label["classification_source"] = "shared_classifier"
+        label["classification_source"] = "local_correctness_only"
         update_actor_acceptance(label, args)
         return True
     except ClassificationError as e:
@@ -341,11 +312,6 @@ def aggregate_result(
         for label in labels
         if label.get("is_correct") and label.get("primary_style")
     ]
-    error_profiles = [
-        label.get("error_profile")
-        for label in labels
-        if not label.get("is_correct") and label.get("error_profile")
-    ]
 
     primary_style = None
     style_confidence = 0.0
@@ -355,34 +321,12 @@ def aggregate_result(
             conf for style, conf in style_labels if style == primary_style
         ) / max(1, sum(1 for style, _ in style_labels if style == primary_style))
 
-    error_profile = None
-    if error_profiles:
-        avg_scores = {
-            dim: sum(p.get("scores", {}).get(dim, 0.0) for p in error_profiles) / len(error_profiles)
-            for dim in ERROR_PROFILE_DIMENSIONS
-        }
-        primary = Counter(p.get("primary", "ambiguous") for p in error_profiles).most_common(1)[0][0]
-        error_profile = {
-            "format_status": Counter(
-                p.get("format_status", "valid") for p in error_profiles
-            ).most_common(1)[0][0],
-            "scores": avg_scores,
-            "primary": primary,
-            "secondary": [
-                dim for dim, _ in sorted(avg_scores.items(), key=lambda kv: kv[1], reverse=True)
-                if dim != primary
-            ][:2],
-            "confidence": sum(p.get("confidence", 0.0) for p in error_profiles) / len(error_profiles),
-            "evidence": "sample-level aggregate",
-        }
-
     metadata = {
         "num_correct": sum(1 for label in labels if label.get("is_correct")),
         "num_incorrect": sum(1 for label in labels if not label.get("is_correct")),
         "num_format_failure": sum(
             1 for label in labels
             if label.get("format_status") in {"answer_only", "empty_or_invalid"}
-            or (label.get("error_profile") or {}).get("primary") == "format_failure"
         ),
         "num_responses": len(labels),
         "num_style_match": sum(1 for label in labels if label.get("style_match")),
@@ -392,14 +336,8 @@ def aggregate_result(
         "num_style_verified": sum(
             1 for label in labels if label.get("style_verified")
         ),
-        "num_quality_accepted_for_actor": sum(
-            1 for label in labels if label.get("quality_accepted_for_actor")
-        ),
-        "num_strict_accepted_for_actor": sum(
-            1 for label in labels if label.get("strict_accepted_for_actor")
-        ),
-        "num_accepted_for_actor": sum(
-            1 for label in labels if label.get("accepted_for_actor")
+        "num_accepted_for_actor_sft": sum(
+            1 for label in labels if label.get("accepted_for_actor_sft")
         ),
         "classification_sources": dict(Counter(
             label.get("classification_source") or "unclassified"
@@ -415,7 +353,6 @@ def aggregate_result(
         "primary_style": primary_style,
         "reasoning_style": primary_style,
         "reasoning_style_confidence": style_confidence,
-        "error_profile": error_profile,
         "metadata": metadata,
         "per_response_labels": labels,
     }
@@ -427,7 +364,7 @@ def classify_trajectory(traj: dict[str, Any], idx: int, args: Any) -> dict[str, 
     sample.setdefault("dataset_name", getattr(args, "dataset", ""))
     labels = build_per_response_labels(traj)
 
-    attempts = len(labels)
+    attempts = sum(1 for label in labels if label.get("is_correct"))
     failures = 0
     for label in labels:
         if not classify_label(label, sample, args):
@@ -442,21 +379,29 @@ def classify_trajectory(traj: dict[str, Any], idx: int, args: Any) -> dict[str, 
     }
 
 
+def classification_counts(results: list[dict[str, Any]]) -> tuple[int, int]:
+    """Count style-classification attempts/failures across all saved results."""
+    attempts = 0
+    failures = 0
+    for result in results:
+        for label in result.get("per_response_labels", []):
+            if not label.get("is_correct"):
+                continue
+            attempts += 1
+            if label.get("classification_source") != "shared_classifier":
+                failures += 1
+    return attempts, failures
+
+
 def build_reports(
     results: list[dict[str, Any]],
     min_style_confidence: float,
+    api_failure_rate: float = 0.0,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    style_splits: dict[str, list[str]] = defaultdict(list)
-    profile_splits: dict[str, list[str]] = defaultdict(list)
-    per_response_style_splits: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    per_response_profile_splits: dict[str, list[dict[str, Any]]] = defaultdict(list)
-
     style_dist: Counter[str] = Counter()
-    profile_dist: Counter[str] = Counter()
     format_dist: Counter[str] = Counter()
     per_subject: dict[str, dict[str, Counter[str]]] = defaultdict(lambda: {
         "styles": Counter(),
-        "errors": Counter(),
         "formats": Counter(),
     })
 
@@ -464,24 +409,17 @@ def build_reports(
     style_match_dist: Counter[str] = Counter()
     style_verified_dist: Counter[str] = Counter()
     trainable_style_dist: Counter[str] = Counter()
-    accepted_style_dist: Counter[str] = Counter()
-    # Confusion matrix: prompted_style -> classified_style -> count
+    accepted_sft_style_dist: Counter[str] = Counter()
+    actor_sft_by_style: dict[str, Counter[str]] = defaultdict(Counter)
+    actor_sft_by_subject_style: dict[str, Counter[str]] = defaultdict(Counter)
     confusion: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
-    # prompted_style -> total classified (for match rate denominator)
     prompted_classified: Counter[str] = Counter()
     gate_retention: dict[str, Counter[str]] = defaultdict(Counter)
     warnings: list[str] = []
 
     for result in results:
-        sample_id = result["sample_id"]
         sample = result.get("sample", {})
         subject = sample.get("subject", sample.get("category", "unknown"))
-
-        if result.get("primary_style"):
-            style_splits[result["primary_style"]].append(sample_id)
-        profile = result.get("error_profile")
-        if profile and profile.get("primary") in VALID_PRIMARY:
-            profile_splits[profile["primary"]].append(sample_id)
 
         for label in result.get("per_response_labels", []):
             total_labels += 1
@@ -490,14 +428,18 @@ def build_reports(
             per_subject[subject]["formats"][fmt] += 1
             prompted = str(label.get("prompted_style") or "unknown")
             gate_retention[prompted]["total"] += 1
+            actor_sft_by_style[prompted]["generated"] += 1
             if label.get("answer") is not None:
                 gate_retention[prompted]["parseable"] += 1
             if label.get("is_correct"):
                 gate_retention[prompted]["correct"] += 1
+                actor_sft_by_style[prompted]["correct"] += 1
             if label.get("trainable_for_actor"):
                 gate_retention[prompted]["trainable"] += 1
             if label.get("style_match"):
                 gate_retention[prompted]["style_match"] += 1
+                if label.get("is_correct"):
+                    actor_sft_by_style[prompted]["style_matched"] += 1
             if (
                 float(label.get("reasoning_style_confidence", 0.0) or 0.0)
                 >= min_style_confidence
@@ -505,12 +447,10 @@ def build_reports(
                 gate_retention[prompted]["confidence_pass"] += 1
             if label.get("style_verified"):
                 gate_retention[prompted]["style_verified"] += 1
-            if label.get("accepted_for_actor"):
-                gate_retention[prompted]["accepted_for_actor"] += 1
-            if label.get("quality_accepted_for_actor"):
-                gate_retention[prompted]["quality_accepted_for_actor"] += 1
-            if label.get("strict_accepted_for_actor"):
-                gate_retention[prompted]["strict_accepted_for_actor"] += 1
+            if label.get("accepted_for_actor_sft"):
+                gate_retention[prompted]["accepted_for_actor_sft"] += 1
+                actor_sft_by_style[prompted]["usable"] += 1
+                actor_sft_by_subject_style[subject][prompted] += 1
             if label.get("primary_style"):
                 style = label["primary_style"]
                 style_dist[style] += 1
@@ -521,42 +461,11 @@ def build_reports(
                     trainable_style_dist[style] += 1
                 if label.get("style_verified"):
                     style_verified_dist[style] += 1
-                if label.get("accepted_for_actor"):
-                    accepted_style_dist[style] += 1
+                if label.get("accepted_for_actor_sft"):
+                    accepted_sft_style_dist[style] += 1
                 if prompted:
                     confusion[prompted][style] += 1
                     prompted_classified[prompted] += 1
-                per_response_style_splits[style].append({
-                    "sample_id": sample_id,
-                    "response_id": label.get("response_id", ""),
-                    "round": label.get("round", 0),
-                    "agent_id": label.get("agent_id", 0),
-                    "agent_name": label.get("agent_name", ""),
-                    "prompted_style": label.get("prompted_style", ""),
-                    "style_match": label.get("style_match", False),
-                    "trainable_for_actor": label.get("trainable_for_actor", False),
-                    "style_verified": label.get("style_verified", False),
-                    "style_weight": label.get("style_weight", 0.0),
-                    "quality_accepted_for_actor": label.get("quality_accepted_for_actor", False),
-                    "strict_accepted_for_actor": label.get("strict_accepted_for_actor", False),
-                    "accepted_for_actor": label.get("accepted_for_actor", False),
-                    "is_correct": label.get("is_correct", False),
-                })
-            profile = label.get("error_profile")
-            if profile and profile.get("primary") in VALID_PRIMARY:
-                primary = profile["primary"]
-                profile_dist[primary] += 1
-                per_subject[subject]["errors"][primary] += 1
-                per_response_profile_splits[primary].append({
-                    "sample_id": sample_id,
-                    "response_id": label.get("response_id", ""),
-                    "round": label.get("round", 0),
-                    "agent_id": label.get("agent_id", 0),
-                    "agent_name": label.get("agent_name", ""),
-                    "is_correct": label.get("is_correct", False),
-                    "scores": profile.get("scores", {}),
-                    "confidence": profile.get("confidence", 0.0),
-                })
 
     correct_style_total = sum(style_dist.values())
     if correct_style_total:
@@ -574,38 +483,25 @@ def build_reports(
         ) / total_labels
         if format_failure_ratio > 0.20:
             warnings.append(f"format_failure ratio {format_failure_ratio:.3f} exceeds 0.20")
-    profile_total = sum(profile_dist.values())
-    if profile_total:
-        ambiguous_ratio = profile_dist.get("ambiguous", 0) / profile_total
-        if ambiguous_ratio > 0.20:
-            warnings.append(f"ambiguous error ratio {ambiguous_ratio:.3f} exceeds 0.20")
 
-    # Build confusion matrix (prompted_style -> classified_style -> count)
     confusion_matrix: dict[str, dict[str, int]] = {}
     for prompted in sorted(confusion):
         confusion_matrix[prompted] = dict(confusion[prompted])
 
-    # Build style match rate by prompted style
     style_match_rate_by_prompted: dict[str, float] = {}
     for prompted in sorted(confusion):
         total = prompted_classified[prompted]
         matched = confusion[prompted].get(prompted, 0)
         style_match_rate_by_prompted[prompted] = round(matched / total, 4) if total else 0.0
 
-    splits = {
-        "reasoning_styles": dict(style_splits),
-        "error_profiles": dict(profile_splits),
-        "per_response_reasoning_styles": dict(per_response_style_splits),
-        "per_response_error_profiles": dict(per_response_profile_splits),
-    }
     report = {
-        "schema_version": 3,
+        "schema_version": 4,
+        "classification_mode": "actor_sft_selection",
         "style_distribution": dict(style_dist),
         "style_match_distribution": dict(style_match_dist),
         "trainable_for_actor_distribution": dict(trainable_style_dist),
         "style_verified_distribution": dict(style_verified_dist),
-        "accepted_for_actor_distribution": dict(accepted_style_dist),
-        "error_profile_distribution": dict(profile_dist),
+        "accepted_for_actor_sft_distribution": dict(accepted_sft_style_dist),
         "format_status_distribution": dict(format_dist),
         "min_style_confidence": min_style_confidence,
         "prompted_vs_classified_confusion": confusion_matrix,
@@ -617,14 +513,50 @@ def build_reports(
         "per_subject_distribution": {
             subject: {
                 "styles": dict(counters["styles"]),
-                "errors": dict(counters["errors"]),
                 "formats": dict(counters["formats"]),
             }
             for subject, counters in per_subject.items()
         },
         "warnings": warnings,
     }
-    return splits, report
+
+    usable_counts = [
+        actor_sft_by_style[style].get("usable", 0)
+        for style in sorted(VALID_STYLES)
+    ]
+    max_usable = max(usable_counts) if usable_counts else 0
+    min_usable = min(usable_counts) if usable_counts else 0
+    style_imbalance_ratio = (
+        round(max_usable / min_usable, 4)
+        if min_usable > 0
+        else None
+    )
+    actor_sft_report = {
+        "schema_version": 4,
+        "selection_mode": "actor_sft_candidates",
+        "min_style_confidence": min_style_confidence,
+        "by_style": {
+            style: {
+                "generated": actor_sft_by_style[style].get("generated", 0),
+                "correct": actor_sft_by_style[style].get("correct", 0),
+                "style_matched": actor_sft_by_style[style].get("style_matched", 0),
+                "usable": actor_sft_by_style[style].get("usable", 0),
+            }
+            for style in sorted(VALID_STYLES)
+        },
+        "by_subject_style": {
+            subject: {
+                style: actor_sft_by_subject_style[subject].get(style, 0)
+                for style in sorted(VALID_STYLES)
+            }
+            for subject in sorted(actor_sft_by_subject_style)
+        },
+        "subject_coverage": len(per_subject),
+        "usable_subject_coverage": len(actor_sft_by_subject_style),
+        "api_failure_rate": api_failure_rate,
+        "style_imbalance_ratio": style_imbalance_ratio,
+    }
+    return report, actor_sft_report
 
 
 def main() -> None:
@@ -639,7 +571,7 @@ def main() -> None:
         sys.exit(1)
 
     logger.info("=" * 60)
-    logger.info("Classify Bootstrap Data (schema v3)")
+    logger.info("Classify Actor SFT Candidates (schema v4)")
     logger.info("  Input dir: %s", args.input_dir)
     logger.info("  Output dir: %s", args.output_dir)
     logger.info("  API provider: %s", getattr(args, "api_provider", ""))
@@ -684,7 +616,7 @@ def main() -> None:
         classification_failures += item["failures"]
         if count % int(args.batch_size) == 0:
             save_checkpoint(args.output_dir, {
-                "schema_version": 3,
+                "schema_version": 4,
                 "completed": sorted(completed_ids),
                 "results": list(existing_by_id.values()),
             }, args)
@@ -696,8 +628,9 @@ def main() -> None:
             )
 
     results = list(existing_by_id.values())
+    classification_attempts, classification_failures = classification_counts(results)
     save_checkpoint(args.output_dir, {
-        "schema_version": 3,
+        "schema_version": 4,
         "completed": sorted(completed_ids),
         "results": results,
     }, args)
@@ -714,17 +647,19 @@ def main() -> None:
             f"{max_failure_rate:.3f} ({classification_failures}/{classification_attempts})"
         )
 
-    splits, report = build_reports(
+    report, actor_sft_report = build_reports(
         results,
         min_style_confidence=float(getattr(args, "min_style_confidence", 0.65)),
+        api_failure_rate=failure_rate,
     )
 
     output_file = Path(args.output_dir) / "classified_data.json"
     with open(output_file, "w") as f:
         json.dump({
-            "schema_version": 3,
+            "schema_version": 4,
             "results": results,
             "metadata": {
+                "classification_mode": "actor_sft_selection",
                 "total_trajectories": len(trajectories),
                 "api_model": args.api_model,
                 "strict_classification": strict,
@@ -734,31 +669,21 @@ def main() -> None:
                 "max_classification_failure_rate": max_failure_rate,
                 "max_workers": max_workers,
                 "min_style_confidence": float(getattr(args, "min_style_confidence", 0.65)),
-                "error_profile_dimensions": list(ERROR_PROFILE_DIMENSIONS),
             },
-        }, f, indent=2, ensure_ascii=False)
-
-    splits_file = Path(args.output_dir) / "splits.json"
-    with open(splits_file, "w") as f:
-        json.dump({
-            "reasoning_styles": splits["reasoning_styles"],
-            "error_profiles": splits["error_profiles"],
-        }, f, indent=2, ensure_ascii=False)
-
-    per_response_splits_file = Path(args.output_dir) / "per_response_splits.json"
-    with open(per_response_splits_file, "w") as f:
-        json.dump({
-            "reasoning_styles": splits["per_response_reasoning_styles"],
-            "error_profiles": splits["per_response_error_profiles"],
         }, f, indent=2, ensure_ascii=False)
 
     report_file = Path(args.output_dir) / "classification_report.json"
     with open(report_file, "w") as f:
         json.dump(report, f, indent=2, ensure_ascii=False)
 
+    actor_sft_report_file = Path(args.output_dir) / "actor_sft_candidate_report.json"
+    with open(actor_sft_report_file, "w") as f:
+        json.dump(actor_sft_report, f, indent=2, ensure_ascii=False)
+
     logger.info("Classification complete")
     logger.info("  Results: %s", output_file)
     logger.info("  Report: %s", report_file)
+    logger.info("  Actor SFT candidate report: %s", actor_sft_report_file)
     logger.info("  Warnings: %s", report.get("warnings", []))
 
 

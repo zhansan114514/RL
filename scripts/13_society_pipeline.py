@@ -34,9 +34,9 @@ logger = logging.getLogger(__name__)
 
 # 每个阶段的 (脚本文件名, 阶段描述)
 PHASES = [
-    ("07_bootstrap_actors.py", "Phase 1: 风格引导 Actor 数据生成"),
-    ("08_classify_data.py",    "Phase 2: 数据分类 (GLM API)"),
-    ("09_diversify_actors.py", "Phase 3: Actor 分化训练"),
+    ("07_bootstrap_actors.py", "Phase 1: Actor SFT 候选生成"),
+    ("08_classify_data.py",    "Phase 2: 候选正确性/风格分类"),
+    ("09_train_actors_sft.py", "Phase 3: Actor SFT 训练"),
     ("10_diversify_critics.py","Phase 4: Critic 分化训练"),
     ("11_society_train.py",    "Phase 5: Society 交替训练"),
     ("12_society_evaluate.py", "Phase 6: 评估 + 消融实验"),
@@ -126,7 +126,7 @@ def _step(config: dict[str, Any], key: str) -> dict[str, Any]:
 
 def _phase_input_paths(phase_num: int, config: dict[str, Any], cache_dir: str) -> list[str]:
     step02 = _step(config, "step02_classify")
-    step03 = _step(config, "step03_diversify_actors")
+    step03 = _step(config, "step03_train_actors_sft")
     step04 = _step(config, "step04_diversify_critics")
     step05 = _step(config, "step05_train_society")
     step06 = _step(config, "step06_evaluate")
@@ -144,7 +144,7 @@ def _phase_input_paths(phase_num: int, config: dict[str, Any], cache_dir: str) -
     if phase_num == 3:
         return [
             os.path.join(classified_dir, "classified_data.json"),
-            os.path.join(bootstrap_dir, "trajectories.jsonl"),
+            os.path.join(classified_dir, "actor_sft_candidate_report.json"),
         ]
     if phase_num == 4:
         return [

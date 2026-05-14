@@ -103,3 +103,25 @@ api:
 
     assert phase4_env["GLM_API_KEY"] == "local-test-key"
     assert phase5_env["GLM_API_KEY"] == "local-test-key"
+
+
+def test_pipeline_phase3_uses_actor_sft_script_and_inputs():
+    pipeline = _load_pipeline_module()
+    assert pipeline.PHASES[2][0] == "09_train_actors_sft.py"
+    assert "SFT" in pipeline.PHASES[2][1]
+
+    config = {
+        "step02_classify": {
+            "input_dir": "out/bootstrap",
+            "output_dir": "out/classified",
+        },
+        "step03_train_actors_sft": {
+            "input_dir": "out/classified",
+            "output_dir": "out/actors",
+        },
+    }
+
+    assert pipeline._phase_input_paths(3, config, "out") == [
+        "out/classified/classified_data.json",
+        "out/classified/actor_sft_candidate_report.json",
+    ]

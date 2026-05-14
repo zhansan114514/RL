@@ -63,6 +63,7 @@ STEP_DEFAULTS = {
     "dtype": "bfloat16",
     "gpu_memory_utilization": 0.85,
     "max_model_len": 8192,
+    "max_samples": None,
     "checkpoint_dir": "output/society/checkpoints",
     "actor_temperature": 0.7,
     "actor_max_tokens": 1024,
@@ -324,6 +325,14 @@ def main():
         )
     api_base = getattr(args, "api_base", "https://api.labforge.top")
     api_model = getattr(args, "api_model", "gpt5.5")
+    max_samples = getattr(args, "max_samples", None)
+    if max_samples is None:
+        max_samples = len(train_data)
+    else:
+        max_samples = int(max_samples)
+        if max_samples <= 0:
+            raise ValueError(f"max_samples must be positive or None, got {max_samples}")
+    logger.info(f"  Society max_samples: {max_samples}")
 
     result = society_alternating_train(
         registry=registry,
@@ -348,7 +357,7 @@ def main():
         dtype=args.dtype,
         gpu_memory_utilization=args.gpu_memory_utilization,
         max_model_len=args.max_model_len,
-        max_samples=len(train_data),
+        max_samples=max_samples,
         min_pairs_per_critic=args.min_pairs_per_critic,
         min_pairs_per_actor=args.min_pairs_per_actor,
         min_unique_pairs_per_critic=getattr(args, "min_unique_pairs_per_critic", None),
@@ -377,16 +386,25 @@ def main():
     # Save final registry
     logger.info("[Step 5] Saving final registry...")
 
+    final_actor_paths = {
+        agent.name: agent.lora_path or ""
+        for agent in registry.list_actors()
+    }
+    final_critic_paths = {
+        agent.name: agent.lora_path or ""
+        for agent in registry.list_critics()
+    }
+
     final_registry_file = os.path.join(output_dir, "final_agent_registry.json")
     with open(final_registry_file, "w") as f:
         json.dump({
             "actors": {
                 name: {"model_path": path}
-                for name, path in result.actor_paths.items()
+                for name, path in final_actor_paths.items()
             },
             "critics": {
                 name: {"model_path": path}
-                for name, path in result.critic_paths.items()
+                for name, path in final_critic_paths.items()
             },
             "metrics": result.metrics,
             "training_config": {
@@ -418,8 +436,10 @@ def main():
 
     logger.info("=" * 60)
     logger.info("Society training complete!")
-    logger.info(f"  Trained actors: {len(result.actor_paths)}")
-    logger.info(f"  Trained critics: {len(result.critic_paths)}")
+    logger.info(f"  Final actors: {len(final_actor_paths)}")
+    logger.info(f"  Final critics: {len(final_critic_paths)}")
+    logger.info(f"  Newly trained actors: {len(result.actor_paths)}")
+    logger.info(f"  Newly trained critics: {len(result.critic_paths)}")
     logger.info("=" * 60)
 
     # Fail if no agents were actually trained (prevents empty Phase 5 from being marked done)
@@ -428,8 +448,14 @@ def main():
         if isinstance(v, dict)
     )
     if total_pairs == 0:
-        logger.error("No preference pairs generated for any agent. Exiting with error.")
-        sys.exit(1)
+        if getattr(args, "allow_skip_low_data", False):
+            logger.warning(
+                "No preference pairs generated for any agent; continuing because "
+                "allow_skip_low_data=true."
+            )
+        else:
+            logger.error("No preference pairs generated for any agent. Exiting with error.")
+            sys.exit(1)
 
 
 if __name__ == "__main__":

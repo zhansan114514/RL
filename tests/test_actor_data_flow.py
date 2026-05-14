@@ -40,7 +40,30 @@ def test_classification_checkpoint_metadata_tracks_input_fingerprint(tmp_path):
     assert first["input_file"]["sha256"] != second["input_file"]["sha256"]
 
 
-def test_actor_acceptance_fields_distinguish_quality_from_strict_style():
+def test_classification_counts_include_resumed_failures():
+    classify = _load_script("08_classify_data.py")
+    results = [{
+        "sample_id": "mmlu_0",
+        "per_response_labels": [
+            {
+                "is_correct": True,
+                "classification_source": "shared_classifier",
+            },
+            {
+                "is_correct": True,
+                "classification_source": None,
+            },
+            {
+                "is_correct": False,
+                "classification_source": "local_correctness_only",
+            },
+        ],
+    }]
+
+    assert classify.classification_counts(results) == (2, 1)
+
+
+def test_actor_sft_acceptance_requires_style_verification():
     classify = _load_script("08_classify_data.py")
     label = {
         "prompted_style": "evidence",
@@ -54,17 +77,20 @@ def test_actor_acceptance_fields_distinguish_quality_from_strict_style():
 
     classify.update_actor_acceptance(label, args)
 
-    assert label["quality_accepted_for_actor"] is True
-    assert label["strict_accepted_for_actor"] is False
-    assert label["accepted_for_actor"] is True
+    assert label["trainable_for_actor"] is True
+    assert label["style_match"] is False
+    assert label["style_verified"] is False
+    assert label["accepted_for_actor_sft"] is False
 
 
-def test_actor_pairs_use_only_accepted_target_style_chosen():
-    diversify = _load_script("09_diversify_actors.py")
+def test_actor_sft_selection_uses_only_accepted_target_style_examples():
+    train_sft = _load_script("09_train_actors_sft.py")
     sample = {
         "question": "Q",
+        "choices": ["A", "B", "C", "D"],
         "answer": "A",
         "task_type": "multiple_choice",
+        "subject": "abstract_algebra",
     }
     classified_results = [{
         "sample_id": "mmlu_0",
@@ -82,7 +108,8 @@ def test_actor_pairs_use_only_accepted_target_style_chosen():
                 "style_match": True,
                 "trainable_for_actor": True,
                 "style_verified": True,
-                "accepted_for_actor": True,
+                "accepted_for_actor_sft": True,
+                "temperature": 0.7,
             },
             {
                 "response_id": "wrong",
@@ -91,7 +118,7 @@ def test_actor_pairs_use_only_accepted_target_style_chosen():
                 "is_correct": False,
                 "format_status": "valid",
                 "prompted_style": "evidence",
-                "accepted_for_actor": False,
+                "accepted_for_actor_sft": False,
             },
             {
                 "response_id": "other_style",
@@ -105,7 +132,7 @@ def test_actor_pairs_use_only_accepted_target_style_chosen():
                 "style_match": True,
                 "trainable_for_actor": True,
                 "style_verified": True,
-                "accepted_for_actor": True,
+                "accepted_for_actor_sft": True,
             },
             {
                 "response_id": "answer_only",
@@ -119,39 +146,43 @@ def test_actor_pairs_use_only_accepted_target_style_chosen():
                 "style_match": True,
                 "trainable_for_actor": False,
                 "style_verified": True,
-                "accepted_for_actor": False,
+                "accepted_for_actor_sft": False,
             },
         ],
     }]
     args = type("Args", (), {
-        "pair_mix": {"correctness": 0.7, "style": 0.3},
-        "target_pairs_per_actor": 2,
-        "max_pairs_per_actor": 10,
-        "max_pairs_per_sample": 10,
+        "min_style_confidence": 0.55,
+        "max_examples_per_question_style": 2,
+        "balance_by_subject": True,
+        "max_subject_imbalance_ratio": 3.0,
     })()
 
-    by_sample = diversify.build_response_index(classified_results)
-    pairs, metrics = diversify.build_preference_pairs_for_style(
-        by_sample,
+    by_style = train_sft.build_response_index(classified_results)
+    examples, metrics = train_sft.select_sft_examples_for_style(
+        by_style,
         "evidence",
         args,
     )
+    rows = train_sft.examples_to_sft_dataset(examples, "mmlu", "evidence")
 
-    assert {p["metadata"]["pair_type"] for p in pairs} == {"correctness", "style"}
-    assert all(p["metadata"]["chosen_response_id"] == "chosen" for p in pairs)
-    assert metrics["candidate_counts"]["correctness"] == 1
-    assert metrics["candidate_counts"]["style"] == 2
-    assert metrics["candidate_counts"]["strict_style_correct"] == 1
-    assert metrics["candidate_counts"]["prompted_style_correct_fallback"] == 0
-    assert metrics["candidate_counts"]["selected_pairs"] == 2
+    assert [example["response_id"] for example in examples] == ["chosen"]
+    assert metrics["training_examples"] == 1
+    assert metrics["subject_coverage"] == 1
+    assert set(rows[0]) == {"prompt", "response", "metadata"}
+    assert "chosen" not in rows[0]
+    assert "rejected" not in rows[0]
+    assert rows[0]["metadata"]["style"] == "evidence"
+    assert rows[0]["metadata"]["temperature"] == 0.7
 
 
-def test_actor_pair_builder_caps_prompted_style_fallback():
-    diversify = _load_script("09_diversify_actors.py")
+def test_actor_sft_selection_rejects_correct_wrong_style_and_incorrect():
+    train_sft = _load_script("09_train_actors_sft.py")
     sample = {
         "question": "Q",
+        "choices": ["A", "B", "C", "D"],
         "answer": "A",
         "task_type": "multiple_choice",
+        "subject": "abstract_algebra",
     }
     labels = [
         {
@@ -166,10 +197,10 @@ def test_actor_pair_builder_caps_prompted_style_fallback():
             "style_match": True,
             "trainable_for_actor": True,
             "style_verified": True,
-            "accepted_for_actor": True,
+            "accepted_for_actor_sft": True,
         },
         {
-            "response_id": "fallback_1",
+            "response_id": "low_confidence",
             "response": "Low confidence but prompted evidence.\nThe final result is A.",
             "answer": "A",
             "is_correct": True,
@@ -180,10 +211,10 @@ def test_actor_pair_builder_caps_prompted_style_fallback():
             "style_match": True,
             "trainable_for_actor": True,
             "style_verified": False,
-            "accepted_for_actor": True,
+            "accepted_for_actor_sft": False,
         },
         {
-            "response_id": "fallback_2",
+            "response_id": "wrong_style",
             "response": "Classifier missed the style.\nThe final result is A.",
             "answer": "A",
             "is_correct": True,
@@ -194,7 +225,7 @@ def test_actor_pair_builder_caps_prompted_style_fallback():
             "style_match": False,
             "trainable_for_actor": True,
             "style_verified": False,
-            "accepted_for_actor": True,
+            "accepted_for_actor_sft": False,
         },
         {
             "response_id": "wrong",
@@ -203,7 +234,7 @@ def test_actor_pair_builder_caps_prompted_style_fallback():
             "is_correct": False,
             "format_status": "valid",
             "prompted_style": "evidence",
-            "accepted_for_actor": False,
+            "accepted_for_actor_sft": False,
         },
     ]
     classified_results = [{
@@ -212,91 +243,69 @@ def test_actor_pair_builder_caps_prompted_style_fallback():
         "per_response_labels": labels,
     }]
     args = type("Args", (), {
-        "pair_mix": {"correctness": 1.0, "style": 0.0},
-        "target_pairs_per_actor": 8,
-        "max_pairs_per_actor": 8,
-        "max_pairs_per_sample": 8,
-        "max_prompted_fallback_ratio": 0.5,
+        "min_style_confidence": 0.55,
+        "max_examples_per_question_style": 8,
+        "balance_by_subject": False,
+        "max_subject_imbalance_ratio": 3.0,
     })()
 
-    pairs, metrics = diversify.build_preference_pairs_for_style(
-        diversify.build_response_index(classified_results),
+    examples, _ = train_sft.select_sft_examples_for_style(
+        train_sft.build_response_index(classified_results),
         "evidence",
         args,
     )
 
-    assert metrics["fallback_selection"]["strict_selected"] == 1
-    assert metrics["fallback_selection"]["prompted_fallback_candidates"] == 2
-    assert metrics["fallback_selection"]["prompted_fallback_selected"] == 1
-    assert metrics["fallback_selection"]["prompted_fallback_dropped"] == 1
-    assert sum(
-        1 for pair in pairs
-        if pair["metadata"]["pair_source"] == "prompted_fallback"
-    ) == 1
-    fallback_pair = next(
-        pair for pair in pairs
-        if pair["metadata"]["pair_source"] == "prompted_fallback"
-    )
-    assert fallback_pair["metadata"]["chosen_quality_accepted_for_actor"] is True
-    assert fallback_pair["metadata"]["chosen_strict_accepted_for_actor"] is False
+    assert [example["response_id"] for example in examples] == ["strict"]
 
 
-def test_actor_pair_builder_allows_prompted_fallback_when_classifier_has_no_strict_match():
-    diversify = _load_script("09_diversify_actors.py")
+def test_actor_sft_selection_enforces_per_question_cap():
+    train_sft = _load_script("09_train_actors_sft.py")
     sample = {
         "question": "Q",
+        "choices": ["A", "B", "C", "D"],
         "answer": "A",
         "task_type": "multiple_choice",
+        "subject": "abstract_algebra",
     }
+    labels = []
+    for i in range(3):
+        labels.append({
+            "response_id": f"accepted_{i}",
+            "response": (
+                f"Evidence response number {i} cites the question clue.\n"
+                "The final result is A."
+            ),
+            "answer": "A",
+            "is_correct": True,
+            "primary_style": "evidence",
+            "reasoning_style_confidence": 0.9,
+            "prompted_style": "evidence",
+            "style_match": True,
+            "trainable_for_actor": True,
+            "style_verified": True,
+            "accepted_for_actor_sft": True,
+        })
     classified_results = [{
         "sample_id": "mmlu_0",
         "sample": sample,
-        "per_response_labels": [
-            {
-                "response_id": "fallback",
-                "response": (
-                    "The prompt asked for evidence and this cites the question clue.\n"
-                    "The final result is A."
-                ),
-                "answer": "A",
-                "is_correct": True,
-                "primary_style": "direct",
-                "reasoning_style_confidence": 0.9,
-                "prompted_style": "evidence",
-                "style_match": False,
-                "trainable_for_actor": True,
-                "style_verified": False,
-                "accepted_for_actor": True,
-            },
-            {
-                "response_id": "wrong",
-                "response": "Wrong path.\nThe final result is B.",
-                "answer": "B",
-                "is_correct": False,
-                "prompted_style": "evidence",
-                "accepted_for_actor": False,
-            },
-        ],
+        "per_response_labels": labels,
     }]
     args = type("Args", (), {
-        "pair_mix": {"correctness": 1.0, "style": 0.0},
-        "target_pairs_per_actor": 4,
-        "max_pairs_per_actor": 4,
-        "max_pairs_per_sample": 4,
-        "max_prompted_fallback_ratio": 0.5,
+        "min_style_confidence": 0.55,
+        "max_examples_per_question_style": 2,
+        "balance_by_subject": False,
+        "max_subject_imbalance_ratio": 3.0,
     })()
 
-    pairs, metrics = diversify.build_preference_pairs_for_style(
-        diversify.build_response_index(classified_results),
+    examples, metrics = train_sft.select_sft_examples_for_style(
+        train_sft.build_response_index(classified_results),
         "evidence",
         args,
     )
 
-    assert len(pairs) == 1
-    assert pairs[0]["metadata"]["pair_source"] == "prompted_fallback"
-    assert metrics["fallback_selection"]["strict_selected"] == 0
-    assert metrics["fallback_selection"]["prompted_fallback_selected"] == 1
-    assert metrics["fallback_selection"]["prompted_fallback_only_without_strict"] is True
+    assert len(examples) == 2
+    assert metrics["candidate_examples"] == 3
+    assert metrics["after_question_cap"] == 2
 
 
 def test_critic_structured_pairs_do_not_oversample_or_keep_invalid_judgements():
@@ -627,8 +636,8 @@ def test_society_actor_dpo_prompt_is_style_conditioned(monkeypatch, tmp_path):
     assert "FINAL_ANSWER" not in prompt
 
 
-def test_actor_diversification_dpo_prompt_matches_simple_actor_prompt():
-    diversify = _load_script("09_diversify_actors.py")
+def test_actor_sft_prompt_matches_simple_actor_prompt():
+    train_sft = _load_script("09_train_actors_sft.py")
     from src.prompts.prompt_builder import build_simple_actor_prompt
     from src.society.agent_registry import ReasoningStyle
 
@@ -639,7 +648,7 @@ def test_actor_diversification_dpo_prompt_matches_simple_actor_prompt():
         "task_type": "multiple_choice",
     }
 
-    prompt = diversify._actor_training_prompt("mmlu", "evidence", sample)
+    prompt = train_sft._actor_training_prompt("mmlu", "evidence", sample)
     expected = build_simple_actor_prompt(
         sample,
         "mmlu",

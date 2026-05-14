@@ -15,7 +15,7 @@ def is_trainable_actor_response(
     task_type: str,
     min_reasoning_words: int = MIN_REASONING_WORDS,
 ) -> bool:
-    """Return whether an Actor response is suitable as a DPO chosen target.
+    """Return whether an Actor response is suitable as a training target.
 
     This is intentionally not a strict format check.  The response only needs
     a parseable answer plus enough natural-language content before the final

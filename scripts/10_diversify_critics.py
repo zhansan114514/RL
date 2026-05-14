@@ -364,9 +364,9 @@ def route_critic_raw_pairs(
         return []
 
     splitter = DiversitySplit(
-        balance=False, seed=seed, use_api=True,
+        seed=seed,
+        use_api=True,
         cache_dir=input_dir,
-        pre_classified_file=os.path.join(input_dir, "classified_data.json"),
         api_key=api_key,
         api_base=api_base,
         api_model=api_model,
@@ -419,7 +419,7 @@ def select_critic_preference_pairs(
     from src.society.agent_registry import resolve_critic_skill
 
     skill = resolve_critic_skill(critic_skill)
-    splitter = DiversitySplit(balance=False, seed=seed, use_api=False)
+    splitter = DiversitySplit(seed=seed, use_api=False)
     critic_items = splitter.build_critic_training_mix(
         all_items=routed_items,
         target_skill=skill,

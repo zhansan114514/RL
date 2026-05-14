@@ -1,4 +1,4 @@
-"""Tests for style-prompted bootstrap trajectory generation."""
+"""Tests for Actor SFT candidate trajectory generation."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ class FakeModel:
 
     def generate(self, prompts, **kwargs):
         self.calls.append((prompts, kwargs))
-        return [f"response-{i}" for i in range(len(prompts))]
+        return [f"response-{len(self.calls)}-{i}" for i in range(len(prompts))]
 
 
 def test_style_prompt_contains_style_guidance_and_contract():
@@ -45,26 +45,36 @@ def test_style_prompt_contains_style_guidance_and_contract():
         sample,
         "mmlu",
         bootstrap.ReasoningStyle.EVIDENCE,
+        temperature=1.0,
         generation_index=2,
     )
 
     assert prompt.count("Actor-evidence") == 1
     assert "key facts, definitions" in prompt
-    assert "independent generation attempt 3" in prompt
+    assert "independent SFT candidate generation attempt 3" in prompt
+    assert "temperature 1" in prompt
     assert prompt.count("The final result is <answer>.") == 1
     assert "FINAL_ANSWER" not in prompt
 
 
-def test_style_prompted_generation_batches_samples_styles_and_attempts():
+def test_style_temperature_generation_batches_by_temperature():
     bootstrap = _load_bootstrap_module()
     model = FakeModel()
     args = type("Args", (), {
         "dataset": "mmlu",
-        "generations_per_style": 2,
+        "temperatures": [0.4, 0.7],
+        "generations_per_temperature": 2,
         "seed": 42,
         "max_tokens": 32,
-        "temperature": 0.5,
         "top_p": 0.9,
+        "source_splits": ["dev", "validation"],
+        "subject_balanced": True,
+        "min_subjects": 1,
+        "max_samples_per_subject": 20,
+        "max_samples": None,
+        "sampling": None,
+        "mmlu_load_mode": "by_subject",
+        "model_name": "model",
     })()
     styles = [
         bootstrap.ReasoningStyle.EVIDENCE,
@@ -72,8 +82,22 @@ def test_style_prompted_generation_batches_samples_styles_and_attempts():
         bootstrap.ReasoningStyle.ELIMINATION,
     ]
     batch_entries = [
-        (0, {"question": "Q0", "choices": ["A", "B", "C", "D"], "task_type": "multiple_choice"}),
-        (1, {"question": "Q1", "choices": ["A", "B", "C", "D"], "task_type": "multiple_choice"}),
+        (0, {
+            "question": "Q0",
+            "choices": ["A", "B", "C", "D"],
+            "answer": "A",
+            "task_type": "multiple_choice",
+            "source_split": "dev",
+            "subject": "abstract_algebra",
+        }),
+        (1, {
+            "question": "Q1",
+            "choices": ["A", "B", "C", "D"],
+            "answer": "B",
+            "task_type": "multiple_choice",
+            "source_split": "validation",
+            "subject": "anatomy",
+        }),
     ]
 
     with patch(
@@ -82,53 +106,91 @@ def test_style_prompted_generation_batches_samples_styles_and_attempts():
     ):
         records = bootstrap.generate_batch(model, batch_entries, args, styles)
 
-    assert len(model.calls) == 1
-    prompts, kwargs = model.calls[0]
-    assert len(prompts) == 12
-    assert kwargs["seed"] == 42
-    assert kwargs["max_tokens"] == 32
-    assert kwargs["temperature"] == 0.5
-    assert kwargs["top_p"] == 0.9
-    assert all("The final result is <answer>." in prompt for prompt in prompts)
-    assert all("FINAL_ANSWER:" not in prompt for prompt in prompts)
+    assert len(model.calls) == 2
+    assert [call[1]["temperature"] for call in model.calls] == [0.4, 0.7]
+    assert all(len(call[0]) == 12 for call in model.calls)
+    assert model.calls[0][1]["seed"] == 42
+    assert model.calls[1][1]["seed"] == 100042
+    assert all("The final result is <answer>." in prompt for call in model.calls for prompt in call[0])
 
     assert len(records) == 2
     first = records[0]
     assert first["sample_id"] == "mmlu_0"
+    assert first["source_split"] == "dev"
+    assert first["subject"] == "abstract_algebra"
     assert first["debate_rounds"] == []
-    assert first["metadata"]["generation_mode"] == "style_prompted"
-    assert first["metadata"]["reasoning_styles"] == [
-        "evidence",
-        "direct",
-        "elimination",
-    ]
-    assert len(first["initial_responses"]) == 6
+    assert first["metadata"]["schema_version"] == 4
+    assert first["metadata"]["generation_mode"] == "actor_sft_candidates"
+    assert first["metadata"]["temperatures"] == [0.4, 0.7]
+    assert len(first["initial_responses"]) == 12
 
     response_ids = [r["response_id"] for r in first["initial_responses"]]
-    assert response_ids == [
-        "mmlu_0_evidence_0",
-        "mmlu_0_evidence_1",
-        "mmlu_0_direct_0",
-        "mmlu_0_direct_1",
-        "mmlu_0_elimination_0",
-        "mmlu_0_elimination_1",
-    ]
-    assert [r["prompted_style"] for r in first["initial_responses"]] == [
-        "evidence",
-        "evidence",
-        "direct",
-        "direct",
-        "elimination",
-        "elimination",
-    ]
-    assert [r["agent_name"] for r in first["initial_responses"]] == [
-        "actor_evidence",
-        "actor_evidence",
-        "actor_direct",
-        "actor_direct",
-        "actor_elimination",
-        "actor_elimination",
-    ]
+    assert "mmlu_0_evidence_t0p4_g0" in response_ids
+    assert "mmlu_0_direct_t0p7_g1" in response_ids
+    assert "mmlu_0_elimination_t0p7_g1" in response_ids
+    assert {r["temperature"] for r in first["initial_responses"]} == {0.4, 0.7}
+    assert {r["generation_index"] for r in first["initial_responses"]} == {0, 1}
+
+
+def test_subject_balanced_selection_preserves_coverage_under_total_cap():
+    bootstrap = _load_bootstrap_module()
+    data = {
+        "dev": [
+            {
+                "question": f"Q{s}_{i}",
+                "choices": ["A", "B"],
+                "answer": "A",
+                "subject": f"subject_{s}",
+                "source_split": "dev",
+                "source_index": i,
+            }
+            for s in range(3)
+            for i in range(3)
+        ],
+    }
+
+    selected = bootstrap.select_subject_balanced_samples(
+        data,
+        ["dev"],
+        subject_balanced=True,
+        min_subjects=3,
+        max_samples_per_subject=3,
+        max_samples=6,
+        seed=42,
+    )
+
+    subjects = {sample["subject"] for _, sample in selected}
+    assert subjects == {"subject_0", "subject_1", "subject_2"}
+    assert len(selected) == 6
+
+
+def test_subject_coverage_check_fails_fast():
+    bootstrap = _load_bootstrap_module()
+    data = {
+        "dev": [{
+            "question": "Q",
+            "choices": ["A", "B"],
+            "answer": "A",
+            "subject": "only_subject",
+            "source_split": "dev",
+            "source_index": 0,
+        }],
+    }
+
+    try:
+        bootstrap.select_subject_balanced_samples(
+            data,
+            ["dev"],
+            subject_balanced=True,
+            min_subjects=2,
+            max_samples_per_subject=3,
+            max_samples=None,
+            seed=42,
+        )
+    except ValueError as exc:
+        assert "Subject coverage 1 is below min_subjects=2" in str(exc)
+    else:
+        raise AssertionError("Expected insufficient subject coverage to fail")
 
 
 def test_generation_result_count_mismatch_fails_fast():
@@ -142,22 +204,31 @@ def test_generation_result_count_mismatch_fails_fast():
         raise AssertionError("Expected ValueError")
 
 
-def test_existing_bootstrap_rejects_stale_natural_generation(tmp_path):
+def test_existing_bootstrap_rejects_stale_generation(tmp_path):
     bootstrap = _load_bootstrap_module()
     output_file = tmp_path / "trajectories.jsonl"
     output_file.write_text(json.dumps({
         "sample_id": "mmlu_0",
         "metadata": {
             "schema_version": 3,
-            "generation_mode": "natural",
+            "generation_mode": "style_prompted",
         },
     }) + "\n")
     args = type("Args", (), {
         "dataset": "mmlu",
-        "generations_per_style": 4,
-        "temperature": 0.8,
+        "temperatures": [0.4, 0.7],
+        "generations_per_temperature": 1,
         "top_p": 0.9,
         "max_tokens": 256,
+        "source_splits": ["dev"],
+        "subject_balanced": True,
+        "min_subjects": 1,
+        "max_samples_per_subject": 20,
+        "max_samples": None,
+        "sampling": None,
+        "mmlu_load_mode": "by_subject",
+        "model_name": "model",
+        "seed": 42,
     })()
     styles = [
         bootstrap.ReasoningStyle.EVIDENCE,
@@ -168,19 +239,28 @@ def test_existing_bootstrap_rejects_stale_natural_generation(tmp_path):
     try:
         bootstrap.existing_sample_ids(output_file, args, styles)
     except RuntimeError as exc:
-        assert "does not match the current style-prompted" in str(exc)
+        assert "actor-sft candidate configuration" in str(exc)
     else:
         raise AssertionError("Expected stale bootstrap output to fail fast")
 
 
-def test_existing_bootstrap_resumes_matching_style_prompted_output(tmp_path):
+def test_existing_bootstrap_resumes_matching_actor_sft_output(tmp_path):
     bootstrap = _load_bootstrap_module()
     args = type("Args", (), {
         "dataset": "mmlu",
-        "generations_per_style": 4,
-        "temperature": 0.8,
+        "temperatures": [0.4, 0.7],
+        "generations_per_temperature": 1,
         "top_p": 0.9,
         "max_tokens": 256,
+        "source_splits": ["dev"],
+        "subject_balanced": True,
+        "min_subjects": 1,
+        "max_samples_per_subject": 20,
+        "max_samples": None,
+        "sampling": None,
+        "mmlu_load_mode": "by_subject",
+        "model_name": "model",
+        "seed": 42,
     })()
     styles = [
         bootstrap.ReasoningStyle.EVIDENCE,

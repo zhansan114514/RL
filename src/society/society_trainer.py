@@ -1166,15 +1166,10 @@ def _generate_critic_pairs_pairwise(
 
         # Step 2: Route by error profile, then build an adaptive specialist mix.
         if raw_pairs:
-            # Try to use pre-classified data from phase 2 to ensure
-            # single source of truth across all training phases
-            pre_classified = os.path.join(
-                classifications_cache_dir, "classified_data.json"
-            )
             splitter = DiversitySplit(
-                balance=False, seed=seed, use_api=True,
+                seed=seed,
+                use_api=True,
                 cache_dir=classifications_cache_dir,
-                pre_classified_file=pre_classified if os.path.exists(pre_classified) else None,
                 api_key=api_key,
                 api_base=api_base,
                 api_model=api_model,

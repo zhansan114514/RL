@@ -22,7 +22,7 @@ The supported phase scripts are:
 ```text
 scripts/07_bootstrap_actors.py
 scripts/08_classify_data.py
-scripts/09_diversify_actors.py
+scripts/09_train_actors_sft.py
 scripts/10_diversify_critics.py
 scripts/11_society_train.py
 scripts/12_society_evaluate.py
@@ -49,7 +49,7 @@ The main data flow is:
 dataset loading (src.data)
   -> style-prompted bootstrap data (scripts/07)
   -> API classification (src.society.data_classifier, scripts/08)
-  -> actor diversification (scripts/09)
+  -> Actor SFT training (scripts/09)
   -> critic diversification (scripts/10)
   -> society alternating training (src.society.society_trainer, scripts/11)
   -> society evaluation and ablations (scripts/12)
@@ -64,7 +64,7 @@ Module responsibilities:
 | `src.parsing` | Actor answer extraction and Critic judgement parsing |
 | `src.data` | Dataset loading, MMLU handling, preprocessing, split sampling |
 | `src.algorithms` | Natural deliberation and guided trajectory utilities reused by Society training |
-| `src.training` | `train_dpo`, DPO subprocess runner, LoRA target module config |
+| `src.training` | `train_sft`, `train_dpo`, isolated subprocess runners, LoRA target module config |
 | `src.evaluation` | Answer resolution, mixed-task accuracy, Society metrics, style diagnostics |
 | `src.inference` | vLLM wrapper |
 | `src.utils` | Config manager, model type detection, seeding, runtime library setup |

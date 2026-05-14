@@ -19,7 +19,7 @@ src/
 ├── parsing/             # Actor answer and Critic judgement parsers
 ├── prompts/             # Natural Actor/Critic prompt builders
 ├── society/             # Agent registry, router, classifier, split logic, training, inference
-├── training/            # DPO runner, LoRA config, train_dpo
+├── training/            # SFT/DPO runners, LoRA config, train_sft/train_dpo
 └── utils/               # Config, seeding, runtime environment helpers
 ```
 
@@ -53,7 +53,7 @@ Individual phases remain available for debugging:
 ```bash
 python scripts/07_bootstrap_actors.py --config configs/society/experiment_mmlu.yaml
 python scripts/08_classify_data.py --config configs/society/experiment_mmlu.yaml
-python scripts/09_diversify_actors.py --config configs/society/experiment_mmlu.yaml
+python scripts/09_train_actors_sft.py --config configs/society/experiment_mmlu.yaml
 python scripts/10_diversify_critics.py --config configs/society/experiment_mmlu.yaml
 python scripts/11_society_train.py --config configs/society/experiment_mmlu.yaml
 python scripts/12_society_evaluate.py --config configs/society/experiment_mmlu.yaml

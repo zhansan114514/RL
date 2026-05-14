@@ -103,10 +103,10 @@ class TestConfigManagerStep:
         experiment.write_text("""
 common:
   model_name: Qwen/Qwen2.5-7B-Instruct
-  generations_per_style: 2
+  generations_per_temperature: 1
 step01_bootstrap:
-  generations_per_style: 4
-  temperature: 0.8
+  generations_per_temperature: 2
+  temperatures: [0.4, 0.7]
 """)
 
         cfg = ConfigManager.initialize(
@@ -114,12 +114,41 @@ step01_bootstrap:
             load_local=False,
         )
         step = cfg.step("step01_bootstrap", defaults={
-            "generations_per_style": True,
-            "temperature": True,
+            "generations_per_temperature": True,
+            "temperatures": True,
         })
-        assert step.get("generations_per_style") == 4  # from step section
-        assert step.get("temperature") == 0.8     # from step section
+        assert step.get("generations_per_temperature") == 2  # from step section
+        assert step.get("temperatures") == [0.4, 0.7]     # from step section
         assert step.get("model_name") == "Qwen/Qwen2.5-7B-Instruct"  # from common
+
+    def test_actor_sft_step_replaces_actor_dpo_keys(self, tmp_path):
+        local = tmp_path / "local.yaml"
+        local.write_text("""
+api:
+  providers:
+    glm:
+      api_key: test-key
+      api_base: https://api.example.test
+      api_model: test-model
+""")
+        cfg = ConfigManager.initialize(
+            config_path="configs/society/experiment_mmlu.yaml",
+            local_config_path=str(local),
+        )
+        step = cfg.step("step03_train_actors_sft")
+
+        assert step.get("min_examples_per_actor") == 256
+        assert step.get("max_examples_per_question_style") == 2
+        for old_key in (
+            "pair_mix",
+            "beta",
+            "augment_when_below",
+            "max_synthetic_ratio",
+            "max_prompted_fallback_ratio",
+            "target_pairs_per_actor",
+            "max_pairs_per_actor",
+        ):
+            assert old_key not in step
 
     def test_step_defaults_are_required_schema(self):
         """defaults declares required keys; it does not fill missing values."""

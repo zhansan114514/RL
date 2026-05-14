@@ -11,7 +11,7 @@ common:
   dataset: "mmlu"
   cache_dir: "output/society_mmlu_smoke_n50_style3_qwen3"
   seed: 42
-  device: 6
+  device: 0
   dtype: "bfloat16"
   gpu_memory_utilization: 0.80
   max_model_len: 4096
@@ -34,12 +34,17 @@ sampling:
     max_samples: 50
     seed_offset: 2
 
-# Phase 1: Style-prompted Actor data generation
+# Phase 1: Actor SFT candidate generation
 step01_bootstrap:
   output_dir: "output/society_mmlu_smoke_n50_style3_qwen3/bootstrap"
+  source_splits: ["dev", "validation"]
+  subject_balanced: true
+  min_subjects: 1
+  max_samples_per_subject: 20
+  max_samples: 50
   reasoning_styles: ["direct", "evidence", "elimination"]
-  generations_per_style: 4
-  temperature: 0.7
+  temperatures: [0.4, 0.7, 1.0, 1.2]
+  generations_per_temperature: 1
   top_p: 0.8
   max_tokens: 384
   batch_size: 4
@@ -63,21 +68,18 @@ step02_classify:
   min_style_confidence: 0.30
   min_error_confidence: 0.5
 
-# Phase 3: Actor diversification
-step03_diversify_actors:
+# Phase 3: Actor SFT training
+step03_train_actors_sft:
   input_dir: "output/society_mmlu_smoke_n50_style3_qwen3/classified"
   output_dir: "output/society_mmlu_smoke_n50_style3_qwen3/actors"
   reasoning_styles: ["direct", "evidence", "elimination"]
-  min_pairs_per_actor: 8
-  target_pairs_per_actor: 16
-  max_pairs_per_actor: 64
-  max_pairs_per_sample: 4
-  augment_when_below: 8
-  max_synthetic_ratio: 0.7
-  max_prompted_fallback_ratio: 0.5
-  pair_mix:
-    correctness: 0.7
-    style: 0.3
+  min_style_confidence: 0.55
+  min_examples_per_actor: 8
+  max_examples_per_question_style: 2
+  balance_by_subject: true
+  min_subject_coverage: 1
+  max_style_imbalance_ratio: 1.5
+  max_subject_imbalance_ratio: 3.0
   lora_r: 256
   lora_alpha: 512
   learning_rate: 5.0e-5
@@ -85,7 +87,9 @@ step03_diversify_actors:
   gradient_accumulation_steps: 4
   num_epochs: 1
   max_length: 2048
-  beta: 0.1
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  max_grad_norm: 1.0
 
 # Phase 4: Critic diversification
 step04_diversify_critics:
@@ -157,7 +161,7 @@ step05_train_society:
   actor_max_tokens: 384
   critic_max_tokens: 384
   min_style_confidence: 0.30
-  allow_skip_low_data: false
+  allow_skip_low_data: true
   max_actor_fallback_ratio: 0.5
   strict_classification: true
   max_classification_failure_rate: 0.0
@@ -166,6 +170,7 @@ step05_train_society:
   retry_delay: 5
   max_retries: 5
   api_temperature: 0.1
+  tensor_parallel_size: 1
 
 # Phase 6: Evaluation + ablation
 step06_evaluate:
@@ -174,20 +179,20 @@ step06_evaluate:
   evaluation_mode: "single_gpu"  # "single_gpu" or "dual_gpu"
   evaluation_modes:
     single_gpu:
-      devices: [6]
+      devices: [0]
       tensor_parallel_size: 1
       gpu_memory_utilization: 0.65
     dual_gpu:
       devices: [6, 7]
       tensor_parallel_size: 2
       gpu_memory_utilization: 0.80
-  max_samples: 10
-  num_rounds: 2
-  max_tokens: 512
+  max_samples: 5
+  num_rounds: 1
+  max_tokens: 256
   temperature: 0.0
   eval_batch_size: 1
-  run_ablations: true
-  num_samples_for_qualitative: 5
+  run_ablations: false
+  num_samples_for_qualitative: 3
   max_lora_rank: 256
   router_top_k: 2
   router_min_confidence: 0.1
