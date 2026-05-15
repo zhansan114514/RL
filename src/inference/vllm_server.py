@@ -179,6 +179,27 @@ class VLLMInference:
         outputs = self._llm.generate(prompts, params)
         return [c.text for o in outputs for c in o.outputs]
 
+    def generate_with_sampling_params(
+        self,
+        prompts: list[str],
+        sampling_params: Sequence[Any],
+        *,
+        use_tqdm: bool = True,
+    ) -> list[str]:
+        """Generate text with per-prompt vLLM SamplingParams."""
+        self._ensure_loaded()
+        if len(prompts) != len(sampling_params):
+            raise ValueError(
+                "prompts and sampling_params must have the same length: "
+                f"{len(prompts)} != {len(sampling_params)}"
+            )
+        outputs = self._llm.generate(
+            prompts,
+            sampling_params,
+            use_tqdm=use_tqdm,
+        )
+        return [c.text for o in outputs for c in o.outputs]
+
     @property
     def supports_lora(self) -> bool:
         """Whether this engine was initialized with LoRA support."""

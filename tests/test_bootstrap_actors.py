@@ -28,8 +28,8 @@ class FakeModel:
     def __init__(self):
         self.calls = []
 
-    def generate(self, prompts, **kwargs):
-        self.calls.append((prompts, kwargs))
+    def generate_with_sampling_params(self, prompts, sampling_params):
+        self.calls.append((prompts, sampling_params))
         return [f"response-{len(self.calls)}-{i}" for i in range(len(prompts))]
 
 
@@ -106,12 +106,17 @@ def test_style_temperature_generation_batches_by_temperature():
     ):
         records = bootstrap.generate_batch(model, batch_entries, args, styles)
 
-    assert len(model.calls) == 2
-    assert [call[1]["temperature"] for call in model.calls] == [0.4, 0.7]
-    assert all(len(call[0]) == 12 for call in model.calls)
-    assert model.calls[0][1]["seed"] == 42
-    assert model.calls[1][1]["seed"] == 100042
-    assert all("The final result is <answer>." in prompt for call in model.calls for prompt in call[0])
+    assert len(model.calls) == 1
+    prompts, sampling_params = model.calls[0]
+    assert len(prompts) == 24
+    assert [param.temperature for param in sampling_params] == (
+        [0.4, 0.4, 0.7, 0.7] * 3
+        + [0.4, 0.4, 0.7, 0.7] * 3
+    )
+    assert sampling_params[0].seed == 42
+    assert sampling_params[2].seed == 100042
+    assert sampling_params[12].seed == 1042
+    assert all("The final result is <answer>." in prompt for prompt in prompts)
 
     assert len(records) == 2
     first = records[0]

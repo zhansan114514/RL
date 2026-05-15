@@ -413,68 +413,81 @@ def generate_batch(
         raise ValueError("generations_per_temperature must be positive")
 
     responses_by_sample: list[list[dict[str, Any]]] = [[] for _ in batch_entries]
-    prompts_by_temperature: dict[float, list[str]] = defaultdict(list)
-    meta_by_temperature: dict[float, list[tuple[int, ReasoningStyle, int]]] = defaultdict(list)
-
+    prompt_items: list[tuple[str, int, ReasoningStyle, float, int]] = []
     for local_idx, (_, sample) in enumerate(batch_entries):
         for style in styles:
             for temperature in temperatures:
                 for generation_index in range(generations_per_temperature):
-                    prompts_by_temperature[temperature].append(
+                    prompt_items.append((
                         build_style_prompt(
                             sample,
                             args.dataset,
                             style,
                             temperature,
                             generation_index,
-                        )
-                    )
-                    meta_by_temperature[temperature].append(
-                        (local_idx, style, generation_index)
-                    )
+                        ),
+                        local_idx,
+                        style,
+                        temperature,
+                        generation_index,
+                    ))
 
-    for temp_idx, temperature in enumerate(temperatures):
-        prompts = prompts_by_temperature[temperature]
-        seed = int(args.seed) + batch_entries[0][0] * 1000 + temp_idx * 100_000
-        generated = model.generate(
-            prompts,
-            max_tokens=int(args.max_tokens),
-            temperature=temperature,
-            top_p=float(getattr(args, "top_p", 0.9)),
-            seed=seed,
+    from vllm import SamplingParams
+
+    prompts = [item[0] for item in prompt_items]
+    sampling_params = []
+    for _, local_idx, style, temperature, generation_index in prompt_items:
+        seed = (
+            int(args.seed)
+            + batch_entries[local_idx][0] * 1000
+            + temperatures.index(temperature) * 100_000
+            + styles.index(style) * 10_000
+            + generation_index
         )
-        generated = coerce_generation_results(generated, len(prompts))
-
-        for (local_idx, style, generation_index), response_text in zip(
-            meta_by_temperature[temperature],
-            generated,
-        ):
-            global_idx, sample = batch_entries[local_idx]
-            sample_id = f"{args.dataset}_{global_idx}"
-            agent_name = f"actor_{style.value}"
-            answer = extract_answer(
-                response_text,
-                sample.get("task_type", "multiple_choice"),
+        sampling_params.append(
+            SamplingParams(
+                max_tokens=int(args.max_tokens),
+                temperature=temperature,
+                top_p=float(getattr(args, "top_p", 0.9)),
+                seed=seed,
             )
-            responses_by_sample[local_idx].append({
-                "agent_id": styles.index(style),
-                "round": 0,
-                "response": response_text,
-                "answer": answer,
-                "sample_id": sample_id,
-                "source_split": sample.get("source_split", ""),
-                "subject": sample.get("subject", sample.get("category", "")),
-                "response_id": _response_id(
-                    sample_id,
-                    style,
-                    temperature,
-                    generation_index,
-                ),
-                "prompted_style": style.value,
-                "temperature": temperature,
-                "generation_index": generation_index,
-                "agent_name": agent_name,
-            })
+        )
+
+    generated = model.generate_with_sampling_params(prompts, sampling_params)
+    generated = coerce_generation_results(generated, len(prompts))
+    generated_items = [
+        (local_idx, style, temperature, generation_index, response_text)
+        for (_, local_idx, style, temperature, generation_index), response_text
+        in zip(prompt_items, generated)
+    ]
+
+    for local_idx, style, temperature, generation_index, response_text in generated_items:
+        global_idx, sample = batch_entries[local_idx]
+        sample_id = f"{args.dataset}_{global_idx}"
+        agent_name = f"actor_{style.value}"
+        answer = extract_answer(
+            response_text,
+            sample.get("task_type", "multiple_choice"),
+        )
+        responses_by_sample[local_idx].append({
+            "agent_id": styles.index(style),
+            "round": 0,
+            "response": response_text,
+            "answer": answer,
+            "sample_id": sample_id,
+            "source_split": sample.get("source_split", ""),
+            "subject": sample.get("subject", sample.get("category", "")),
+            "response_id": _response_id(
+                sample_id,
+                style,
+                temperature,
+                generation_index,
+            ),
+            "prompted_style": style.value,
+            "temperature": temperature,
+            "generation_index": generation_index,
+            "agent_name": agent_name,
+        })
 
     records: list[dict[str, Any]] = []
     for local_idx, (global_idx, sample) in enumerate(batch_entries):

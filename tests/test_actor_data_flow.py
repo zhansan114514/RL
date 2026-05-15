@@ -453,6 +453,27 @@ def test_reasoning_style_parser_uses_evidence_when_primary_label_is_ambiguous():
     assert parsed.primary_style == ReasoningStyle.ELIMINATION
 
 
+def test_reasoning_style_parser_recovers_fenced_json_with_unescaped_quotes():
+    from src.society.agent_registry import ReasoningStyle
+    from src.society.data_classifier import _parse_style_json_response
+
+    parsed = _parse_style_json_response("""```json
+{
+  "primary_style": "elimination",
+  "secondary_styles": ["evidence"],
+  "format_status": "valid",
+  "confidence": 0.9,
+  "evidence": "Spud Webb was around 5'7" and Muggsy Bogues was 5'3"."
+}
+```""")
+
+    assert parsed is not None
+    assert parsed.primary_style == ReasoningStyle.ELIMINATION
+    assert parsed.secondary_styles == [ReasoningStyle.EVIDENCE]
+    assert parsed.format_status == "valid"
+    assert parsed.confidence == 0.9
+
+
 def test_society_actor_prompt_builder_conditions_generation_once():
     from src.prompts.prompt_builder import build_simple_actor_prompt
     from src.society.agent_registry import ReasoningStyle

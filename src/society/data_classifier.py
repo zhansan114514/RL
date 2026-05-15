@@ -313,7 +313,16 @@ def _call_api(
             last_error = f"Cannot connect to API: {e}"
             retryable = True
         except requests.exceptions.HTTPError as e:
+            response = getattr(e, "response", None)
+            body = ""
+            if response is not None:
+                try:
+                    body = response.text[:500]
+                except Exception:
+                    body = ""
             last_error = f"API HTTP error: {e}"
+            if body:
+                last_error = f"{last_error}; response={body!r}"
             retryable = _retryable_http_error(e)
             if not retryable:
                 raise ClassificationError(last_error) from e
@@ -461,10 +470,86 @@ def _parse_style_response(response: str) -> Optional[ReasoningStyle]:
     return _parse_style_text(response)
 
 
+def _strip_fenced_payload(response: str) -> str:
+    """Return the inner payload from a fenced JSON response when present."""
+    import re
+
+    text = (response or "").strip()
+    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        return fenced.group(1).strip()
+    return text
+
+
+def _parse_malformed_style_json_response(response: str) -> Optional[ReasoningStyleResult]:
+    """Parse key classifier fields when only a trailing JSON string is malformed.
+
+    GLM sometimes returns otherwise valid fenced JSON where the free-text
+    evidence value contains unescaped double quotes, e.g. heights like 5'7".
+    Full JSON parsing fails in that case, but the structured fields before
+    evidence are still recoverable.
+    """
+    if not response:
+        return None
+
+    import re
+
+    text = _strip_fenced_payload(response)
+
+    def string_field(name: str) -> str:
+        match = re.search(
+            rf'"{re.escape(name)}"\s*:\s*"([^"\r\n]*)"',
+            text,
+            flags=re.IGNORECASE,
+        )
+        return match.group(1).strip() if match else ""
+
+    style = _coerce_reasoning_style_label(string_field("primary_style"))
+    if style is None:
+        style = _coerce_reasoning_style_label(string_field("style"))
+    if style is None:
+        return None
+
+    secondary_styles: list[ReasoningStyle] = []
+    secondary_match = re.search(
+        r'"secondary_styles"\s*:\s*\[(.*?)\]',
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if secondary_match:
+        for label in re.findall(r'"([^"\r\n]+)"', secondary_match.group(1)):
+            parsed = _coerce_reasoning_style_label(label)
+            if parsed is not None and parsed != style and parsed not in secondary_styles:
+                secondary_styles.append(parsed)
+
+    format_status = string_field("format_status").lower() or "valid"
+    if format_status not in FORMAT_STATUSES:
+        format_status = "valid"
+
+    confidence_match = re.search(
+        r'"confidence"\s*:\s*([0-9]*\.?[0-9]+)',
+        text,
+        flags=re.IGNORECASE,
+    )
+    confidence = _clamp01(confidence_match.group(1), 0.5) if confidence_match else 0.5
+
+    return ReasoningStyleResult(
+        primary_style=style,
+        secondary_styles=secondary_styles,
+        format_status=format_status,
+        confidence=confidence,
+        evidence="parsed from malformed JSON response",
+        raw_response=response or "",
+    )
+
+
 def _parse_style_json_response(response: str) -> Optional[ReasoningStyleResult]:
     """Parse the JSON style-classification response."""
     data = _extract_json(response)
     if not isinstance(data, dict):
+        result = _parse_malformed_style_json_response(response)
+        if result is not None:
+            return result
         style = _parse_style_response(response)
         if style is None:
             return None
@@ -513,10 +598,7 @@ def _extract_json(response: str) -> Optional[object]:
         return None
     import re
 
-    text = response.strip()
-    fenced = re.search(r"```(?:json)?\s*(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
-    if fenced:
-        text = fenced.group(1).strip()
+    text = _strip_fenced_payload(response)
 
     start = text.find("{")
     end = text.rfind("}")
