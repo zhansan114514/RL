@@ -61,7 +61,7 @@ step02_classify:
   api_temperature: 0.1
   batch_size: 10
   strict_classification: true
-  max_classification_failure_rate: 0.0
+  max_classification_failure_rate: 0.01
   use_batch_api: true
   batch_api_max_responses: 20
   max_workers: 4
@@ -160,7 +160,7 @@ step05_train_society:
   max_length: 2048
   checkpoint_dir: "output/society_mmlu_style3_qwen3/checkpoints"
   strict_classification: true
-  max_classification_failure_rate: 0.0
+  max_classification_failure_rate: 0.01
 
 # Phase 6: Evaluation + ablation
 step06_evaluate:

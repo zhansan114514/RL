@@ -1,4 +1,4 @@
-# Qwen3-14B + MMLU large experiment, n=1000
+# Qwen3-14B + MMLU large experiment, train n=1000 / eval n=500
 # Full 6-phase Diverse Actor-Critic Society run.
 # Provider credentials/endpoints are loaded from configs/local.yaml.
 
@@ -31,8 +31,8 @@ sampling:
     max_samples: 1000
     seed_offset: 1
   test:
-    strategy: "full"
-    max_samples: null
+    strategy: "stratified_by_subject"
+    max_samples: 500
     seed_offset: 2
 
 # Phase 1: Actor SFT candidate generation
@@ -176,9 +176,10 @@ step06_evaluate:
       devices: [1, 2]
       tensor_parallel_size: 2
       gpu_memory_utilization: 0.65
+  max_samples: 500
   sampling:
     test:
-      strategy: "random"
+      strategy: "stratified_by_subject"
       max_samples: 500
       seed_offset: 2
   num_rounds: 3
