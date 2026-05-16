@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from _utils import setup_logging
 from src.prompts.control_tokens import ensure_no_think, strip_no_think
+from src.prompts.actor_prompts import ACTOR_PROMPT_VERSION
 from src.society.agent_registry import ReasoningStyle
 from src.utils.config import ConfigManager
 
@@ -86,6 +87,7 @@ def expected_bootstrap_metadata(args: Any, styles: list[ReasoningStyle]) -> dict
     return {
         "schema_version": 4,
         "generation_mode": "actor_sft_candidates",
+        "actor_prompt_version": ACTOR_PROMPT_VERSION,
         "model_name": str(arg("model_name")),
         "dataset": arg("dataset"),
         "seed": int(arg("seed")),
@@ -142,8 +144,9 @@ def build_style_prompt(
     ))
     prompt = (
         f"This is independent SFT candidate generation attempt {generation_index + 1} "
-        f"at temperature {temperature:g}. Produce a complete response in the "
-        "requested style.\n\n"
+        f"at temperature {temperature:g}. Follow the exact visible output contract "
+        "for the requested Actor style. Do not add extra paragraphs, headings, "
+        "or alternative analyses.\n\n"
         f"{base_prompt}"
     )
     return ensure_no_think(prompt)

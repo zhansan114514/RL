@@ -38,6 +38,7 @@ def test_classification_checkpoint_metadata_tracks_input_fingerprint(tmp_path):
     second = classify.checkpoint_metadata(args)
 
     assert first["input_file"]["sha256"] != second["input_file"]["sha256"]
+    assert first["style_classifier_version"] == "style_v6_actor_contract"
 
 
 def test_classification_counts_include_resumed_failures():
@@ -474,6 +475,18 @@ def test_reasoning_style_parser_recovers_fenced_json_with_unescaped_quotes():
     assert parsed.confidence == 0.9
 
 
+def test_reasoning_style_classifier_prompt_matches_actor_contract():
+    from src.society.data_classifier import REASONING_STYLE_PROMPT, STYLE_CLASSIFIER_VERSION
+
+    assert STYLE_CLASSIFIER_VERSION == "style_v6_actor_contract"
+    assert "Markers are strong signals, not mandatory requirements" in REASONING_STYLE_PROMPT
+    assert '"Direct reason:" usually signals direct' in REASONING_STYLE_PROMPT
+    assert "brief fact or definition" in REASONING_STYLE_PROMPT
+    assert '"Key evidence:" or "Application:" usually signals evidence' in REASONING_STYLE_PROMPT
+    assert '"Option analysis:" or "Elimination:" signals elimination' in REASONING_STYLE_PROMPT
+    assert "lower confidence instead of forcing high confidence" in REASONING_STYLE_PROMPT
+
+
 def test_society_actor_prompt_builder_conditions_generation_once():
     from src.prompts.prompt_builder import build_simple_actor_prompt
     from src.society.agent_registry import ReasoningStyle
@@ -489,8 +502,11 @@ def test_society_actor_prompt_builder_conditions_generation_once():
     )
 
     assert prompt.count("You are Actor-elimination") == 1
-    assert "comparing the options" in prompt
+    assert "Compare the available options" in prompt
+    assert "Option analysis:" in prompt
+    assert "Elimination:" in prompt
     assert prompt.count("The final result is <answer>.") == 1
+    assert prompt.endswith("The final result is <answer>.")
 
 
 def test_society_actor_dpo_prompt_is_style_conditioned(monkeypatch, tmp_path):
@@ -554,8 +570,10 @@ def test_society_actor_dpo_prompt_is_style_conditioned(monkeypatch, tmp_path):
     assert prompt.startswith("/no_think\n")
     assert prompt.count("/no_think") == 1
     assert prompt.count("You are Actor-direct") == 1
-    assert "shortest sufficient reasoning" in prompt
+    assert "Direct reason:" in prompt
+    assert "no option comparison and no evidence framework" in prompt
     assert prompt.count("The final result is <answer>.") == 1
+    assert prompt.endswith("The final result is <answer>.")
     assert "FINAL_ANSWER" not in prompt
 
 
@@ -581,6 +599,7 @@ def test_actor_sft_prompt_matches_simple_actor_prompt():
     assert prompt == expected
     assert prompt.count("You are Actor-evidence") == 1
     assert prompt.count("The final result is <answer>.") == 1
+    assert prompt.endswith("The final result is <answer>.")
 
 
 def test_society_critic_dpo_ignores_stale_stored_prompt(monkeypatch, tmp_path):

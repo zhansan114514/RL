@@ -26,6 +26,7 @@ from src.society.agent_registry import ReasoningStyle
 from src.society.actor_response_quality import is_trainable_actor_response
 from src.society.data_classifier import (
     ClassificationError,
+    STYLE_CLASSIFIER_VERSION,
     classify_reasoning_style,
 )
 from src.utils.config import ConfigManager
@@ -122,6 +123,7 @@ def checkpoint_metadata(args: Any) -> dict[str, Any]:
         "input_dir": str(getattr(args, "input_dir", "")),
         "input_file": fingerprint_file(trajectory_file),
         "reasoning_styles": sorted(VALID_STYLES),
+        "style_classifier_version": STYLE_CLASSIFIER_VERSION,
         "min_style_confidence": float(getattr(args, "min_style_confidence", 0.65)),
     }
 

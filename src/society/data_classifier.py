@@ -94,7 +94,7 @@ def normalize_chat_api_url(api_url: str) -> str:
 
 # Cache/prompt versions.  Bump these when classifier prompts or label
 # semantics change so stale classification artifacts are not silently reused.
-STYLE_CLASSIFIER_VERSION = "style_v5_natural_prompted"
+STYLE_CLASSIFIER_VERSION = "style_v6_actor_contract"
 ERROR_PROFILE_CLASSIFIER_VERSION = "error_profile_v2_no_computation"
 
 
@@ -111,19 +111,34 @@ Ignore the final answer sentence ("The final result is <answer>.") and classify
 only the explanatory reasoning body.
 
 Definitions:
-- direct: concise answer with minimal explanation; does not systematically cite evidence or compare options
-- evidence: uses facts, definitions, concepts, question wording, or domain knowledge as explicit evidence
-- elimination: compares answer options, rules out alternatives, or explains why one option is better than the others
+- direct: concise answer-first reasoning with at most one short justification. A
+  single factual assertion, definition, or domain term inside a short sentence is
+  still direct unless the response frames it as explicit evidence.
+- evidence: explicitly grounds the answer in facts, definitions, concepts,
+  question wording, clues, or domain knowledge, then applies that support to the
+  answer.
+- elimination: compares answer options, rules out alternatives, rejects weaker
+  choices, or explains why one option is better than the others.
 
-High-precision rules:
-- If the response contains "Direct reason:" and does not compare options, classify as direct.
-- If it contains "Key evidence:" or "Application:" with a fact/definition/question clue, classify as evidence.
-- If it contains "Option analysis:", "Elimination:", rules out choices, or compares multiple options, classify as elimination.
+Marker and behavior signals:
+- Markers are strong signals, not mandatory requirements. Classify the actual
+  reasoning behavior even when a marker is missing.
+- "Direct reason:" usually signals direct. If it is one short sentence and does
+  not compare options, classify as direct even when the sentence contains a
+  brief fact or definition.
+- "Key evidence:" or "Application:" usually signals evidence when the response
+  uses a fact, definition, concept, clue, or wording as support for the answer.
+- "Option analysis:" or "Elimination:" signals elimination when the response
+  compares choices, rules out alternatives, or says why one option is stronger.
 
 Tie-breakers:
 1. Prefer elimination when the reasoning evaluates alternatives or rules out options.
-2. Prefer evidence when it explicitly cites a fact, definition, concept, or wording clue.
-3. Use direct only when the reasoning is mostly a short justification without explicit evidence or option comparison.
+2. Otherwise prefer evidence when the response explicitly frames facts,
+   definitions, concepts, or wording clues as support for the answer.
+3. Otherwise use direct for a short answer-first justification, including a
+   brief factual or definitional sentence.
+4. If styles are mixed and the primary style is unclear, choose the dominant
+   visible behavior and lower confidence instead of forcing high confidence.
 
 Return JSON only (pick ONE value for each field, do NOT use "|"):
 {{

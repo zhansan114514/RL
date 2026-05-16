@@ -143,16 +143,16 @@ def resolve_critic_skill(value: str) -> CriticSkill:
 
 ACTOR_STYLE_PROMPTS = {
     ReasoningStyle.DIRECT: (
-        "Solve with the shortest sufficient reasoning. Avoid unnecessary discussion "
-        "and focus on the most direct route to the answer."
+        "Solve in the direct style: use one short answer-first justification, "
+        "do not frame facts as evidence, and do not compare options."
     ),
     ReasoningStyle.EVIDENCE: (
-        "Identify key facts, concepts, definitions, wording, or evidence from "
-        "the question and use them to justify the answer."
+        "Solve in the evidence style: identify the decisive fact, concept, "
+        "definition, wording clue, or domain knowledge and apply it to the answer."
     ),
     ReasoningStyle.ELIMINATION: (
-        "Compare answer choices, eliminate incorrect or weaker options, and "
-        "explain why the selected option is best."
+        "Solve in the elimination style: compare choices, eliminate incorrect "
+        "or weaker options, and explain why the selected option is best."
     ),
 }
 

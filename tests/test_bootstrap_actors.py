@@ -50,10 +50,13 @@ def test_style_prompt_contains_style_guidance_and_contract():
     )
 
     assert prompt.count("Actor-evidence") == 1
-    assert "key facts, definitions" in prompt
+    assert "Key evidence:" in prompt
+    assert "Application:" in prompt
     assert "independent SFT candidate generation attempt 3" in prompt
     assert "temperature 1" in prompt
+    assert "Follow the exact visible output contract" in prompt
     assert prompt.count("The final result is <answer>.") == 1
+    assert prompt.endswith("The final result is <answer>.")
     assert "FINAL_ANSWER" not in prompt
 
 
@@ -126,6 +129,7 @@ def test_style_temperature_generation_batches_by_temperature():
     assert first["debate_rounds"] == []
     assert first["metadata"]["schema_version"] == 4
     assert first["metadata"]["generation_mode"] == "actor_sft_candidates"
+    assert first["metadata"]["actor_prompt_version"] == "actor_style_contract_v2"
     assert first["metadata"]["temperatures"] == [0.4, 0.7]
     assert len(first["initial_responses"]) == 12
 

@@ -42,17 +42,38 @@ def test_problem_text_renders_multiple_choice_options():
     assert "(D) 6" in text
 
 
-def test_initial_actor_prompt_uses_light_final_result_anchor():
+def test_initial_actor_prompt_uses_direct_contract():
     prompt = build_initial_actor_prompt(
         ReasoningStyle.DIRECT,
         "Question:\nWhat is 2+2?",
     )
 
     assert "You are Actor-direct" in prompt
-    assert "shortest sufficient reasoning" in prompt
+    assert "direct style" in prompt
+    assert "Direct reason:" in prompt
+    assert "no option comparison and no evidence framework" in prompt
     assert "The final result is <answer>." in prompt
+    assert prompt.endswith("The final result is <answer>.")
     assert "FINAL_ANSWER" not in prompt
     assert "RATIONALE" not in prompt
+
+
+def test_initial_actor_prompt_uses_distinct_style_contracts():
+    evidence = build_initial_actor_prompt(
+        ReasoningStyle.EVIDENCE,
+        "Question:\nWhat is 2+2?",
+    )
+    elimination = build_initial_actor_prompt(
+        ReasoningStyle.ELIMINATION,
+        "Question:\nWhat is 2+2?",
+    )
+
+    assert "Key evidence:" in evidence
+    assert "Application:" in evidence
+    assert "Option analysis:" not in evidence
+    assert "Option analysis:" in elimination
+    assert "Elimination:" in elimination
+    assert "Key evidence:" not in elimination
 
 
 def test_revision_actor_prompt_shows_natural_feedback_only():
@@ -66,8 +87,11 @@ def test_revision_actor_prompt_shows_natural_feedback_only():
     assert "You previously gave this response:" in prompt
     assert "Critics provided the following feedback:" in prompt
     assert "The option mapping is wrong" in prompt
+    assert "Option analysis:" in prompt
+    assert "Elimination:" in prompt
     assert "weight=" not in prompt
     assert "schema_valid" not in prompt
+    assert prompt.count("The final result is <answer>.") == 1
     assert prompt.endswith("The final result is <answer>.")
 
 
@@ -84,6 +108,8 @@ def test_simple_actor_prompt_applies_style_and_options():
 
     assert prompt.startswith("/no_think\n")
     assert "Actor-evidence" in prompt
+    assert "Key evidence:" in prompt
+    assert "Application:" in prompt
     assert "Options:" in prompt
     assert "The final result is <answer>." in prompt
 
@@ -98,7 +124,9 @@ def test_guided_actor_prompt_keeps_natural_protocol():
 
     assert prompt.startswith("/no_think\n")
     assert "reason toward the answer Yes" in prompt
+    assert "Direct reason:" in prompt
     assert "The final result is <answer>." in prompt
+    assert prompt.count("The final result is <answer>.") == 1
     assert prompt.endswith("The final result is <answer>.")
     assert "FINAL_ANSWER" not in prompt
 
