@@ -56,6 +56,38 @@ ACTOR_STYLE_OUTPUT_CONTRACTS = {
     ),
 }
 
+ACTOR_STYLE_REVISION_OUTPUT_CONTRACTS = {
+    ReasoningStyle.DIRECT: (
+        "Do not add extra headings, bullets, paragraphs, or alternative analyses.\n"
+        "Do not copy placeholder text or angle-bracket examples from the prompt.\n"
+        "Use exactly this visible output format with your actual content:\n"
+        "Direct reason: one short answer-first sentence.\n"
+        "The final result is X.\n"
+        "Replace X with the concrete final answer, such as A, B, C, D, Yes, No, "
+        "or the numeric result."
+    ),
+    ReasoningStyle.EVIDENCE: (
+        "Do not add extra headings, bullets, paragraphs, or option-by-option elimination.\n"
+        "Do not copy placeholder text or angle-bracket examples from the prompt.\n"
+        "Use exactly this visible output format with your actual content:\n"
+        "Key evidence: the decisive fact, definition, concept, or question clue.\n"
+        "Application: why that evidence supports the answer.\n"
+        "The final result is X.\n"
+        "Replace X with the concrete final answer, such as A, B, C, D, Yes, No, "
+        "or the numeric result."
+    ),
+    ReasoningStyle.ELIMINATION: (
+        "Do not add extra headings, bullets, paragraphs, or evidence-only analysis.\n"
+        "Do not copy placeholder text or angle-bracket examples from the prompt.\n"
+        "Use exactly this visible output format with your actual content:\n"
+        "Option analysis: briefly compare options or rule out alternatives.\n"
+        "Elimination: why the selected option remains best.\n"
+        "The final result is X.\n"
+        "Replace X with the concrete final answer, such as A, B, C, D, Yes, No, "
+        "or the numeric result."
+    ),
+}
+
 
 DEFAULT_FINAL_RESULT_INSTRUCTION = (
     "Give a concise natural-language answer.\n"
@@ -72,7 +104,15 @@ def actor_output_contract(style: ReasoningStyle | None, revision: bool = False) 
             "Now revise your answer if needed. You may keep your previous answer "
             "or change it, but make a fresh final decision."
         )
-    parts.append(ACTOR_STYLE_OUTPUT_CONTRACTS.get(style, DEFAULT_FINAL_RESULT_INSTRUCTION))
+        parts.append(
+            ACTOR_STYLE_REVISION_OUTPUT_CONTRACTS.get(
+                style,
+                DEFAULT_FINAL_RESULT_INSTRUCTION
+                + "\nDo not copy placeholder text; write the concrete final answer.",
+            )
+        )
+    else:
+        parts.append(ACTOR_STYLE_OUTPUT_CONTRACTS.get(style, DEFAULT_FINAL_RESULT_INSTRUCTION))
     return "\n\n".join(parts)
 
 

@@ -91,8 +91,12 @@ def test_revision_actor_prompt_shows_natural_feedback_only():
     assert "Elimination:" in prompt
     assert "weight=" not in prompt
     assert "schema_valid" not in prompt
-    assert prompt.count("The final result is <answer>.") == 1
-    assert prompt.endswith("The final result is <answer>.")
+    assert "The final result is <answer>." not in prompt
+    assert "Do not copy placeholder text" in prompt
+    assert "The final result is X." in prompt
+    assert prompt.endswith(
+        "Replace X with the concrete final answer, such as A, B, C, D, Yes, No, or the numeric result."
+    )
 
 
 def test_simple_actor_prompt_applies_style_and_options():

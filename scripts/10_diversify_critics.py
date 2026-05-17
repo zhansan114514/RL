@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from _utils import setup_logging
 from src.prompts.prompt_builder import build_simple_actor_prompt
+from src.parsing.think_blocks import strip_think_blocks
 from src.society.critic_sft_data import (
     attach_revision_result,
     build_actor_output,
@@ -442,8 +443,10 @@ def _build_revision_prompt(
         sample,
         dataset_name,
         round_num=1,
-        previous_actor_response=str(metadata.get("actor_current_response") or ""),
-        critic_feedback=str(example.get("response") or ""),
+        previous_actor_response=strip_think_blocks(
+            str(metadata.get("actor_current_response") or "")
+        ),
+        critic_feedback=strip_think_blocks(str(example.get("response") or "")),
         style=style,
         no_think=True,
     )

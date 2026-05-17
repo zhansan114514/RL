@@ -64,6 +64,11 @@ def _tokenize_response_only(example, tokenizer, max_length: int):
         response_ids = response_ids[1:]
     if not response_ids:
         raise ValueError("SFT example response produced no tokens")
+    eos_token_id = getattr(tokenizer, "eos_token_id", None)
+    if eos_token_id is not None and (
+        not response_ids or response_ids[-1] != eos_token_id
+    ):
+        response_ids.append(eos_token_id)
 
     if len(response_ids) >= max_length:
         input_ids = response_ids[:max_length]
@@ -202,13 +207,21 @@ def _run():
         run_name=cfg.get("wandb_project") if cfg.get("use_wandb") else None,
     )
 
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        train_dataset=tokenized,
-        tokenizer=tokenizer,
-        data_collator=ResponseOnlyDataCollator(tokenizer),
-    )
+    trainer_kwargs = {
+        "model": model,
+        "args": training_args,
+        "train_dataset": tokenized,
+        "data_collator": ResponseOnlyDataCollator(tokenizer),
+    }
+    import inspect
+
+    trainer_params = inspect.signature(Trainer.__init__).parameters
+    if "processing_class" in trainer_params:
+        trainer_kwargs["processing_class"] = tokenizer
+    else:
+        trainer_kwargs["tokenizer"] = tokenizer
+
+    trainer = Trainer(**trainer_kwargs)
 
     logger.info("Starting SFT training...")
     trainer.train()

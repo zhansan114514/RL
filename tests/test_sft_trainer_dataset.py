@@ -6,6 +6,7 @@ from __future__ import annotations
 class FakeTokenizer:
     pad_token_id = 0
     bos_token_id = 101
+    eos_token_id = 102
 
     def __call__(
         self,
@@ -30,9 +31,13 @@ def test_response_only_tokenization_masks_prompt_tokens():
     tokenized = _tokenize_response_only(example, tokenizer, max_length=128)
 
     prompt_len = len(tokenizer("Prompt:", add_special_tokens=True)["input_ids"])
-    assert tokenized["input_ids"] == tokenizer("Prompt: Answer", add_special_tokens=True)["input_ids"]
+    expected = tokenizer("Prompt: Answer", add_special_tokens=True)["input_ids"] + [
+        tokenizer.eos_token_id
+    ]
+    assert tokenized["input_ids"] == expected
     assert tokenized["labels"][:prompt_len] == [-100] * prompt_len
     assert tokenized["labels"][prompt_len:] == tokenized["input_ids"][prompt_len:]
+    assert tokenized["labels"][-1] == tokenizer.eos_token_id
     assert any(label != -100 for label in tokenized["labels"])
 
 
